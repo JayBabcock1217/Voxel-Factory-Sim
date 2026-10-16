@@ -1,0 +1,160 @@
+using Godot;
+using System;
+
+namespace FactorySim.Voxel;
+
+/// <summary>
+/// Canonical voxel material ids. Id 0 is always air (no material); solid
+/// materials start at 1.
+///
+/// These are the DEFAULT material ids. Generation is data-driven: it reads the
+/// ids configured on each biome / structure, so a world can use any id up to
+/// 255. The constants below are the defaults plus the "tool / sentinel" ids:
+/// <see cref="Placed"/> is the material the add-voxel tool stamps, and the
+/// mesh builders treat id 0 (air) as their "no material" sentinel.
+/// </summary>
+public static class VoxelMaterialIds
+{
+	public const int Air = 0;
+	public const int Grass = 1;
+	public const int Dirt = 2;
+	public const int Stone = 3;
+	public const int CaveStone = 4;
+	public const int Trunk = 5;
+	public const int Leaves = 6;
+	public const int Rock = 7;
+	public const int Placed = 8; // material used by the "add voxel" tool
+	public const int Sand = 9;
+	public const int Snow = 10;
+	public const int Ice = 11;
+	public const int Cactus = 12;
+	public const int CoalOre = 13;
+	public const int IronOre = 14;
+	public const int CopperOre = 15;
+	public const int GoldOre = 16;
+	public const int Bedrock = 17; // unbreakable, fills the world floor (y 0..1)
+}
+
+/// <summary>
+/// Full-health value for a freshly generated or placed voxel. The voxel health
+/// system stores health as a percentage of this value (100.0 = undamaged).
+/// </summary>
+public static class VoxelHealth
+{
+	/// <summary>Full health (percentage). Every voxel starts at this value.</summary>
+	public const float MaxHealth = 100f;
+}
+
+/// <summary>
+/// The shared set of materials used by every chunk mesh.
+/// Index into <see cref="Materials"/> is <c>materialId - 1</c> (id 0 = air has no
+/// material, so the array is sized to the number of material defs, not 256).
+///
+/// The StandardMaterial3D instances are created ONCE and then mutated in place
+/// by <see cref="Apply(VoxelMaterialConfig)"/>, so inspector edits to the
+/// material config update every already-built chunk without remeshing. When the
+/// material list changes (count or ids), the palette resizes; the caller flags
+/// the chunks for a rebuild because their material indices then shift.
+/// </summary>
+public sealed class VoxelMaterialPalette
+{
+	/// <summary>Material for each solid voxel type (index = material id - 1).</summary>
+	public StandardMaterial3D[] Materials { get; private set; } = Array.Empty<StandardMaterial3D>();
+
+	/// <summary>Per-material texture tiling, consumed by the mesh builders when they emit UVs.</summary>
+	public float[] TextureScales { get; private set; } = Array.Empty<float>();
+
+	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
+	public int MaterialCount { get; private set; }
+
+	public VoxelMaterialPalette()
+	{
+		// Sized lazily by Resize(); start empty so a palette can exist before a
+		// config is wired (the world and the test suite apply a config at setup).
+	}
+
+	/// <summary>True when <paramref name="id"/> is a valid, configured solid material id (1..count).</summary>
+	public bool HasMaterial(int id) => id > 0 && id <= Materials.Length;
+
+	/// <summary>
+	/// Copies every config value onto the material instances. Instances already
+	/// occupy id-ordered slots (slot <c>i</c> = the <c>i</c>-th def in id order),
+	/// so each is mutated in place — a live update that needs no remesh. When the
+	/// material SET changes (count or ids), the caller resizes via
+	/// <see cref="Resize"/> and flags chunks for a rebuild.
+	/// </summary>
+	public void Apply(VoxelMaterialConfig cfg)
+	{
+		var defs = cfg.GetAll(); // id order, id 1 first
+		int n = Math.Min(Materials.Length, defs.Length);
+		for (int i = 0; i < n; i++)
+		{
+			if (defs[i].Entry != null)
+			{
+				ApplyEntry(Materials[i], defs[i].Entry);
+			}
+			TextureScales[i] = defs[i].Entry != null ? defs[i].Entry.TextureScale : 1f;
+		}
+	}
+
+	/// <summary>
+	/// Resizes the palette to <paramref name="count"/> slots. Existing slots are
+	/// kept (and re-<see cref="Apply"/>-ed in place); new slots get a fresh
+	/// StandardMaterial3D with the shared faceted defaults. Call this when the
+	/// material list's count changes, then <see cref="Apply"/> to fill values.
+	/// </summary>
+	public void Resize(int count)
+	{
+		if (count < 0)
+		{
+			count = 0;
+		}
+
+		var old = Materials;
+		var oldScales = TextureScales;
+		var newMaterials = new StandardMaterial3D[count];
+		var newScales = new float[count];
+		int keep = Math.Min(old.Length, count);
+		for (int i = 0; i < keep; i++)
+		{
+			newMaterials[i] = old[i];
+			newScales[i] = oldScales[i];
+		}
+		for (int i = keep; i < count; i++)
+		{
+			// The faceted "flat shaded" look (Astroneer-style) is achieved
+			// geometrically in MeshBuilder: each triangle owns its 3 vertices
+			// and they all carry the face normal, so no face ever blends
+			// normals with a neighbour. Cheap on integrated graphics.
+			newMaterials[i] = new StandardMaterial3D
+			{
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.PerVertex,
+				Roughness = 1.0f,
+				SpecularMode = BaseMaterial3D.SpecularModeEnum.SchlickGgx,
+			};
+			newScales[i] = 1f;
+		}
+
+		Materials = newMaterials;
+		TextureScales = newScales;
+		MaterialCount = count;
+	}
+
+	private static void ApplyEntry(StandardMaterial3D material, VoxelMaterialEntry entry)
+	{
+		material.AlbedoColor = entry.AlbedoColor;
+		material.AlbedoTexture = entry.Texture;
+
+		// Repeat mode is what lets TextureScale tile beyond one 0..1 face:
+		// without it the sampler clamps at UV (1,1).
+		material.TextureRepeat = entry.Texture != null;
+
+		material.ShadingMode = entry.ShadingMode;
+		material.Transparency = entry.Transparency;
+		material.Metallic = entry.Metallic;
+		material.Roughness = entry.Roughness;
+		material.EmissionEnabled = entry.EmissionEnabled;
+		material.Emission = entry.EmissionColor;
+		material.EmissionEnergyMultiplier = entry.EmissionEnergy;
+	}
+}

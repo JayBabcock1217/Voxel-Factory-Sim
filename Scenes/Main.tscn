@@ -1,0 +1,80 @@
+[gd_scene format=3 uid="uid://p5wjbqmowa1v"]
+
+[ext_resource type="PackedScene" uid="uid://canuo546wkmue" path="res://Scenes/Player.tscn" id="1_player"]
+[ext_resource type="Script" uid="uid://daj7bhoiisoas" path="res://Scripts/Voxel/VoxelWorld.cs" id="2_voxelworld"]
+[ext_resource type="Resource" uid="uid://ceagxkmog2hqm" path="res://Resources/BiomeConfig.tres" id="3_biomeconfig"]
+[ext_resource type="Script" uid="uid://bf5pg3ribm0gm" path="res://Scripts/Items/Inventory.cs" id="4_inventory"]
+[ext_resource type="Script" uid="uid://kue2smumh6k5" path="res://Scripts/UI/InventoryUI.cs" id="5_inventoryui"]
+[ext_resource type="Script" uid="uid://b6yvt3qixbivc" path="res://Scripts/UI/FpsCounter.cs" id="6_fpscounter"]
+[ext_resource type="Script" uid="uid://dthtm23wmaj37" path="res://Scripts/UI/PauseMenu.cs" id="7_pausemenu"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMaterial_world"]
+sky_top_color = Color(0.25, 0.45, 0.75, 1)
+sky_horizon_color = Color(0.65, 0.72, 0.8, 1)
+ground_bottom_color = Color(0.2, 0.2, 0.2, 1)
+ground_horizon_color = Color(0.5, 0.5, 0.5, 1)
+
+[sub_resource type="Sky" id="Sky_world"]
+sky_material = SubResource("SkyMaterial_world")
+
+[sub_resource type="Environment" id="Environment_world"]
+background_mode = 2
+sky = SubResource("Sky_world")
+tonemap_mode = 2
+
+[node name="Main" type="Node3D" unique_id=189989706]
+
+[node name="Enviornment" type="Node3D" parent="." unique_id=31530786]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="Enviornment" unique_id=1288290266]
+environment = SubResource("Environment_world")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="Enviornment" unique_id=761222868]
+transform = Transform3D(-0.8660253, -0.35355338, 0.3535538, 0, 0.70710725, 0.7071064, -0.50000024, 0.612372, -0.6123727, 0, 0, 0)
+shadow_enabled = true
+
+[node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
+script = ExtResource("2_voxelworld")
+ChunkHeight = 256
+RenderDistanceChunks = 16
+ChunksPerFrame = 1
+Seed = 123123
+SpawnOffset = 5.0
+BaseHeight = 128.0
+HeightAmplitude = 82.5
+HeightFrequency = 0.005
+CaveFrequency = 0.01
+CavePersistence = 1.0
+CaveThreshold = 0.12
+CaveCeiling = 0
+BiomeConfig = ExtResource("3_biomeconfig")
+BiomeNoiseFrequency = 0.001
+FoliageDensity = 0.1
+EnableRocks = false
+MeshMode = 1
+LodRenderDistanceChunks = 256
+
+[node name="Player" type="Node3D" parent="." unique_id=481445753]
+
+[node name="PlayerCharacter" parent="Player" unique_id=1965905934 instance=ExtResource("1_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+wall_min_slide_angle = 0.87266463
+floor_max_angle = 1.3089969
+WalkSpeed = 4.0
+SprintSpeed = 12.0
+Acceleration = 24.0
+
+[node name="Drops" type="Node3D" parent="." unique_id=395177493]
+
+[node name="Inventory" type="Node" parent="." unique_id=353168315]
+script = ExtResource("4_inventory")
+
+[node name="InventoryUI" type="CanvasLayer" parent="Inventory" unique_id=302489072]
+script = ExtResource("5_inventoryui")
+
+[node name="FpsCounter" type="Node" parent="." unique_id=1562140855]
+script = ExtResource("6_fpscounter")
+
+[node name="PauseMenu" type="CanvasLayer" parent="." unique_id=-2147483648]
+layer = 50
+script = ExtResource("7_pausemenu")

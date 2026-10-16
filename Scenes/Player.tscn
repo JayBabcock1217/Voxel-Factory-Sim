@@ -1,0 +1,43 @@
+[gd_scene format=3 uid="uid://canuo546wkmue"]
+
+[ext_resource type="Script" uid="uid://c24bd5dbxt2nc" path="res://Scripts/Player.cs" id="1_player"]
+[ext_resource type="Script" uid="uid://dlym8abq0owo0" path="res://Scripts/Voxel/VoxelTool.cs" id="2_voxeltool"]
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_body"]
+radius = 0.4
+height = 1.8
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_body"]
+albedo_color = Color(0.25, 0.55, 0.95, 1)
+roughness = 0.6
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_body"]
+material = SubResource("StandardMaterial3D_body")
+radius = 0.4
+height = 1.8
+
+[sub_resource type="SphereShape3D" id="SphereShape_pickup"]
+radius = 1.2
+
+[node name="Player" type="CharacterBody3D" unique_id=838656205]
+script = ExtResource("1_player")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=591254844]
+shape = SubResource("CapsuleShape3D_body")
+
+[node name="Mesh" type="MeshInstance3D" parent="." unique_id=1021336397]
+mesh = SubResource("CapsuleMesh_body")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=1797128082]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+
+[node name="VoxelTool" type="Node3D" parent="." unique_id=1351639177]
+script = ExtResource("2_voxeltool")
+
+[node name="PickupArea" type="Area3D" parent="."]
+collision_layer = 0
+collision_mask = 4
+
+[node name="PickupShape" type="CollisionShape3D" parent="PickupArea"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
+shape = SubResource("SphereShape_pickup")

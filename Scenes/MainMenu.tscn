@@ -1,0 +1,7 @@
+[gd_scene format=3 uid="uid://c8skfy68lxu21"]
+
+[ext_resource type="Script" path="res://Scripts/UI/MainMenu.cs" id="1_mainmenu"]
+
+[node name="MainMenu" type="CanvasLayer"]
+layer = 1
+script = ExtResource("1_mainmenu")

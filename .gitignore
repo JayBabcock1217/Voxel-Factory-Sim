@@ -1,0 +1,12 @@
+# Godot 4+ specific ignores
+.godot/
+/android/
+.aider*
+
+# Local-only agent / tooling config
+.pi/
+.kilo/
+
+# Throwaway scratch files
+hello.py
+hello_world.py

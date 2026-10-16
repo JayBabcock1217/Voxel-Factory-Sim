@@ -1,0 +1,26 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://Scripts/Items/VoxelDrop.cs" id="1_drop"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_drop"]
+size = Vector3(0.3, 0.3, 0.3)
+
+[sub_resource type="SphereShape3D" id="SphereShape_drop"]
+radius = 0.25
+
+[node name="VoxelDrop" type="CharacterBody3D"]
+script = ExtResource("1_drop")
+collision_layer = 2
+collision_mask = 1
+
+[node name="DropPickup" type="Area3D" parent="."]
+collision_layer = 4
+collision_mask = 0
+[node name="PickupShape" type="CollisionShape3D" parent="DropPickup"]
+shape = SubResource("SphereShape_drop")
+
+[node name="DropMesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_drop")
+
+[node name="DropCollision" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape_drop")

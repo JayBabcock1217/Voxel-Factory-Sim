@@ -1,0 +1,41 @@
+[gd_resource type="Resource" script_class="BiomeConfig" format=3 uid="uid://ceagxkmog2hqm"]
+
+[ext_resource type="Script" uid="uid://1c3fmmbvio43" path="res://Scripts/Voxel/BiomeConfig.cs" id="1_cfg"]
+[ext_resource type="Script" uid="uid://dlnbwigl2iqxo" path="res://Scripts/Voxel/BiomeDef.cs" id="2_def"]
+
+[sub_resource type="Resource" id="biome_plains"]
+script = ExtResource("2_def")
+Name = "Plains"
+DensityThreshold = 0.1
+Probability = 0.35
+
+[sub_resource type="Resource" id="biome_desert"]
+script = ExtResource("2_def")
+Name = "Desert"
+Weight = 0.0
+HeightModifier = -2.0
+AmplitudeModifier = 0.8
+SurfaceMaterial = 9
+SubsurfaceMaterial = 9
+TrunkMaterial = 0
+LeafMaterial = 0
+CactusMaterial = 12
+Probability = 0.0
+TrunkMinHeight = 4
+TrunkMaxHeight = 6
+IsCactus = true
+
+[sub_resource type="Resource" id="biome_snow"]
+script = ExtResource("2_def")
+Name = "Snow"
+Weight = 0.4
+HeightModifier = 4.0
+SurfaceMaterial = 10
+TrunkMaterial = 0
+LeafMaterial = 0
+EnableFoliage = false
+Probability = 0.0
+
+[resource]
+script = ExtResource("1_cfg")
+Biomes = [SubResource("biome_plains"), SubResource("biome_desert"), SubResource("biome_snow")]
