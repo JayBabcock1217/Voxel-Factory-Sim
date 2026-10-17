@@ -84,13 +84,17 @@ public partial class SettingsPanel : Control
 		_resolutionButton.Selected = resIndex;
 
 		_fullscreenButton.ButtonPressed = _store.Fullscreen;
+		_fullscreenButton.Text = _OnOffText(_store.Fullscreen);
 		_vSyncButton.ButtonPressed = _store.VSync;
+		_vSyncButton.Text = _OnOffText(_store.VSync);
 		_fpsCap.Value = _store.FpsCap;
 		_fpsCapValue.Text = _store.FpsCap == 0 ? "∞" : $"{_store.FpsCap}";
 
 		_meshModeButton.Selected = _store.MeshMode;
 		_shadowsButton.ButtonPressed = _store.ShadowsEnabled;
+		_shadowsButton.Text = _OnOffText(_store.ShadowsEnabled);
 		_fogButton.ButtonPressed = _store.FogEnabled;
+		_fogButton.Text = _OnOffText(_store.FogEnabled);
 		_fogDensity.Value = _store.FogDensity;
 		_fogDensityValue.Text = _store.FogDensity.ToString("0.000");
 		_ambientLight.Value = _store.AmbientLightEnergy;
@@ -103,6 +107,7 @@ public partial class SettingsPanel : Control
 		_lodDistance.Value = _store.LodRenderDistance;
 		_lodDistanceValue.Text = $"{_store.LodRenderDistance}";
 		_lodEnabled.ButtonPressed = _store.LodEnabled;
+		_lodEnabled.Text = _OnOffText(_store.LodEnabled);
 	}
 
 	private static readonly (int Width, int Height)[] PresetResolutions =
@@ -125,6 +130,9 @@ public partial class SettingsPanel : Control
 		}
 		return -1;
 	}
+
+	/// <summary>Human-readable text for an on/off toggle's current state.</summary>
+	private static string _OnOffText(bool on) => on ? "On" : "Off";
 
 	private void BuildUi()
 	{
@@ -342,6 +350,7 @@ public partial class SettingsPanel : Control
 		toggle.Toggled += pressed =>
 		{
 			_store.Fullscreen = pressed;
+			toggle.Text = _OnOffText(pressed);
 			_store.Save();
 			_store.ApplyDisplay();
 		};
@@ -360,6 +369,7 @@ public partial class SettingsPanel : Control
 		toggle.Toggled += pressed =>
 		{
 			_store.VSync = pressed;
+			toggle.Text = _OnOffText(pressed);
 			_store.Save();
 			_store.ApplyDisplay();
 		};
@@ -397,6 +407,7 @@ public partial class SettingsPanel : Control
 		toggle.Toggled += pressed =>
 		{
 			_store.ShadowsEnabled = pressed;
+			toggle.Text = _OnOffText(pressed);
 			_store.Save();
 			_store.Apply();
 		};
@@ -415,6 +426,7 @@ public partial class SettingsPanel : Control
 		toggle.Toggled += pressed =>
 		{
 			_store.FogEnabled = pressed;
+			toggle.Text = _OnOffText(pressed);
 			_store.Save();
 			_store.Apply();
 		};
@@ -433,6 +445,7 @@ public partial class SettingsPanel : Control
 		toggle.Toggled += pressed =>
 		{
 			_store.LodEnabled = pressed;
+			toggle.Text = _OnOffText(pressed);
 			_store.Save();
 			_store.Apply();
 		};

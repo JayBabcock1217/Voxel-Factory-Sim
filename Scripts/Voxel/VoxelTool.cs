@@ -134,10 +134,14 @@ public partial class VoxelTool : Node3D
 		_highlight = new Node3D { Name = "Highlight", Visible = false };
 		AddChild(_highlight);
 
+		// No placeholder mesh: a bare `new Mesh()` is an abstract base whose
+		// virtuals (_get_surface_count, _get_blend_shape_count) are not
+		// overridden, so assigning it to a MeshInstance3D throws
+		// "Required virtual method must be overridden". The instance starts
+		// with no mesh and stays invisible until the first target is built.
 		_highlightMeshInstance = new MeshInstance3D
 		{
 			Name = "HighlightMesh",
-			Mesh = new Mesh(), // placeholder; replaced on the first target
 			MaterialOverride = _highlightMaterial,
 			Visible = false,
 		};
@@ -228,7 +232,16 @@ public partial class VoxelTool : Node3D
 
 			// Re-shape the highlight to the target's own voxel geometry (cached
 			// per voxel so the mesh is only rebuilt when the target changes).
-			EnsureHighlightMesh(hitVoxel);
+			// Guarded: a bad target (e.g. a mid-rebuild chunk) must never spam
+			// the console — on failure we keep the previous mesh.
+			try
+			{
+				EnsureHighlightMesh(hitVoxel);
+			}
+			catch (System.Exception e)
+			{
+				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {hitVoxel}: {e.Message}");
+			}
 		}
 		else
 		{
@@ -504,10 +517,23 @@ public partial class VoxelTool : Node3D
 		_highlightPivotWorld = new Vector3(voxel.X, voxel.Y, voxel.Z) * vs
 			+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
 		var faces = MeshBuilder.BuildVisual(data, voxel.X, voxel.Y, 1f, _world.Palette, solidQuery);
-		_highlightWireframe = BuildEdgeMesh(faces, _highlightPivotWorld);
+		var wire = BuildEdgeMesh(faces, _highlightPivotWorld);
 		_meshedTarget = voxel;
 
-		_highlightMeshInstance.Mesh = _highlightWireframe;
+		// BuildEdgeMesh returns null when the voxel has no exposed faces (fully
+		// buried / at an unloaded border). In that case keep whatever mesh is
+		// already assigned and just hide the highlight — assigning a bare Mesh()
+		// would re-trigger the "required virtual method" error.
+		if (wire == null)
+		{
+			_highlightWireframe = null;
+			_highlightMeshInstance.Visible = false;
+			_highlight.Visible = false;
+			return;
+		}
+
+		_highlightWireframe = wire;
+		_highlightMeshInstance.Mesh = wire;
 		_highlightMeshInstance.MaterialOverride = _highlightMaterial;
 		_highlightMeshInstance.Visible = true;
 		_highlight.Visible = true;
@@ -554,15 +580,29 @@ public partial class VoxelTool : Node3D
 	/// </summary>
 	private static Mesh BuildEdgeMesh(ArrayMesh mesh, Vector3 worldOffset)
 	{
+		// A voxel with no exposed faces (fully buried, or at an unloaded chunk
+		// border where every neighbour reads as solid) yields an ArrayMesh with
+		// ZERO surfaces. CreateFromSurface on an empty mesh throws
+		// "Index 0 out of bounds (surfaces.size() = 0)", so bail before the loop.
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+		{
+			return null;
+		}
+
 		var lines = new List<Vector3>();
 		var seen = new HashSet<long>();
 		var data = new MeshDataTool();
 
-		for (int s = 0; ; s++)
+		// Bound by the real surface count: CreateFromSurface returns Error.Ok
+		// even for an out-of-bounds surface index (it only throws inside the
+		// C++ surface_get_primitive_type), so the loop must stop at
+		// GetSurfaceCount() or it overruns and errors.
+		int surfaceCount = mesh.GetSurfaceCount();
+		for (int s = 0; s < surfaceCount; s++)
 		{
 			if (data.CreateFromSurface(mesh, s) != Error.Ok)
 			{
-				break; // no more surfaces
+				continue; // surface failed to load; skip it
 			}
 
 			int count = data.GetVertexCount();
@@ -576,9 +616,11 @@ public partial class VoxelTool : Node3D
 
 		if (lines.Count == 0)
 		{
-			// No geometry (e.g. a fully-culled voxel): return an empty mesh so
-			// callers can still assign it without a null check.
-			return new Mesh();
+			// No geometry (e.g. a fully-culled voxel): return null so the caller
+			// hides the highlight instead of assigning a bare, unoverridable
+			// Mesh() (which would raise "required virtual method must be
+			// overridden").
+			return null;
 		}
 
 		var tool = new SurfaceTool();

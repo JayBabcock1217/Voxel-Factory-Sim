@@ -52,7 +52,8 @@ BiomeNoiseFrequency = 0.001
 FoliageDensity = 0.1
 EnableRocks = false
 MeshMode = 1
-LodRenderDistanceChunks = 256
+LodRenderDistanceChunks = 128
+LodDistanceBase = 1.5
 
 [node name="Player" type="Node3D" parent="." unique_id=481445753]
 

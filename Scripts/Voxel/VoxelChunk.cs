@@ -42,6 +42,9 @@ public partial class VoxelChunk : Node3D
 	/// <summary>The chunk's visual mesh instance (exposed for rendering settings like wireframe).</summary>
 	public MeshInstance3D MeshInstance => _meshInstance;
 
+	/// <summary>The last collision-enabled state actually applied to the shape.</summary>
+	public bool CollisionEnabled { get; private set; }
+
 	/// <summary>
 	/// The mesh/collision build currently in flight on the thread pool, or
 	/// <c>null</c> when idle. Set and cleared only on the main thread; the
@@ -178,6 +181,15 @@ public partial class VoxelChunk : Node3D
 		{
 			return;
 		}
+		// Only reassign when the state actually changed. The world calls this for
+		// EVERY loaded chunk every frame; reassigning shape.Shape — even to the
+		// same reference — re-runs Jolt's broad-phase add/remove for the body,
+		// which is the dominant physics cost at a 16-chunk render distance.
+		if (CollisionEnabled == enabled)
+		{
+			return;
+		}
+		CollisionEnabled = enabled;
 		_shape.Shape = enabled ? _builtShape : null;
 	}
 }

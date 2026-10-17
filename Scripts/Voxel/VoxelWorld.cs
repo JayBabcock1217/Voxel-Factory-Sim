@@ -1283,17 +1283,33 @@ public partial class VoxelWorld : Node3D
 
 	/// <summary>
 	/// Gives a collision shape to chunks within <see cref="CollisionRadiusChunks"/> of
-	/// the player and clears it from the rest. A rebuilt (just-meshed) chunk is always
-	/// given a shape so the player never stands on invisible ground. Runs once per
-	/// frame over the (bounded) loaded-chunk set — cheap.
+	/// the player and clears it from the rest.
+	///
+	/// Incremental: only the chunks inside the collision radius can possibly have
+	/// collision enabled, so only they are touched each frame. The per-frame work is
+	/// O(radius²) — a constant ~49 chunks — instead of O(loaded chunks), which at a
+	/// 16-chunk render distance was ~580 chunks and (with the per-chunk NeedsMesh
+	/// property read crossing the Godot binding) cost ~13 ms/frame. Far chunks are
+	/// left as-is (they stay disabled) and are only re-enabled when they enter the
+	/// radius or are freed (FreeChunk → MarkNeighboursForRebuild path).
 	/// </summary>
 	private void UpdateLocalCollision(Vector2I playerChunk)
 	{
-		foreach (VoxelChunk chunk in _chunks.Values)
+		for (int dx = -CollisionRadiusChunks; dx <= CollisionRadiusChunks; dx++)
 		{
-			bool near = Mathf.Abs(chunk.Coord.X - playerChunk.X) <= CollisionRadiusChunks
-				&& Mathf.Abs(chunk.Coord.Y - playerChunk.Y) <= CollisionRadiusChunks;
-			chunk.SetCollisionEnabled(near || !chunk.NeedsMesh);
+			for (int dz = -CollisionRadiusChunks; dz <= CollisionRadiusChunks; dz++)
+			{
+				if (!_chunks.TryGetValue(playerChunk + new Vector2I(dx, dz), out VoxelChunk chunk))
+				{
+					continue;
+				}
+
+				// A near chunk always has collision ON: either it's within the
+				// radius (the whole point) or it was just rebuilt and is still
+				// flagged NeedsMesh (the player must never stand on invisible
+				// ground while its mesh/collision is in flight).
+				chunk.SetCollisionEnabled(true);
+			}
 		}
 	}
 
@@ -1376,27 +1392,37 @@ public partial class VoxelWorld : Node3D
 			int prx = Mathf.FloorToInt(px / regionSizeChunks);
 			int prz = Mathf.FloorToInt(pz / regionSizeChunks);
 
+			// Level-k band [R*B^(k-1), R*B^k) — the Euclidean distances this
+			// level is responsible for. BOUND THE WALK BY THIS LEVEL'S OWN BAND
+			// EDGES, not the global LodRenderDistanceChunks: a coarser level's
+			// band ends well before the LOD distance, and walking every level
+			// out to the LOD distance (the old code) made the per-frame scan
+			// O(LodDistance²) per level — thousands of out-of-band cells visited
+			// every frame for no reason.
+			float bandInner = RenderDistanceChunks * (float)System.Math.Pow(LodDistanceBase, k - 1);
+			float bandOuter = RenderDistanceChunks * (float)System.Math.Pow(LodDistanceBase, k);
+
 			// Chebyshev span of the annulus the player's level-k band can
 			// occupy (see method docs). The player sits at most
 			// size*sqrt(2)/2 base-chunks from their own region's center
 			// (region center = player + (size/2 - fx, size/2 - fz), with
 			// fx, fz in [0, size)), so the band's Chebyshev reach is the
-			// Euclidean band [R, LOD] inflated/deflated by that worst-case
-			// offset — exactly what the corner margins below compute:
-			//   inner: largest radius r with (r+1)*size - corner < R
-			//          (every inner-square cell is provably < R away).
-			//   outer: smallest radius r with (r+1)*size - corner >= LOD
-			//          (every outer-square cell is provably >= LOD away).
+			// Euclidean band [bandInner, bandOuter] inflated/deflated by that
+			// worst-case offset — exactly what the corner margins below compute:
+			//   inner: largest radius r with (r+1)*size - corner < bandInner
+			//          (every inner-square cell is provably < bandInner away).
+			//   outer: smallest radius r with (r+1)*size - corner >= bandOuter
+			//          (every outer-square cell is provably >= bandOuter away).
 			// No band cell falls outside the walk, and no in-band region is
 			// missed — including the ring just behind the normal render
 			// radius, which the old box scan used to leave hidden.
 			float corner = regionSizeChunks * (float)System.Math.Sqrt(2.0) * 0.5f;
-			int inner = Mathf.FloorToInt((RenderDistanceChunks - corner) / regionSizeChunks) - 1;
+			int inner = Mathf.FloorToInt((bandInner - corner) / regionSizeChunks) - 1;
 			if (inner < 0)
 			{
 				inner = 0;
 			}
-			int outer = Mathf.CeilToInt((LodRenderDistanceChunks + corner) / regionSizeChunks) - 1;
+			int outer = Mathf.CeilToInt((bandOuter + corner) / regionSizeChunks) - 1;
 
 			// Walk only the four edges of the annulus's bounding square —
 			// the band's radial thickness covers every interior cell's state,
@@ -1521,7 +1547,16 @@ public partial class VoxelWorld : Node3D
 
 		if (_lodChunks.TryGetValue((level, rc), out LodChunk lod))
 		{
-			lod.Visible = shouldRender;
+			// Only touch the node when the state actually changed. The annulus
+			// walk re-visits every in-band region every frame (thousands of them
+			// at a large LodRenderDistanceChunks), so re-assigning Visible — even
+			// to its current value — would fire the engine's visibility-change
+			// path (and, with multi-bounce occlusion, a shadow re-evaluation)
+			// thousands of times per second for no visual change.
+			if (lod.Visible != shouldRender)
+			{
+				lod.Visible = shouldRender;
+			}
 			if (shouldRender && !lod.Built && !lod.BuildInFlight && inFlight < MaxConcurrentLodBuilds)
 			{
 				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks);

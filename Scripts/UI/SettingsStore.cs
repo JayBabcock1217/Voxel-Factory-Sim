@@ -32,7 +32,7 @@ public sealed class SettingsStore
 	public int ResolutionWidth { get; set; } = 1920;
 	public int ResolutionHeight { get; set; } = 1080;
 	public bool VSync { get; set; } = true;
-	public int FpsCap { get; set; } = 0; // 0 = unlimited
+	public int FpsCap { get; set; } = 120; // 0 = unlimited
 
 	// --- Rendering ---
 	public int MeshMode { get; set; } = 1; // 0 = Faces, 1 = MarchingCubes
@@ -226,6 +226,11 @@ public sealed class SettingsStore
 			env.AmbientLightColor = Colors.White;
 		}
 
+		// World settings: render distances and LOD on/off are picked up by the
+		// world's per-frame load/unload loop, no regeneration needed.
+		world.RenderDistanceChunks = ChunkRenderDistance;
+		world.LodRenderDistanceChunks = LodRenderDistance;
+		world.LodEnabled = LodEnabled;
 	}
 
 	private static WorldEnvironment FindWorldEnvironment(Node root)
