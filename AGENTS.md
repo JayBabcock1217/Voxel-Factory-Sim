@@ -1,7 +1,8 @@
 # AGENTS.md — Factory Sim
 
 Godot 4.8 C# voxel sandbox: procedurally generated chunked voxel world with an FPS
-player (`Scripts/Player.cs`) and a voxel edit tool (`Scripts/Voxel/VoxelTool.cs`).
+player (`Scripts/Player.cs`), a voxel edit tool (`Scripts/Voxel/VoxelTool.cs`), and a
+binary save/load system with a world-slot picker (`Scripts/UI/SlotPicker.cs`).
 
 ## Agent Workflow
 
@@ -24,15 +25,22 @@ This repository uses a two-agent workflow:
 
 ## Verification — what you can actually run
 
-- **`dotnet build`** is the only executable check (~1s, expected 0 warnings / 0 errors).
-  Output: `.godot/mono/temp/bin/Debug/Factory Sim.dll`. Restore is cached.
+- **`dotnet build`** is the only local executable check (~1s, expected 0 warnings /
+  0 errors). Output: `.godot/mono/temp/bin/Debug/Factory Sim.dll`. Restore is cached.
 - **There is no Godot binary on this machine** (PATH, /opt, /usr all checked). You
   cannot run the game or any scene. Never claim runtime behavior is verified.
-- No CI, no test runner, no lint config (`.editorconfig` sets UTF-8 only). The only
-  test suite is a Godot node script: run root-level `TestMcRewrite.tscn` in the Godot
-  editor; it prints `MC_REWRITE_TEST: ALL PASS` or `MC_REWRITE_TEST: N FAILURE(S)`
-  and quits. (`McRewriteTest.cs` also at root; references `VoxelMaterialPalette`
-  from `Scripts/Voxel/VoxelMaterial.cs`.)
+- No local test runner or lint config (`.editorconfig` sets UTF-8 only). The test
+  suites are Godot node scripts run from the editor:
+  - `TestMcRewrite.tscn` (root) → prints `MC_REWRITE_TEST: ALL PASS` or
+    `MC_REWRITE_TEST: N FAILURE(S)` and quits. (`McRewriteTest.cs` also at root;
+    references `VoxelMaterialPalette` from `Scripts/Voxel/VoxelMaterial.cs`.)
+  - `WorldSaveTest.tscn` (root) → prints `WORLD_SAVE_TEST: ALL PASS` or
+    `WORLD_SAVE_TEST: N FAILURE(S)` and quits. (`WorldSaveTest.cs` at root; tests the
+    binary save format round-trip, checksum, versioning, and the world
+    edit-capture/re-apply path.)
+- **CI** (`.github/workflows/ci.yml`) runs `dotnet build` on every push/PR and, when
+  the `GODOT_URL` repo variable is set, also runs both test scenes headless. Without
+  `GODOT_URL` the editor-test job is skipped and only the build gate is enforced.
 
 ## Gotcha: scene overrides export defaults
 
@@ -61,7 +69,16 @@ export is dead code. Don't "fix" export defaults without checking the scene.
   `EnableDynamicLoading`).
 - `Scripts/Player.cs` — namespace `FactorySim`. FPS controller using the input map
   (WASD/Space/ShiftLeft); Escape toggles mouse capture.
-- `Scripts/Voxel/` — namespace `FactorySim.Voxel`, 14 files:
+- `Scripts/UI/` — namespace `FactorySim.UI`:
+  - `MainMenu.cs` — the home screen; wires the save/load picker to the world.
+  - `SlotPicker.cs` — the world-slot picker (New World / Load / Rename / Delete).
+    All prompt confirm/cancel paths are **deferred** (`CallDeferred` →
+    `DoInvokeOk`) so no node is freed while a `Pressed`/`TextSubmitted` signal is
+    still on the stack. There is a single `ShowPrompt` overload (2-arg `onOk`);
+    do not reintroduce a 1-arg overload (it caused an infinite-recursion stack
+    overflow).
+  - `PauseMenu.cs` — in-game pause (resume / quit to menu).
+- `Scripts/Voxel/` — namespace `FactorySim.Voxel`:
   - `VoxelWorld.cs` — chunk manager (`Node3D`, group `"voxel_world"`); exports in
     `ExportGroup`s Chunks / World / Debug.
   - `VoxelChunk.cs` — `ChunkData` + visual `MeshInstance3D` + concave `CollisionShape3D`;
@@ -74,6 +91,24 @@ export is dead code. Don't "fix" export defaults without checking the scene.
   - `VoxelMaterial.cs` / `VoxelMaterialConfig.cs` / `VoxelMaterialEntry.cs` —
     material system + `VoxelMaterialPalette`.
   - `VoxelTool.cs` — the edit tool.
+  - **Save/load:**
+    - `WorldSave.cs` — slot manager: per-slot binary files (`slot_N.world`) plus an
+      `index.json` registry; auto-save on `_ExitTree`; `ListSlots` / `LoadFrom` /
+      `CreateSlot` / `RenameSlot` / `DeleteSlot`; repairs corrupted slot files on
+      read.
+    - `WorldSaveFile.cs` — the binary save format: `FSAV` magic + version + sections
+      (edits / health / player / inventory / drops) + trailing FNV-1a checksum.
+      Versioning: `CurrentVersion`, `SupportedVersions` (the set of loadable
+      versions), `IsSupportedVersion`, and `Migrate(data, fromVersion)` (a pure
+      transform for older versions; identity for the current one). `Read` accepts any
+      supported version, validates the checksum, then calls `Migrate`. Corrupted-magic
+      / truncated-v1 bodies are recovered by `TryReadCorruptedV1` (returned with
+      `Checksum = 0` so the caller re-writes a proper file).
+    - `SaveSlotIndex.cs` — hand-rolled JSON reader/writer for `index.json` (the slot
+      registry). Corrupt/bad-magic warnings are emitted at most once per path per
+      episode (`_warnedCorruptPaths`, cleared on a successful read).
+- Root test scenes (editor-run, not CLI): `TestMcRewrite.tscn` / `McRewriteTest.cs`
+  and `WorldSaveTest.tscn` / `WorldSaveTest.cs`.
 
 ## Key mechanics (voxel work)
 
@@ -100,6 +135,11 @@ export is dead code. Don't "fix" export defaults without checking the scene.
 
 ## Git
 
-Branch `master` has **zero commits**; every file is currently untracked (whatever you
-stage becomes the first commit). `.gitignore` covers `.godot/`, `android/`, `.aider*`;
-`.gitattributes` = `text=auto`, `eol=lf`.
+- Remote: `origin` = `https://github.com/JayBabcock1217/Voxel-Factory-Sim`; the
+  working branch is `master` (tracks `origin/master`). Note the repo's GitHub *default
+  branch* may still be `main` — flip it in Settings → Branches if you want `master` to
+  be the default, or rename locally + remote.
+- `.gitignore` covers `.godot/`, `android/`, `.aider*`; `.gitattributes` =
+  `text=auto`, `eol=lf`.
+- CI (`.github/workflows/ci.yml`) enforces a clean `dotnet build` (warnings-as-errors)
+  on every push/PR. Keep the build at 0 warnings / 0 errors or CI fails.

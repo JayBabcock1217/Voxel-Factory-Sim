@@ -59,6 +59,52 @@ public static class WorldSaveFile
 	public const int CurrentVersion = 1;
 
 	/// <summary>
+	/// Every version this reader knows how to LOAD. A file whose version is in
+	/// this set can be read directly (or via <see cref="TryReadCorruptedV1"/>);
+	/// a version below the minimum but still recognized is migrated by
+	/// <see cref="Migrate"/>. To add a new version: bump <see cref="CurrentVersion"/>
+	/// and, if the old layout is still parseable, keep the old version in this set
+	/// and add a <see cref="Migrate"/> case that converts it to the current
+	/// <see cref="Data"/>.
+	/// </summary>
+	public static readonly int[] SupportedVersions = { 1 };
+
+	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
+	public static int OldestSupportedVersion => SupportedVersions[0];
+
+	/// <summary>True when <paramref name="version"/> is in <see cref="SupportedVersions"/>.</summary>
+	public static bool IsSupportedVersion(int version)
+	{
+		return Array.IndexOf(SupportedVersions, version) >= 0;
+	}
+
+	/// <summary>
+	/// Converts a save read at an older supported version into the current
+	/// <see cref="Data"/> shape. The input <paramref name="data"/> was already
+	/// parsed by the version-specific reader; this performs any field
+	/// remapping / defaulting a version bump requires. The identity transform
+	/// is the default (v1 → v1). When a future version changes the layout, add
+	/// a case here that fills in the new fields and returns a current-version
+	/// <see cref="Data"/>.
+	/// </summary>
+	/// <param name="data">The parsed save from the older version.</param>
+	/// <param name="fromVersion">The version the file was written at.</param>
+	/// <returns>A <see cref="Data"/> in the current version's shape.</returns>
+	public static Data Migrate(Data data, int fromVersion)
+	{
+		if (fromVersion == CurrentVersion)
+		{
+			return data; // nothing to do
+		}
+
+		// Future version migrations go here, e.g.:
+		//   if (fromVersion == 1) { /* v1 -> v2: add new field, re-derive ... */ }
+		// For now, any recognized-but-older version is treated as already in
+		// the current shape (the layout has not changed since v1).
+		return data;
+	}
+
+	/// <summary>
 	/// The minimum byte length of a valid (or recoverable) save file: the 8-byte
 	/// header (magic + version), the seed, the two section counts, the 16-byte
 	/// player transform, the inventory count, and the trailing checksum. Files
@@ -291,9 +337,9 @@ public static class WorldSaveFile
 			}
 
 			int version = r.ReadInt32();
-			if (version != CurrentVersion)
+			if (!IsSupportedVersion(version))
 			{
-				ReportCorrupt(path, $"'{path}' is version {version}; expected {CurrentVersion}. Starting a fresh world.");
+				ReportCorrupt(path, $"'{path}' is version {version}; supported {OldestSupportedVersion}..{CurrentVersion}. Starting a fresh world.");
 				return null;
 			}
 
@@ -363,7 +409,12 @@ public static class WorldSaveFile
 			// The file read cleanly; clear any prior corrupt flag so a future
 			// corruption (e.g. an interrupted write) can warn again.
 			_warnedCorruptPaths.Remove(path);
-			return data;
+
+			// If the file was written at an older supported version, convert it
+			// to the current shape before handing it to the caller. The caller
+			// re-writes the file at CurrentVersion on its next save, so the
+			// migration is one-time and lossless (Migrate is pure).
+			return Migrate(data, version);
 		}
 		catch (System.Exception e)
 		{
@@ -500,9 +551,9 @@ public static class WorldSaveFile
 			// Skip the (corrupted) 4-byte magic; the version field follows.
 			r.ReadBytes(4);
 			int version = r.ReadInt32();
-			if (version != CurrentVersion)
+			if (!IsSupportedVersion(version))
 			{
-				return false; // not a v1 body — do not recover
+				return false; // not a recognized body — do not recover
 			}
 
 			var result = new Data();

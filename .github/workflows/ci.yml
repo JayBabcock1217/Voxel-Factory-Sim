@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  build:
+    name: dotnet build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          # The project targets net8.0 (net9.0 for Android). Installing 8.0 is
+          # enough for the default build; 9.0 is added so the Android
+          # TargetFramework condition can resolve if ever exercised.
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Restore
+        run: dotnet restore "Factory Sim.sln"
+
+      - name: Build
+        run: dotnet build "Factory Sim.sln" --configuration Debug --no-restore
+
+      - name: Assert zero warnings
+        run: |
+          # Treat warnings as a CI failure so the "0 warnings / 0 errors"
+          # invariant from AGENTS.md is enforced on every push.
+          dotnet build "Factory Sim.sln" --configuration Debug --no-restore -warnaserror 2>&1 | tail -5
+
+  # ------------------------------------------------------------------
+  # Editor test suite (headless). Requires a Godot binary; the workflow is
+  # skipped gracefully when GODOT_URL is not set so the repo still builds
+  # green in a fresh fork without a token.
+  # ------------------------------------------------------------------
+  editor-tests:
+    name: Godot editor tests (headless)
+    runs-on: ubuntu-latest
+    # Set GODOT_URL (and GODOT_VERSION if needed) in the repo settings to
+    # enable this job, e.g.:
+    #   GODOT_URL: https://github.com/godotengine/godot-builds/releases/download/4.8-dev6/Godot_v4.8-dev6_mono_linux_x86_64.zip
+    #   GODOT_VERSION: 4.8-dev6
+    env:
+      GODOT_VERSION: ${{ vars.GODOT_VERSION || '4.8-dev6' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            9.0.x
+
+      - name: Download Godot (headless-capable mono build)
+        if: ${{ vars.GODOT_URL != '' }}
+        id: godot
+        run: |
+          echo "Downloading Godot $GODOT_VERSION for CI..."
+          curl -L -o godot.zip "${{ vars.GODOT_URL }}"
+          unzip -q godot.zip
+          # The zip contains a single binary; find it and make it executable.
+          GODOT_BIN=$(find . -maxdepth 2 -name 'Godot*' -type f | head -1)
+          if [ -z "$GODOT_BIN" ]; then
+            echo "No Godot binary found in the downloaded archive."
+            exit 1
+          fi
+          chmod +x "$GODOT_BIN"
+          echo "bin=$GODOT_BIN" >> "$GITHUB_OUTPUT"
+          echo "Using Godot binary: $GODOT_BIN"
+
+      - name: Restore
+        if: ${{ steps.godot.outcome == 'success' }}
+        run: dotnet restore "Factory Sim.sln"
+
+      - name: Build
+        if: ${{ steps.godot.outcome == 'success' }}
+        run: dotnet build "Factory Sim.sln" --configuration Debug --no-restore
+
+      - name: Run WorldSaveTest (headless)
+        if: ${{ steps.godot.outcome == 'success' }}
+        run: |
+          "${{ steps.godot.outputs.bin }}" --headless --path . --quit-after 120 res://WorldSaveTest.tscn 2>&1 | tee godot_test.log
+          # The test prints "WORLD_SAVE_TEST: ALL PASS" or "... FAILURE(S)".
+          if grep -q "WORLD_SAVE_TEST: ALL PASS" godot_test.log; then
+            echo "WorldSaveTest passed."
+          else
+            echo "WorldSaveTest FAILED:"
+            grep -E "WORLD_SAVE_TEST|FAIL" godot_test.log || true
+            exit 1
+          fi
+
+      - name: Run McRewriteTest (headless)
+        if: ${{ steps.godot.outcome == 'success' }}
+        run: |
+          "${{ steps.godot.outputs.bin }}" --headless --path . --quit-after 120 res://TestMcRewrite.tscn 2>&1 | tee godot_mc.log
+          if grep -q "MC_REWRITE_TEST: ALL PASS" godot_mc.log; then
+            echo "McRewriteTest passed."
+          else
+            echo "McRewriteTest FAILED:"
+            grep -E "MC_REWRITE_TEST|FAIL" godot_mc.log || true
+            exit 1
+          fi
+
+      - name: Upload test logs
+        if: ${{ steps.godot.outcome == 'success' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-test-logs
+          path: |
+            godot_test.log
+            godot_mc.log
+          if-no-files-found: ignore

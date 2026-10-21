@@ -43,6 +43,7 @@ public partial class WorldSaveTest : Node
 		TestFormatRoundTrip();
 		TestChecksumDetectsCorruption();
 		TestWrongVersionRejected();
+		TestVersioningFramework();
 		TestWorldEditCaptureAndReapply();
 
 		// Clean up the temp file (best effort).
@@ -184,6 +185,38 @@ public partial class WorldSaveTest : Node
 		Check("version: wrong version -> Read returns null", back == null);
 		Check("version: IsValidSaveFile reports false for the tampered file",
 			!WorldSaveFile.IsValidSaveFile(_tempPath));
+	}
+
+	// ------------------------------------------------------------------
+	// TEST 3b: the versioning framework (supported-versions check + Migrate)
+	// ------------------------------------------------------------------
+	private void TestVersioningFramework()
+	{
+		// CurrentVersion is in the supported set.
+		Check("versioning: CurrentVersion is supported",
+			WorldSaveFile.IsSupportedVersion(WorldSaveFile.CurrentVersion));
+
+		// A future version (CurrentVersion + 1) is NOT yet supported.
+		Check("versioning: CurrentVersion+1 is not supported",
+			!WorldSaveFile.IsSupportedVersion(WorldSaveFile.CurrentVersion + 1));
+
+		// A version below the oldest supported is not supported.
+		Check("versioning: version 0 is not supported",
+			!WorldSaveFile.IsSupportedVersion(0));
+
+		// OldestSupportedVersion is the first entry in the supported set.
+		Check("versioning: OldestSupportedVersion == SupportedVersions[0]",
+			WorldSaveFile.OldestSupportedVersion == WorldSaveFile.SupportedVersions[0]);
+
+		// Migrate is the identity transform for the current version (v1 -> v1).
+		var data = new WorldSaveFile.Data { Seed = 777 };
+		data.Edits.Add(new WorldSaveFile.EditRecord(new Vector3I(1, 2, 3), VoxelMaterialIds.Stone));
+		var migrated = WorldSaveFile.Migrate(data, WorldSaveFile.CurrentVersion);
+		Check("versioning: Migrate is identity for CurrentVersion",
+			migrated == data
+			&& migrated.Seed == 777
+			&& migrated.Edits.Count == 1
+			&& migrated.Edits[0].MaterialId == VoxelMaterialIds.Stone);
 	}
 
 	// ------------------------------------------------------------------
