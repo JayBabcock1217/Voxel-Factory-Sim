@@ -33,6 +33,13 @@ public static class VoxelMaterialIds
 	public const int CopperOre = 15;
 	public const int GoldOre = 16;
 	public const int Bedrock = 17; // unbreakable, fills the world floor (y 0..1)
+
+	// Crafting products (not generated in terrain; only obtainable via crafting).
+	public const int Plank = 18;
+	public const int IronPlate = 19;
+	public const int Coal = 20;
+	public const int StoneBrick = 21;
+	public const int MachineFrame = 22;
 }
 
 /// <summary>

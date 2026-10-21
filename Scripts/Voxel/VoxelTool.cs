@@ -221,10 +221,14 @@ public partial class VoxelTool : Node3D
 	}
 
 	/// <summary>
-	/// Spawns a one-item drop at the center of a broken voxel. A small random
-	/// horizontal offset keeps simultaneous drops (e.g. a whole sphere) from
-	/// spawning on top of each other; the drops' own merge pass tidies up the
-	/// rest within a second.
+	/// Handles a <c>VoxelBroken</c> event. The event is raised TWICE per broken
+	/// voxel: first by the player edit itself (pickaxe break / remove sphere),
+	/// which QUEUES the drop with the world (see <see cref="_pendingEditStamp"/>);
+	/// then by the world's <c>FlushPendingDrops</c> once the chunk update for the
+	/// edited chunk has finished, which SPAWNS the drop. This two-pass design
+	/// keeps a drop from visibly resting in mid-air: the surface is not re-meshed
+	/// (and its collision not rebuilt) until the chunk update finishes, so the
+	/// drop can only land on solid, visible terrain once that has completed.
 	/// </summary>
 	private void OnVoxelBroken(Vector3I pos, int materialId)
 	{
@@ -233,6 +237,55 @@ public partial class VoxelTool : Node3D
 			return;
 		}
 
+		if (_pendingEditStamp > 0)
+		{
+			// First pass (raised by the edit): queue the drop, recording the
+			// edit stamp captured when the edit was applied. The world releases
+			// the drop once the chunk's EditPriority reaches at least this stamp
+			// (i.e. the chunk update this edit started has been rebuilt).
+			_world.PendingDrops.Add(new VoxelWorld.PendingDrop(
+				pos,
+				materialId,
+				_pendingEditStamp,
+				_world.VoxelChunkCoord(pos),
+				Time.GetTicksMsec() / 1000.0));
+			return;
+		}
+
+		// Second pass (raised by the world after the chunk update finished):
+		// actually spawn the drop.
+		SpawnDropForBrokenVoxel(pos, materialId);
+	}
+
+	/// <summary>
+	/// The <c>VoxelWorld.EditPriorityCounter</c> value captured at the start of
+	/// the edit that broke voxels. Non-zero while that edit's <c>VoxelBroken</c>
+	/// events are being processed (so this handler queues drops); reset to 0
+	/// immediately after the edit returns. A queued drop carries this stamp, and
+	/// the world only releases it once the edited chunk's <c>EditPriority</c>
+	/// reaches at least this value — a self-contained proof the chunk update has
+	/// finished.
+	/// </summary>
+	private int _pendingEditStamp;
+
+	/// <summary>
+	/// Captures the world's edit stamp before an edit and clears it after, so
+	/// the <c>VoxelBroken</c> events raised DURING the edit know which chunk
+	/// update to wait for.
+	/// </summary>
+	private void CaptureEditStamp()
+	{
+		_pendingEditStamp = _world.EditPriorityCounter;
+	}
+
+	/// <summary>
+	/// Actually spawns the drop for a broken voxel: a small random horizontal
+	/// offset keeps simultaneous drops (e.g. a whole sphere) from spawning on top
+	/// of each other; the drops' own merge pass tidies up the rest within a
+	/// second.
+	/// </summary>
+	private void SpawnDropForBrokenVoxel(Vector3I pos, int materialId)
+	{
 		Vector3 worldPos = new Vector3(pos.X, pos.Y, pos.Z) * _world.VoxelSize
 			+ new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
 		worldPos += new Vector3(_dropRng.RandfRange(-0.2f, 0.2f), 0f, _dropRng.RandfRange(-0.2f, 0.2f));
@@ -392,8 +445,12 @@ public partial class VoxelTool : Node3D
 		if (damage >= VoxelHealth.MaxHealth)
 		{
 			// The voxel broke: remove it (resets health + rebuilds the chunk).
+			// Capture the edit stamp around the break so the VoxelBroken event
+			// it raises queues a drop that waits for THIS chunk update.
 			GD.Print($"[VoxelTool] Broke voxel {(_world.GetVoxelName(material))} @ {_targetVoxel}");
+			CaptureEditStamp();
 			_world.BreakVoxel(_targetVoxel);
+			_pendingEditStamp = 0;
 			_pickaxeDamage.Remove(_targetVoxel);
 			return;
 		}
@@ -514,7 +571,11 @@ public partial class VoxelTool : Node3D
 		}
 		else if (_currentTool == Tool.Remove)
 		{
+			// Capture the edit stamp around the carve so the VoxelBroken events
+			// it raises queue drops that wait for THIS chunk update.
+			CaptureEditStamp();
 			_world.RemoveSphere(_targetVoxel, RemoveRadius);
+			_pendingEditStamp = 0;
 			GD.Print($"[VoxelTool] Removed sphere r={RemoveRadius} @ {_targetVoxel}");
 		}
 		// Pickaxe: no one-shot action — holding left mouse damages over time

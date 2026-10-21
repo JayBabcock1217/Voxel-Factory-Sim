@@ -292,9 +292,69 @@ public partial class VoxelWorld : Node3D
 	/// Fired for every voxel that a PLAYER EDIT removes (the pickaxe breaking a
 	/// single voxel, the remove tool carving a sphere) with the world voxel
 	/// position and the removed material. Terrain generation and the add tool
-	/// never raise it. <c>VoxelTool</c> subscribes to spawn item drops.
+	/// never raise it. <c>VoxelTool</c> subscribes to queue item drops — the
+	/// drops themselves spawn only once the chunk update for the edited chunk
+	/// has finished (see <see cref="PendingDrops"/>).
 	/// </summary>
 	public event Action<Vector3I, int> VoxelBroken;
+
+	/// <summary>
+	/// One pending item drop. <see cref="VoxelPos"/>/<see cref="MaterialId"/>
+	/// describe the broken voxel; <see cref="WaitStamp"/> is the
+	/// <see cref="_editPriorityCounter"/> value stamped on the edited region at
+	/// the moment the drop was queued, and <see cref="WaitChunk"/> is the chunk
+	/// the removed voxel sat in.
+	///
+	/// A drop is released only once the chunk update it was waiting on has
+	/// FINISHED, where "finished" is checked SELF-CONTAINEDLY against the stamp:
+	/// the drop's own chunk has <c>NeedsMesh == false</c>, no mesh build is in
+	/// flight, and its <c>EditPriority >= WaitStamp</c> (i.e. every edit made
+	/// while the drop waited has already been rebuilt). Waiting on the whole
+	/// 1-chunk ring is deliberately NOT done — a ring chunk can be kept perpetually
+	/// dirty by unrelated work (neighbour seams, LOD, other edits), which would
+	/// hold the drop forever. The staleness cap below additionally guarantees a
+	/// drop can never be held indefinitely.
+	/// </summary>
+	public readonly struct PendingDrop
+	{
+		public readonly Vector3I VoxelPos;
+		public readonly int MaterialId;
+		public readonly int WaitStamp;
+		public readonly Vector2I WaitChunk;
+		public readonly double QueuedTime;
+
+		public PendingDrop(Vector3I voxelPos, int materialId, int waitStamp, Vector2I waitChunk, double queuedTime)
+		{
+			VoxelPos = voxelPos;
+			MaterialId = materialId;
+			WaitStamp = waitStamp;
+			WaitChunk = waitChunk;
+			QueuedTime = queuedTime;
+		}
+	}
+
+	/// <summary>
+	/// Pending item drops: one <see cref="PendingDrop"/> per voxel a player edit
+	/// removed. <c>VoxelTool</c> enqueues them (via the <c>VoxelBroken</c>
+	/// event); <see cref="_Process"/> (in <see cref="FlushPendingDrops"/>) spawns
+	/// each one once its chunk update has finished, re-raising <c>VoxelBroken</c>
+	/// so the tool actually creates the drop node.
+	///
+	/// This keeps a drop from visibly resting in mid-air: a broken voxel's
+	/// surface is not re-meshed (and its collision not rebuilt) until the chunk
+	/// update finishes, so the drop can only land on solid, visible terrain once
+	/// that update has completed.
+	/// </summary>
+	public List<PendingDrop> PendingDrops { get; } = new();
+
+	/// <summary>
+	/// A pending drop older than this (seconds) is spawned regardless of chunk
+	/// state: a safety net so a drop can never be held forever by a chunk that
+	/// will never rebuild (e.g. freed mid-wait, or stuck dirty by unrelated
+	/// work). Generous enough to be invisible in normal play (a chunk rebuild
+	/// finishes in a frame or two).
+	/// </summary>
+	private const double MaxPendingDropAgeSeconds = 5.0;
 
 	private GenConfig _config;
 	private Node3D _chunkRoot;
@@ -331,6 +391,15 @@ public partial class VoxelWorld : Node3D
 	/// win the budget-loop sort tie-breaks.
 	/// </summary>
 	private int _editPriorityCounter;
+
+	/// <summary>
+	/// The current value of <see cref="_editPriorityCounter"/> (read-only view).
+	/// <c>VoxelTool</c> captures this the frame it queues a pending drop; a
+	/// chunk's <c>EditPriority</c> only reaches at least this value once the
+	/// chunk update the drop was waiting on has been rebuilt, which is how the
+	/// drop gate knows to release the drop (see <see cref="FlushPendingDrops"/>).
+	/// </summary>
+	public int EditPriorityCounter => _editPriorityCounter;
 
 	/// <summary>
 	/// Number of chunk generations currently in flight on the thread pool.
@@ -660,6 +729,11 @@ public partial class VoxelWorld : Node3D
 			pending[i].Rebuild(this);
 		}
 
+		// Item drops from edited voxels only spawn once the chunk update for
+		// the edited chunk has finished (see PendingDrops) — otherwise the drop
+		// would visibly rest in mid-air until the surface re-meshes.
+		FlushPendingDrops(playerChunk);
+
 		// Enable per-chunk collision for the player's vicinity: chunks within
 		// CollisionRadiusChunks (plus any just-rebuilt chunk) keep their shape
 		// so the player never stands on invisible ground; the rest have theirs
@@ -683,6 +757,16 @@ public partial class VoxelWorld : Node3D
 	// ------------------------------------------------------------------
 	// Public API used by the tools
 	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The chunk coordinate for a world voxel's XZ. Public so <c>VoxelTool</c>
+	/// can record which chunk a pending drop is waiting on (see
+	/// <see cref="PendingDrop.WaitChunk"/>).
+	/// </summary>
+	public Vector2I VoxelChunkCoord(Vector3I v)
+	{
+		return ChunkCoordOf(v.X, v.Z);
+	}
 
 	/// <summary>Reads a voxel id in world voxel coordinates (0 = air if the chunk is not loaded).</summary>
 	public int GetVoxel(int x, int y, int z)
@@ -1460,6 +1544,66 @@ public partial class VoxelWorld : Node3D
 					chunk.EditPriority = ++_editPriorityCounter;
 				}
 			}
+		}
+	}
+
+	/// <summary>
+	/// True when <paramref name="drop"/> may spawn: the chunk update it was
+	/// waiting on has finished. Checked SELF-CONTAINEDLY against the drop's
+	/// <see cref="PendingDrop.WaitStamp"/> — the drop's own chunk must have
+	/// <c>NeedsMesh == false</c>, no mesh build in flight, and an
+	/// <c>EditPriority</c> at least as new as the stamp (meaning every edit made
+	/// while the drop waited has already been rebuilt). A missing chunk (freed
+	/// while waiting) counts as finished so a drop can never wait on a chunk that
+	/// will never rebuild — it is simply dropped with the chunk.
+	/// </summary>
+	private bool ChunkUpdateFinished(PendingDrop drop)
+	{
+		if (!_chunks.TryGetValue(drop.WaitChunk, out VoxelChunk chunk))
+		{
+			return true;
+		}
+		return !chunk.NeedsMesh && !chunk.MeshBuildInFlight && chunk.EditPriority >= drop.WaitStamp;
+	}
+
+	/// <summary>
+	/// Spawns every pending item drop whose chunk update has finished. Each drop
+	/// waits on the chunk the removed voxel sat in (checked self-containedly
+	/// against the edit stamp it was queued under), so the drop appears only
+	/// once that chunk's surface is solid and visible — never resting in
+	/// mid-air. A drop older than <see cref="MaxPendingDropAgeSeconds"/> is
+	/// spawned unconditionally so it can never be held forever. Called from
+	/// <see cref="_Process"/> after the per-frame rebuild budget runs.
+	/// </summary>
+	private void FlushPendingDrops(Vector2I playerChunk)
+	{
+		if (PendingDrops.Count == 0)
+		{
+			return;
+		}
+
+		double now = Time.GetTicksMsec() / 1000.0;
+
+		for (int i = PendingDrops.Count - 1; i >= 0; i--)
+		{
+			var drop = PendingDrops[i];
+
+			bool ready = ChunkUpdateFinished(drop);
+
+			// Staleness safety net: never hold a drop longer than the cap, even
+			// if its chunk is stuck (freed, or kept dirty by unrelated work).
+			if (!ready && (now - drop.QueuedTime) > MaxPendingDropAgeSeconds)
+			{
+				ready = true;
+			}
+
+			if (!ready)
+			{
+				continue;
+			}
+
+			PendingDrops.RemoveAt(i);
+			VoxelBroken?.Invoke(drop.VoxelPos, drop.MaterialId);
 		}
 	}
 

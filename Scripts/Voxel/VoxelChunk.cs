@@ -46,6 +46,15 @@ public partial class VoxelChunk : Node3D
 	public bool CollisionEnabled { get; private set; }
 
 	/// <summary>
+	/// True while this chunk's async mesh/collision build is in flight (from
+	/// the moment <see cref="Rebuild"/> launches the worker until
+	/// <see cref="ApplyBuildResult"/> clears it). A chunk is "updated" — safe
+	/// for a drop to land on — only when <see cref="NeedsMesh"/> is false AND
+	/// this is false.
+	/// </summary>
+	public bool MeshBuildInFlight => _meshBuild != null;
+
+	/// <summary>
 	/// The mesh/collision build currently in flight on the thread pool, or
 	/// <c>null</c> when idle. Set and cleared only on the main thread; the
 	/// worker task writes only to the pending-result fields below and marshals
@@ -116,6 +125,10 @@ public partial class VoxelChunk : Node3D
 		System.Func<int, int, int, bool> solidQuery = world.VoxelSolidForMesh;
 		System.Func<Vector2I, ChunkData> neighborQuery = world.GetChunkData;
 
+		// A launched build is a chunk update in progress: treat the chunk as
+		// dirty until ApplyBuildResult clears the flag, so a drop queued for
+		// this chunk waits the whole rebuild, not just its budgeted slot.
+		NeedsMesh = true;
 		_meshBuild = Task.Run(() =>
 		{
 			// All the heavy voxel math happens here, off the main thread.

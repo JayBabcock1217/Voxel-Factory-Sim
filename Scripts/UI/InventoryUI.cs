@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 using FactorySim;
 using FactorySim.Items;
 using FactorySim.Voxel;
@@ -52,6 +53,41 @@ public partial class InventoryUI : CanvasLayer
 	private Label _tooltipCount;
 	private int _tooltipSlot = -1;
 
+	// Crafting pane (right side of the inventory panel): a tabbed, scrollable
+	// list of recipes. The CraftingDatabase is the single source of truth for
+	// "how many can I make"; the pane just renders it and dispatches crafts.
+	private CraftingDatabase _crafting;
+	private Control _craftPanel;
+	private HBoxContainer _craftTabs;
+	private ScrollContainer _craftScroll;
+	private VBoxContainer _craftList;
+	private readonly List<CraftingRecipe> _visibleRecipes = new();
+	private readonly Dictionary<CraftingRecipe, ColorRect> _recipeIcons = new();
+	private readonly Dictionary<CraftingRecipe, Label> _recipeNames = new();
+	private readonly Dictionary<CraftingRecipe, Label> _recipeCounts = new();
+	private readonly Dictionary<CraftingRecipe, Button> _recipeButtons = new();
+	private string _craftCategory = "";
+	private CraftingRecipe _hoveredRecipe;
+	private CraftingRecipe _tooltipRecipe;
+	private readonly Dictionary<CraftingRecipe, Control> _recipeHoverRects = new();
+
+	// Crafting queue: clicking a recipe enqueues a job; _Process advances it.
+	// Only one job crafts at a time (like a single crafting station); each job
+	// takes CraftTime seconds and, on completion, consumes ingredients and adds
+	// the product to the inventory.
+	private readonly Queue<(CraftingRecipe Recipe, int Amount)> _craftQueue = new();
+	private (CraftingRecipe Recipe, int Amount)? _activeJob;
+	private double _jobElapsed;
+	private ColorRect _queueProgressBg;
+	private ColorRect _queueProgressFill;
+	private Label _queueLabel;
+
+	private Panel _recipeTooltip;
+	private VBoxContainer _recipeTipContent;
+	private Label _recipeTipName;
+	private Label _recipeTipDesc;
+	private VBoxContainer _recipeTipIngredients;
+
 	// Persistent hotbar (always visible at the bottom of the screen).
 	private Panel _hotbar;
 	private readonly Control[] _hotbarSlots = new Control[Inventory.HotbarSize];
@@ -83,14 +119,21 @@ public partial class InventoryUI : CanvasLayer
 			Visible = false;
 			return;
 		}
+		// Crafting: the database tracks total ingredients in the inventory.
+		_crafting = CraftingDatabase.BuildDefaultDatabase();
+		_crafting.RebuildInventory(_inventory);
+		// Any inventory change invalidates both the slot visuals AND the
+		// crafting "possible count", so one dirty flag drives both.
 		_inventory.InventoryChanged += () => _dirty = true;
 		_inventory.Toggled += SetOpenVisuals;
 
 		BuildUi();
 		RefreshHotbar();
+		BuildCrafting();
+		RefreshCrafting();
 	}
 
-	public override void _Process(double _)
+	public override void _Process(double delta)
 	{
 		// Refresh slot visuals only when something actually changed.
 		if (_dirty)
@@ -108,6 +151,8 @@ public partial class InventoryUI : CanvasLayer
 		}
 
 		UpdateTooltip();
+		UpdateRecipeTooltip();
+		ProcessCraftQueue(delta);
 	}
 
 	/// <summary>
@@ -561,6 +606,256 @@ public partial class InventoryUI : CanvasLayer
 		_hotbar.AddChild(_hotbarHighlight);
 	}
 
+	// ------------------------------------------------------------------
+	// Crafting pane (right side of the inventory panel)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Builds the crafting pane to the right of the slot grid: a title, a row of
+	/// category tabs, and a scrollable recipe list. Always visible while the
+	/// inventory is open (it lives inside <see cref="_panel"/>). Clicking a
+	/// recipe crafts 1; Shift+click crafts as many as possible. Hovering shows a
+	/// recipe info tooltip (name, description, ingredients).
+	/// </summary>
+	private void BuildCrafting()
+	{
+		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
+		float gridH = 3 * SlotSize + 2 * SlotGap;
+		const float craftW = 320f;   // wider crafting pane
+		const float gap = 16f;        // gap between the slot grid and the pane
+		const float pad = 12f;        // panel padding (matches BuildUi)
+
+		// Panel width = left pad + grid + gap + craft pane + right pad.
+		float panelW = pad + gridW + gap + craftW + pad;
+		float panelH = Math.Max(gridH, 280f) + 56f;
+
+		// Center the whole panel (inventory + crafting) in the viewport.
+		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
+		_panel.Position = new Vector2(
+			Math.Max(0f, (vpSize.X - panelW) / 2f),
+			Math.Max(0f, (vpSize.Y - panelH) / 2f));
+		_panel.Size = new Vector2(panelW, panelH);
+
+		// The slot grid starts at x = pad (set in BuildUi); the craft pane sits
+		// to its right after the gap.
+		float craftX = pad + gridW + gap;
+
+		_craftPanel = new Panel
+		{
+			Name = "CraftPanel",
+			LayoutMode = 3, // Position
+			Position = new Vector2(craftX, pad),
+			Size = new Vector2(craftW, panelH - pad * 2f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		var craftStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
+			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_craftPanel.AddThemeStyleboxOverride("panel", craftStyle);
+		_panel.AddChild(_craftPanel);
+
+		// Inner layout of the craft pane (all relative to the pane's top-left):
+		//   title (y 6..26) / tab strip (y 30..54) / scrollable list / queue bar.
+		const float innerPad = 8f;
+		const float titleH = 20f;
+		const float tabH = 24f;
+		const float queueH = 34f; // label (16) + gap + bar (6) + padding
+		float innerW = craftW - innerPad * 2f;
+		float paneInnerH = panelH - pad * 2f;
+		float tabsTop = 6f + titleH + 4f;          // 30
+		float listTop = tabsTop + tabH + 4f;       // 58
+		float listH = paneInnerH - listTop - queueH - innerPad;
+
+		var craftTitle = new Label
+		{
+			Name = "CraftTitle",
+			LayoutMode = 3, // Position
+			Text = "Crafting",
+			Position = new Vector2(innerPad, 6f),
+			Size = new Vector2(innerW, titleH),
+			HorizontalAlignment = HorizontalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		craftTitle.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		_craftPanel.AddChild(craftTitle);
+
+		// Category tabs in a horizontal ScrollContainer so many categories can't
+		// overflow the pane's edge.
+		var tabScroll = new ScrollContainer
+		{
+			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, tabsTop),
+			Size = new Vector2(innerW, tabH),
+			VerticalScrollMode = ScrollContainer.ScrollMode.Disabled,
+		};
+		_craftTabs = new HBoxContainer
+		{
+			LayoutMode = 2,
+		};
+		_craftTabs.AddThemeConstantOverride("separation", 4);
+		tabScroll.AddChild(_craftTabs);
+		_craftPanel.AddChild(tabScroll);
+
+		// Scrollable recipe list below the tabs.
+		//
+		// FollowFocus is the key: a ScrollContainer only stretches its SINGLE
+		// child (the VBoxContainer below) to the full scroll area when this is
+		// true — by default it is false, the child keeps its maximum-minimum
+		// width (~the widest label), and a child's Fill flag has no extra width
+		// to claim, which is why the recipe buttons stayed smushed to the left.
+		_craftScroll = new ScrollContainer
+		{
+			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, listTop),
+			Size = new Vector2(innerW, listH),
+			FollowFocus = true,
+			HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+		};
+		_craftPanel.AddChild(_craftScroll);
+
+		_craftList = new VBoxContainer
+		{
+			LayoutMode = 2,
+		};
+		_craftList.AddThemeConstantOverride("separation", 4);
+		_craftScroll.AddChild(_craftList);
+
+		// Crafting queue / progress: a thin bar + a status label at the bottom
+		// of the pane. The bar fills as the active job advances; the label shows
+		// what's crafting or how many jobs are queued.
+		float barH = 6f;
+		float barY = listTop + listH + 8f;
+		_queueLabel = new Label
+		{
+			Name = "QueueLabel",
+			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, barY - 18f),
+			Size = new Vector2(innerW, 16f),
+			Text = "Idle",
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_queueLabel.AddThemeFontSizeOverride("font_size", 12);
+		_queueLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.85f));
+		_craftPanel.AddChild(_queueLabel);
+
+		_queueProgressBg = new ColorRect
+		{
+			Name = "QueueProgressBg",
+			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, barY),
+			Size = new Vector2(innerW, barH),
+			Color = new Color(0f, 0f, 0f, 0.5f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_craftPanel.AddChild(_queueProgressBg);
+
+		_queueProgressFill = new ColorRect
+		{
+			Name = "QueueProgressFill",
+			LayoutMode = 3, // Position
+			Position = Vector2.Zero,
+			Size = new Vector2(0f, barH),
+			Color = new Color(0.4f, 0.8f, 0.4f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_queueProgressBg.AddChild(_queueProgressFill);
+
+		BuildRecipeTooltip();
+	}
+
+	/// <summary>Builds the recipe info tooltip (name + description + ingredient list).</summary>
+	private void BuildRecipeTooltip()
+	{
+		_recipeTooltip = new Panel
+		{
+			Name = "RecipeTooltip",
+			LayoutMode = 3, // Position
+			Visible = false,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			ZIndex = 210,
+		};
+		var tipStyle = new StyleBoxFlat
+		{
+			// Fully opaque background (alpha 1.0) so the 3D scene never shows
+			// through the tooltip.
+			BgColor = new Color(0f, 0f, 0f, 1f),
+			BorderColor = new Color(0.6f, 0.6f, 0.65f, 1f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+			ContentMarginLeft = 10f,
+			ContentMarginTop = 8f,
+			ContentMarginRight = 10f,
+			ContentMarginBottom = 8f,
+		};
+		_recipeTooltip.AddThemeStyleboxOverride("panel", tipStyle);
+
+		// The Panel itself is NOT a container — it does not lay out its children,
+		// so adding the name/description/ingredients straight to it would leave
+		// them all collapsed at the top-left, stacked on top of each other. A
+		// single FullRect VBoxContainer child is the container that stacks the
+		// rows vertically; the panel just draws the background. The panel's size
+		// is set explicitly each time the content changes (see
+		// UpdateRecipeTooltip) — a 0x0 rect would leave the StyleBoxFlat nothing
+		// to draw into, so the background must be given a real size.
+		//
+		// The content is inset by TipPad on every side (the FullRect anchor's
+		// negative offsets) so the text has even padding: the same on the left as
+		// the right, and the same on the top as the bottom. TipPad is the single
+		// source of truth for that inset, shared with the size calc below.
+		const float TipPad = 10f;
+		_recipeTipContent = new VBoxContainer
+		{
+			Name = "RecipeTipContent",
+			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_recipeTipContent.AddThemeConstantOverride("separation", 6);
+		_recipeTipContent.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		_recipeTipContent.Position = new Vector2(TipPad, TipPad);
+		_recipeTipContent.Size = new Vector2(-TipPad * 2f, -TipPad * 2f);
+		_recipeTooltip.AddChild(_recipeTipContent);
+
+		_recipeTipName = new Label
+		{
+			Name = "RecipeName",
+			LayoutMode = 2,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_recipeTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_recipeTipContent.AddChild(_recipeTipName);
+
+		// No autowrap and no custom width: the label is as wide as its text, so
+		// the whole tooltip width is driven by the single widest line (the long
+		// description, or the longest ingredient row) instead of a fixed 220px
+		// that either clipped the text or left dead space.
+		_recipeTipDesc = new Label
+		{
+			Name = "RecipeDesc",
+			LayoutMode = 2,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_recipeTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+		_recipeTipContent.AddChild(_recipeTipDesc);
+
+		_recipeTipIngredients = new VBoxContainer
+		{
+			Name = "RecipeIngredients",
+			LayoutMode = 2,
+		};
+		_recipeTipIngredients.AddThemeConstantOverride("separation", 3);
+		_recipeTipContent.AddChild(_recipeTipIngredients);
+
+		_root.AddChild(_recipeTooltip);
+	}
+
 	private void CreateSlot(int slotIndex, Vector2 position)
 	{
 		var slot = new Control
@@ -635,6 +930,9 @@ public partial class InventoryUI : CanvasLayer
 		{
 			RefreshSlot(i);
 		}
+		// The crafting pane's "possible count" depends on the inventory totals,
+		// which just changed — refresh it in the same pass.
+		RefreshCrafting();
 	}
 
 	private void RefreshSlot(int i)
@@ -751,8 +1049,477 @@ public partial class InventoryUI : CanvasLayer
 		}
 	}
 
+	// ------------------------------------------------------------------
+	// Crafting pane logic
+	// ------------------------------------------------------------------
+
 	/// <summary>
-	/// Changes the selected hotbar slot by <paramref name="delta"/> (wraps
+	/// (Re)builds the category tabs and the visible recipe rows for the current
+	/// category. Called at init and whenever the unlocked recipe set changes.
+	/// </summary>
+	private void RefreshCrafting()
+	{
+		if (_crafting == null || _craftPanel == null)
+		{
+			return;
+		}
+
+		// Make sure the database's ingredient totals are current.
+		_crafting.RebuildInventory(_inventory);
+
+		var unlocked = _crafting.GetUnlockedRecipes();
+		var categories = CraftingDatabase.CategoriesOf(unlocked);
+
+		// If no category is selected yet, pick the first.
+		if (!string.IsNullOrEmpty(_craftCategory) && !categories.Contains(_craftCategory))
+		{
+			_craftCategory = categories.Count > 0 ? categories[0] : "";
+		}
+		else if (string.IsNullOrEmpty(_craftCategory) && categories.Count > 0)
+		{
+			_craftCategory = categories[0];
+		}
+
+		RebuildCategoryTabs(categories);
+		RebuildRecipeRows(unlocked);
+		RefreshRecipeCounts();
+	}
+
+	/// <summary>Rebuilds the tab buttons (one per category) and highlights the active one.</summary>
+	private void RebuildCategoryTabs(List<string> categories)
+	{
+		foreach (Node child in _craftTabs.GetChildren())
+		{
+			child.QueueFree();
+		}
+
+		foreach (var category in categories)
+		{
+			bool active = category == _craftCategory;
+			var tab = new Button
+			{
+				Text = category,
+				TooltipText = category,
+				LayoutMode = 2,
+				Disabled = false,
+			};
+			tab.AddThemeFontSizeOverride("font_size", 14);
+			var style = new StyleBoxFlat
+			{
+				BgColor = active ? new Color(0.3f, 0.4f, 0.6f) : new Color(0.16f, 0.18f, 0.24f),
+				BorderColor = new Color(0.4f, 0.5f, 0.7f, active ? 1f : 0.6f),
+				BorderWidthLeft = 1,
+				BorderWidthTop = 1,
+				BorderWidthRight = 1,
+				BorderWidthBottom = 1,
+				ContentMarginLeft = 8f,
+				ContentMarginRight = 8f,
+				ContentMarginTop = 2f,
+				ContentMarginBottom = 2f,
+			};
+			tab.AddThemeStyleboxOverride("normal", style);
+			tab.AddThemeStyleboxOverride("hover", style);
+			tab.AddThemeStyleboxOverride("pressed", style);
+			tab.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
+			tab.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+			string captured = category;
+			tab.Pressed += () =>
+			{
+				_craftCategory = captured;
+				RefreshCrafting();
+			};
+			_craftTabs.AddChild(tab);
+		}
+	}
+
+	/// <summary>Rebuilds the recipe rows for the active category.</summary>
+	private void RebuildRecipeRows(IReadOnlyList<CraftingRecipe> unlocked)
+	{
+		foreach (Node child in _craftList.GetChildren())
+		{
+			child.QueueFree();
+		}
+		_visibleRecipes.Clear();
+		_recipeIcons.Clear();
+		_recipeNames.Clear();
+		_recipeCounts.Clear();
+		_recipeButtons.Clear();
+
+		foreach (var recipe in unlocked)
+		{
+			if (recipe.Category != _craftCategory)
+			{
+				continue;
+			}
+			_visibleRecipes.Add(recipe);
+			CreateRecipeRow(recipe);
+		}
+	}
+
+	/// <summary>
+	/// Creates one clickable recipe row: a <see cref="Button"/> that owns all of
+	/// the recipe's content (background, product icon, name, possible count) as
+	/// children. Pressing it enqueues a craft job into the crafting queue (1
+	/// item, or as many as possible when Shift is held), but only when the
+	/// player has the ingredients — the button's <c>Disabled</c> state mirrors
+	/// that, and the handler re-validates so a stale click can never enqueue.
+	/// The job is then processed over time in _Process (see ProcessCraftQueue),
+	/// like a single crafting station working through the list.
+	/// </summary>
+	private void CreateRecipeRow(CraftingRecipe recipe)
+	{
+		// The content's horizontal extent: icon (x 6..36) + name/count labels
+		// (x 44..164). The button's minimum width is set to this so it always
+		// spans at least as wide as everything it parents; combined with
+		// ExpandFill (below) the VBoxContainer stretches it to the pane's full
+		// width when there is more room.
+		const float contentRight = 164f;
+
+		var button = new Button
+		{
+			Name = $"Recipe_{recipe.ProductId}_{recipe.Category}",
+			LayoutMode = 2,
+			// ExpandFill (Expand | Fill): without the Expand bit an empty-text
+			// button's minimum width is ~0 and it stays smushed to the left of
+			// the VBoxContainer. Expand makes it claim the container's free
+			// width, Fill makes it stretch to exactly that. Same working
+			// pattern as SlotPicker/SettingsPanel.
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+			CustomMinimumSize = new Vector2(contentRight, 40f),
+			FocusMode = Control.FocusModeEnum.None,
+			MouseFilter = Control.MouseFilterEnum.Stop,
+		};
+
+		// No button text: the icon + name + count children (all children of the
+		// button) carry the content.
+		button.Text = "";
+
+		var rowBg = new ColorRect
+		{
+			Color = new Color(0.13f, 0.15f, 0.2f, 0.7f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		rowBg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		button.AddChild(rowBg);
+
+		float iconSize = 30f;
+		var icon = new ColorRect
+		{
+			Color = LookUpColor(recipe.ProductId),
+			LayoutMode = 3, // Position
+			Position = new Vector2(6f, 5f),
+			Size = new Vector2(iconSize, iconSize),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		button.AddChild(icon);
+
+		var name = new Label
+		{
+			Text = LookUpMaterialName(recipe.ProductId),
+			LayoutMode = 3, // Position
+			Position = new Vector2(44f, 6f),
+			Size = new Vector2(120f, 20f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		name.AddThemeFontSizeOverride("font_size", 15);
+		name.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		button.AddChild(name);
+
+		var count = new Label
+		{
+			Text = "",
+			LayoutMode = 3, // Position
+			Position = new Vector2(44f, 24f),
+			Size = new Vector2(120f, 14f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		count.AddThemeFontSizeOverride("font_size", 12);
+		button.AddChild(count);
+
+		// Clicking enqueues a craft job, but only when the player has the
+		// ingredients for it right now.
+		button.Pressed += () => EnqueueRecipe(recipe);
+
+		// Register the button so UpdateRecipeTooltip can hit-test hover.
+		_recipeHoverRects[recipe] = button;
+		_craftList.AddChild(button);
+		_recipeButtons[recipe] = button;
+		_recipeIcons[recipe] = icon;
+		_recipeNames[recipe] = name;
+		_recipeCounts[recipe] = count;
+	}
+
+	/// <summary>
+	/// Enqueues one job for <paramref name="recipe"/> (as many as possible when
+	/// Shift is held) — but only if the player currently has the ingredients.
+	/// No-op when nothing can be crafted or the queue is full.
+	/// </summary>
+	private void EnqueueRecipe(CraftingRecipe recipe)
+	{
+		int amount = IsShiftDown() ? _crafting.PossibleCount(recipe) : 1;
+		if (amount <= 0)
+		{
+			return; // can't craft any right now
+		}
+		// Cap the queue so it can't grow unbounded (e.g. spam-clicking).
+		if (_craftQueue.Count < 64)
+		{
+			_craftQueue.Enqueue((recipe, amount));
+		}
+		RefreshQueueLabel();
+	}
+
+	/// <summary>
+	/// Updates each visible recipe row's "possible count" label (green when ≥1,
+	/// grey when 0) and the product icon color, and mirrors craftability into
+	/// the button's Disabled state (a disabled button can't enqueue a job).
+	/// </summary>
+	private void RefreshRecipeCounts()
+	{
+		foreach (var recipe in _visibleRecipes)
+		{
+			if (!_recipeCounts.TryGetValue(recipe, out var countLabel))
+			{
+				continue;
+			}
+			int possible = _crafting.PossibleCount(recipe);
+			string label = possible <= 0 ? "—" : $"can craft x{possible}";
+			countLabel.Text = label;
+			countLabel.AddThemeColorOverride("font_color",
+				possible >= 1 ? new Color(0.5f, 0.9f, 0.5f) : new Color(0.55f, 0.55f, 0.6f));
+			if (_recipeButtons.TryGetValue(recipe, out var button))
+			{
+				button.Disabled = possible <= 0;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Advances the crafting queue by <paramref name="delta"/> seconds. Only one
+	/// job is active at a time; when its <c>CraftTime</c> elapses it consumes the
+	/// ingredients and adds the product to the inventory, then the next queued
+	/// job starts. A job that can no longer be afforded (ingredients spent
+	/// elsewhere while queued) is skipped.
+	/// </summary>
+	private void ProcessCraftQueue(double delta)
+	{
+		if (_crafting == null || _inventory == null)
+		{
+			return;
+		}
+
+		// If nothing is active, pull the next job off the queue.
+		if (_activeJob == null && _craftQueue.Count > 0)
+		{
+			var (recipe, amount) = _craftQueue.Dequeue();
+			// Re-validate: the player may have spent ingredients since enqueue.
+			if (_crafting.PossibleCount(recipe) >= amount)
+			{
+				_activeJob = (recipe, amount);
+				_jobElapsed = 0;
+			}
+			// else: drop it and try the next job on a later frame.
+		}
+
+		if (_activeJob == null)
+		{
+			UpdateProgressBar(0f, false);
+			return;
+		}
+
+		var (activeRecipe, activeAmount) = _activeJob.Value;
+		_jobElapsed += delta;
+
+		float needed = activeRecipe.CraftTime * activeAmount;
+		float progress = needed > 0f ? (float)Math.Clamp(_jobElapsed / needed, 0f, 1f) : 1f;
+		UpdateProgressBar(progress, true);
+
+		if (_jobElapsed >= needed)
+		{
+			// Complete the job: consume ingredients + add product.
+			int crafted = _crafting.Craft(activeRecipe, activeAmount, _inventory);
+			_dirty = crafted > 0; // refresh counts + slots if it landed
+			_activeJob = null;
+			_jobElapsed = 0;
+		}
+	}
+
+	/// <summary>Updates the crafting progress bar (fill + label) at the bottom of the pane.</summary>
+	private void UpdateProgressBar(float progress, bool active)
+	{
+		if (_queueProgressFill != null)
+		{
+			// The fill is a child of _queueProgressBg (full-rect); scale its width.
+			float bgW = _queueProgressBg.Size.X;
+			_queueProgressFill.Size = new Vector2(bgW * Mathf.Clamp(progress, 0f, 1f), _queueProgressFill.Size.Y);
+		}
+		if (_queueLabel != null)
+		{
+			_queueLabel.Text = active
+				? $"Crafting {LookUpMaterialName(_activeJob.Value.Recipe.ProductId)}…"
+				: (_craftQueue.Count > 0 ? $"{_craftQueue.Count} queued" : "Idle");
+		}
+	}
+
+	/// <summary>Updates the "N queued" label when the queue size changes.</summary>
+	private void RefreshQueueLabel()
+	{
+		if (_queueLabel != null && _activeJob == null)
+		{
+			_queueLabel.Text = _craftQueue.Count > 0 ? $"{_craftQueue.Count} queued" : "Idle";
+		}
+	}
+
+	/// <summary>
+	/// True while Shift is held. Uses the Input singleton's physical-key state,
+	/// which is the supported way to query a modifier in Godot 4 C#.
+	/// </summary>
+	private static bool IsShiftDown()
+		=> Input.IsPhysicalKeyPressed(Key.Shift);
+
+	/// <summary>
+	/// Hit-tests the mouse position against the visible recipe rows and returns
+	/// the hovered recipe (null when none). The row's on-screen rect is computed
+	/// by walking its ancestor chain up to the craft panel and summing positions,
+	/// which is robust to the ScrollContainer / VBoxContainer nesting.
+	/// </summary>
+	private CraftingRecipe RecipeAt(Vector2 viewportPos)
+	{
+		if (_craftPanel == null || _panel == null)
+		{
+			return null;
+		}
+
+		// The craft panel's top-left in viewport space.
+		Vector2 panelOrigin = _panel.Position + _craftPanel.Position;
+
+		foreach (var (recipe, row) in _recipeHoverRects)
+		{
+			if (row == null || !IsInstanceValid(row))
+			{
+				continue;
+			}
+
+			// Walk from the row up to (but not including) the craft panel,
+			// accumulating each ancestor's position relative to its parent.
+			Vector2 offset = Vector2.Zero;
+			var node = row;
+			while (node != null && node != _craftPanel)
+			{
+				offset += node.Position;
+				node = node.GetParent() as Control;
+			}
+
+			Vector2 rowTopLeft = panelOrigin + offset;
+			if (new Rect2(rowTopLeft, row.Size).HasPoint(viewportPos))
+			{
+				return recipe;
+			}
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Shows the recipe info tooltip when a recipe row is hovered and the
+	/// inventory is open; hides it otherwise. Follows the mouse with a small
+	/// offset, clamped to the viewport.
+	/// </summary>
+	private void UpdateRecipeTooltip()
+	{
+		if (_recipeTooltip == null)
+		{
+			return;
+		}
+
+		// Determine the hovered recipe from the mouse position.
+		_hoveredRecipe = IsOpen() ? RecipeAt(GetViewport().GetMousePosition()) : null;
+
+		bool show = _hoveredRecipe != null;
+		if (!show)
+		{
+			_recipeTooltip.Visible = false;
+			return;
+		}
+
+		var recipe = _hoveredRecipe;
+
+		// (Re)fill the tooltip content when the hovered recipe changes.
+		if (_tooltipRecipe != recipe)
+		{
+			_tooltipRecipe = recipe;
+			_recipeTipName.Text = LookUpMaterialName(recipe.ProductId);
+
+			string desc = recipe.Description;
+			if (string.IsNullOrEmpty(desc) && _world != null)
+			{
+				desc = _world.MaterialConfig.GetDescription(recipe.ProductId);
+			}
+			_recipeTipDesc.Text = string.IsNullOrEmpty(desc) ? " " : desc;
+
+			// Ingredient list.
+			foreach (Node child in _recipeTipIngredients.GetChildren())
+			{
+				child.QueueFree();
+			}
+			// Build a lookup of (materialId → have) so each ingredient line can
+			// be colored red when short.
+			var missing = _crafting.MissingIngredients(recipe);
+			var missingIds = new HashSet<int>();
+			foreach (var (mid, _, _) in missing)
+			{
+				missingIds.Add(mid);
+			}
+
+			foreach (var (materialId, needed) in recipe.Ingredients)
+			{
+				bool isMissing = missingIds.Contains(materialId);
+				var line = new HBoxContainer { LayoutMode = 2 };
+				var dot = new ColorRect
+				{
+					Color = LookUpColor(materialId),
+					CustomMinimumSize = new Vector2(12f, 12f),
+					Size = new Vector2(12f, 12f),
+					MouseFilter = Control.MouseFilterEnum.Ignore,
+				};
+				line.AddChild(dot);
+				var lbl = new Label
+				{
+					Text = $"{LookUpMaterialName(materialId)} x{needed}",
+					MouseFilter = Control.MouseFilterEnum.Ignore,
+				};
+				lbl.AddThemeFontSizeOverride("font_size", 13);
+				lbl.AddThemeColorOverride("font_color",
+					isMissing ? new Color(0.95f, 0.45f, 0.45f) : new Color(0.85f, 0.85f, 0.9f));
+				line.AddChild(lbl);
+				_recipeTipIngredients.AddChild(line);
+			}
+
+			// The tooltip scales to fit its content: size the panel to the
+			// VBoxContainer's minimum size (the stacked name/desc/ingredient rows,
+			// each sized to its own text) plus the TipPad inset on every side.
+			// The size must be set explicitly — a 0x0 panel rect gives the
+			// StyleBoxFlat nothing to draw, which is why the background looked
+			// invisible. No autowrap: the width is driven by the widest line.
+			// TipPad is the same constant used to inset the content (see
+			// BuildRecipeTooltip), so the left padding always equals the right.
+			const float tipPad = 10f;
+			Vector2 contentMin = _recipeTipContent.GetCombinedMinimumSize();
+			_recipeTooltip.Size = new Vector2(
+				contentMin.X + tipPad * 2f,
+				contentMin.Y + tipPad * 2f);
+		}
+
+		// Position: to the right of the mouse, clamped on-screen.
+		Vector2 mousePos = GetViewport().GetMousePosition();
+		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
+		Vector2 pos = mousePos + new Vector2(18f, 18f);
+		pos.X = Mathf.Min(pos.X, vpSize.X - _recipeTooltip.Size.X - 4f);
+		pos.Y = Mathf.Min(pos.Y, vpSize.Y - _recipeTooltip.Size.Y - 4f);
+		_recipeTooltip.Position = pos;
+		_recipeTooltip.Visible = true;
+	}
+
+	/// <summary>Changes the selected hotbar slot by <paramref name="delta"/> (wraps
 	/// around). Disabled while the inventory is open.
 	/// </summary>
 	private void CycleHotbar(int delta)

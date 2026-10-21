@@ -75,6 +75,20 @@ public partial class VoxelMaterialConfig : Resource
 	}
 
 	/// <summary>
+	/// The optional description text for a material id (empty when the material
+	/// has none or the id is unknown). Used by item / recipe tooltips.
+	/// </summary>
+	public string GetDescription(int id)
+	{
+		var def = GetDef(id);
+		if (def != null && def.Entry != null && !string.IsNullOrEmpty(def.Entry.Description))
+		{
+			return def.Entry.Description;
+		}
+		return "";
+	}
+
+	/// <summary>
 	/// All material defs in id order (id 1 first). Id order is the canonical order
 	/// used for palette indexing; the editor array may be in any order.
 	/// </summary>
@@ -149,8 +163,24 @@ public partial class VoxelMaterialConfig : Resource
 					AlbedoColor = new Color(0.12f, 0.12f, 0.14f),
 					Unbreakable = true,
 					BreakTime = 60f,
+					Description = "The unbreakable floor of the world.",
 				},
 			},
+			// ------------------------------------------------------------------
+			// Crafting products (ids 18..22). These are NOT generated in terrain;
+			// they only exist as items you craft and place. Descriptions feed the
+			// crafting tooltip.
+			// ------------------------------------------------------------------
+			MakeCrafted(18, "Plank", new Color(0.72f, 0.55f, 0.32f),
+				"Wooden planks. A basic building material."),
+			MakeCrafted(19, "Iron Plate", new Color(0.78f, 0.78f, 0.82f),
+				"A pressed plate of iron. Used in machines and tools."),
+			MakeCrafted(20, "Coal", new Color(0.20f, 0.20f, 0.22f),
+				"Burnable fuel, smelted from coal ore."),
+			MakeCrafted(21, "Stone Brick", new Color(0.50f, 0.52f, 0.56f),
+				"Cut stone bricks. A sturdier building block."),
+			MakeCrafted(22, "Machine Frame", new Color(0.45f, 0.48f, 0.55f),
+				"A rigid frame for mounting machines. A preview of the coming machine system."),
 		};
 
 		foreach (var def in defs)
@@ -171,6 +201,21 @@ public partial class VoxelMaterialConfig : Resource
 			Id = id,
 			Name = name,
 			Entry = new VoxelMaterialEntry { AlbedoColor = color, BreakTime = breakTime },
+		};
+		return def;
+	}
+
+	/// <summary>
+	/// Builds a crafted-product material def (not generated in terrain — only
+	/// obtainable via crafting). Carries a description for the crafting tooltip.
+	/// </summary>
+	private static VoxelMaterialDef MakeCrafted(int id, string name, Color color, string description)
+	{
+		var def = new VoxelMaterialDef
+		{
+			Id = id,
+			Name = name,
+			Entry = new VoxelMaterialEntry { AlbedoColor = color, Description = description },
 		};
 		return def;
 	}

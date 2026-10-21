@@ -27,6 +27,21 @@ public partial class VoxelMaterialEntry : Resource
 		}
 	}
 
+	/// <summary>
+	/// Optional human-readable description of this material, shown in item /
+	/// recipe tooltips. Empty by default; the UI falls back to the material's
+	/// name when this is blank.
+	/// </summary>
+	[Export(PropertyHint.MultilineText)] public string Description { get; set; } = "";
+	public void SetDescription(string value)
+	{
+		if (Description != value)
+		{
+			Description = value ?? "";
+			Raise();
+		}
+	}
+
 	/// <summary>Optional texture. Null = flat color.</summary>
 	[Export] public Texture2D Texture { get; set; }
 	public void SetTexture(Texture2D value)
