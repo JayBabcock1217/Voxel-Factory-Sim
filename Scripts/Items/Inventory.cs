@@ -250,6 +250,49 @@ public partial class Inventory : Node
 		return ItemStack.From(0);
 	}
 
+	// ------------------------------------------------------------------
+	// Save / restore (world persistence)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Serializes the 28 slots into parallel (materialId, count) arrays, one
+	/// entry per slot in order (hotbar 0..9 then storage 10..27). Pure data —
+	/// the <c>WorldSave</c> service writes these straight into the save file.
+	/// </summary>
+	public (int[] MaterialIds, int[] Counts) SaveState()
+	{
+		var ids = new int[TotalSlots];
+		var counts = new int[TotalSlots];
+		for (int i = 0; i < TotalSlots; i++)
+		{
+			ids[i] = Slots[i].MaterialId;
+			counts[i] = Slots[i].Count;
+		}
+		return (ids, counts);
+	}
+
+	/// <summary>
+	/// Restores the 28 slots from parallel (materialId, count) arrays (the
+	/// inverse of <see cref="SaveState"/>). Slots whose arrays are shorter are
+	/// left empty; a trailing <c>InventoryChanged</c> fires so the UI refreshes.
+	/// </summary>
+	public void LoadState(int[] materialIds, int[] counts)
+	{
+		int n = Math.Min(TotalSlots, Math.Min(materialIds?.Length ?? 0, counts?.Length ?? 0));
+		for (int i = 0; i < TotalSlots; i++)
+		{
+			if (i < n && materialIds[i] != 0 && counts[i] > 0)
+			{
+				Slots[i] = ItemStack.From(materialIds[i], counts[i]);
+			}
+			else
+			{
+				Slots[i] = ItemStack.From(0);
+			}
+		}
+		RaiseChanged();
+	}
+
 	/// <summary>Flips <see cref="IsOpen"/> and fires <see cref="InventoryChanged"/> + <see cref="Toggled"/>.</summary>
 	public void Toggle()
 	{

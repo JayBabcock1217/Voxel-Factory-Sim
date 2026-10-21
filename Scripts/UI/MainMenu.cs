@@ -1,23 +1,30 @@
 using Godot;
 using System;
+using FactorySim.Voxel;
 
 namespace FactorySim.UI;
 
 /// <summary>
 /// The main menu, built entirely in code (no .tscn layout needed beyond a single
 /// root node). Shows a title and three buttons:
-///   - Play: loads the main gameplay scene.
+///   - Play: opens the save/load SLOT PICKER (<see cref="SlotPicker"/>). Picking
+///     a slot loads it, "New World" starts fresh, then the scene switches to the
+///     gameplay scene (the chosen slot is handed across the scene change via the
+///     static <see cref="WorldSave.SessionSlotId"/> handoff).
 ///   - Settings: swaps to the shared <see cref="SettingsMenu"/>/panel.
 ///   - Quit: exits the game.
 ///
 /// A dark gradient background is drawn in code so the menu looks complete without
-/// any external assets.
+/// any external assets. The scene also hosts a <c>WorldSave</c> node (see
+/// <c>Scenes/MainMenu.tscn</c>) which the picker uses to list/manage slots.
 /// </summary>
 public partial class MainMenu : CanvasLayer
 {
 	private const string MainScenePath = "res://Scenes/Main.tscn";
 
 	private SettingsMenu _settingsMenu;
+	private SlotPicker _slotPicker;
+	private WorldSave _worldSave;
 	private Control _home;
 
 	public override void _Ready()
@@ -97,7 +104,7 @@ public partial class MainMenu : CanvasLayer
 		};
 		_home.AddChild(spacer);
 
-		_home.AddChild(MakeButton("Play", () => GetTree().ChangeSceneToFile(MainScenePath)));
+		_home.AddChild(MakeButton("Play", OpenSlotPicker));
 		_home.AddChild(MakeButton("Settings", OpenSettings));
 		_home.AddChild(MakeButton("Quit", () => GetTree().Quit()));
 
@@ -109,6 +116,18 @@ public partial class MainMenu : CanvasLayer
 		};
 		_settingsMenu.Home = _home;
 		AddChild(_settingsMenu);
+
+		// Slot picker overlay: shown by Play. The WorldSave node (a sibling in
+		// the scene, see MainMenu.tscn) owns the slot index and the FSAV files.
+		_worldSave = GetNodeOrNull<WorldSave>("WorldSave");
+		_slotPicker = new SlotPicker
+		{
+			Name = "SlotPicker",
+			LayoutMode = 3,
+		};
+		_slotPicker.LoadRequested += OnLoadSlot;
+		_slotPicker.NewWorldRequested += OnNewWorld;
+		AddChild(_slotPicker);
 
 		// The VBox's size isn't finalized until the layout pass, so defer the
 		// first centering to after it; _Process keeps it centered afterwards.
@@ -140,6 +159,63 @@ public partial class MainMenu : CanvasLayer
 	private void OpenSettings()
 	{
 		_settingsMenu.OpenSettings();
+	}
+
+	// ------------------------------------------------------------------
+	// Slot picker
+	// ------------------------------------------------------------------
+
+	private void OpenSlotPicker()
+	{
+		// The WorldSave node lives in the scene (MainMenu.tscn); if it is missing
+		// for any reason, degrade to starting a fresh world (no slot).
+		if (_worldSave == null)
+		{
+			GD.PushWarning("[MainMenu] No WorldSave node found — starting a fresh world.");
+			StartFreshWorld();
+			return;
+		}
+
+		_slotPicker.Open(_home, _worldSave);
+	}
+
+	private void OnLoadSlot(string slotId, string slotName)
+	{
+		// Load the chosen slot into the menu's WorldSave (so the picker's state
+		// is coherent if it is re-opened) and publish the slot for the gameplay
+		// scene: the Main.tscn WorldSave node's _Ready reads the static
+		// SessionSlotId and re-loads the slot file, so the world re-applies the
+		// saved edits / player / inventory / drops.
+		_worldSave.SetActiveSlot(slotId, slotName);
+		if (!_worldSave.LoadFrom(slotId))
+		{
+			GD.PushWarning($"[MainMenu] Slot '{slotId}' could not be loaded — starting a fresh world.");
+		}
+		GotoGameScene();
+	}
+
+	private void OnNewWorld(string slotId, string slotName)
+	{
+		// A fresh world: the slot is already created (index entry) and published
+		// by the picker; there is nothing to load. The in-game auto-save on quit
+		// writes the slot's first file.
+		_worldSave.SetActiveSlot(slotId, slotName);
+		GotoGameScene();
+	}
+
+	private void StartFreshWorld()
+	{
+		// No WorldSave node (degraded): publish a fresh session so the game
+		// scene's WorldSave (if present) loads nothing.
+		WorldSave.SessionSlotId = null;
+		WorldSave.SessionSlotName = null;
+		WorldSave.SessionFresh = true;
+		GotoGameScene();
+	}
+
+	private void GotoGameScene()
+	{
+		GetTree().ChangeSceneToFile(MainScenePath);
 	}
 
 	private static Button MakeButton(string text, Action pressed)

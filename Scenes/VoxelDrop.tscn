@@ -1,26 +1,27 @@
-[gd_scene format=3]
+[gd_scene format=3 uid="uid://2mnm306kojke"]
 
-[ext_resource type="Script" path="res://Scripts/Items/VoxelDrop.cs" id="1_drop"]
-
-[sub_resource type="BoxMesh" id="BoxMesh_drop"]
-size = Vector3(0.3, 0.3, 0.3)
+[ext_resource type="Script" uid="uid://b56b7wfqyhwen" path="res://Scripts/Items/VoxelDrop.cs" id="1_drop"]
 
 [sub_resource type="SphereShape3D" id="SphereShape_drop"]
 radius = 0.25
 
-[node name="VoxelDrop" type="CharacterBody3D"]
-script = ExtResource("1_drop")
-collision_layer = 2
-collision_mask = 1
+[sub_resource type="BoxMesh" id="BoxMesh_drop"]
+size = Vector3(0.3, 0.3, 0.3)
 
-[node name="DropPickup" type="Area3D" parent="."]
+[node name="VoxelDrop" type="CharacterBody3D" unique_id=181014905]
+collision_layer = 2
+script = ExtResource("1_drop")
+
+[node name="DropPickup" type="Area3D" parent="." unique_id=1702882891]
 collision_layer = 4
 collision_mask = 0
-[node name="PickupShape" type="CollisionShape3D" parent="DropPickup"]
+
+[node name="PickupShape" type="CollisionShape3D" parent="DropPickup" unique_id=1194232853]
 shape = SubResource("SphereShape_drop")
 
-[node name="DropMesh" type="MeshInstance3D" parent="."]
+[node name="DropMesh" type="MeshInstance3D" parent="." unique_id=183241049]
+gi_mode = 2
 mesh = SubResource("BoxMesh_drop")
 
-[node name="DropCollision" type="CollisionShape3D" parent="."]
+[node name="DropCollision" type="CollisionShape3D" parent="." unique_id=45233770]
 shape = SubResource("SphereShape_drop")

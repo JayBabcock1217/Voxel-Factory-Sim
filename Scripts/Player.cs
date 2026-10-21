@@ -118,6 +118,52 @@ public partial class Player : CharacterBody3D
 		}
 	}
 
+	// ------------------------------------------------------------------
+	// Save / restore (world persistence)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The player's world position for saving. The <c>WorldSave</c> service
+	/// reads this (with <see cref="LookForSave"/>) when collecting a snapshot;
+	/// it is the authoritative position the world restores on load.
+	/// </summary>
+	public Vector3 PositionForSave => GlobalPosition;
+
+	/// <summary>
+	/// The player's current yaw (body Y rotation) and pitch (camera X rotation),
+	/// in radians, for saving. These back the private <c>_yaw</c>/<c>_pitch</c>
+	/// fields that <see cref="UpdateMouseLook"/> applies to the body/camera.
+	/// </summary>
+	public (float Yaw, float Pitch) LookForSave => (_yaw, _pitch);
+
+	/// <summary>
+	/// Restores the player's transform from a saved world: sets the position and
+	/// the private yaw/pitch (and snaps the body + camera to match) so the next
+	/// <see cref="UpdateMouseLook"/> continues from the saved view. Called by the
+	/// <c>WorldSave</c> service instead of the world's terrain spawn when a save
+	/// exists.
+	/// </summary>
+	public void RestoreFromSave(Vector3 position, float yaw, float pitch)
+	{
+		GlobalPosition = position;
+		_yaw = Mathf.Wrap(yaw, -Mathf.Pi, Mathf.Pi);
+		_pitch = Mathf.Clamp(pitch, -Mathf.DegToRad(MaxPitchDegrees), Mathf.DegToRad(MaxPitchDegrees));
+
+		// Snap the body yaw and camera pitch immediately so the view is correct
+		// before the next physics tick (UpdateMouseLook would also do it, but it
+		// only runs while the mouse is captured and the player may start frozen).
+		var bodyRotation = Rotation;
+		bodyRotation.Y = _yaw;
+		Rotation = bodyRotation;
+
+		if (_camera != null)
+		{
+			var cameraRotation = _camera.Rotation;
+			cameraRotation.X = _pitch;
+			_camera.Rotation = cameraRotation;
+		}
+	}
+
 	/// <summary>
 	/// True while the inventory UI is open. The Inventory node lives in the
 	/// "inventory" group and is looked up lazily, then cached; the IsOpen

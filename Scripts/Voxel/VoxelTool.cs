@@ -72,6 +72,9 @@ public partial class VoxelTool : Node3D
 	private Camera3D _camera;
 	private Node3D _highlight;
 	private StandardMaterial3D _highlightMaterial;
+	private StandardMaterial3D _highlightFillMaterial;
+	private MeshInstance3D _highlightFill;
+	private BoxMesh _highlightFillMesh;
 	private bool _hasTarget;
 	private Vector3I _targetVoxel;
 
@@ -115,10 +118,12 @@ public partial class VoxelTool : Node3D
 			GD.PushWarning($"[VoxelTool] No camera at '{CameraPath}' — tool targeting disabled.");
 		}
 
-		// Target highlight: a glowing wireframe shaped like the voxel's own
-		// mesh (the edges of the solid's exposed faces), scaled 105% around the
-		// voxel center. Rendered as unshaded emissive lines so the glow reads
-		// against any background; the mesh is rebuilt per targeted voxel.
+		// Target highlight: a translucent FILLED box (the classic, instantly
+		// readable Minecraft-style highlight) over the targeted voxel, with a
+		// glowing wireframe of the voxel's own exposed-face edges on top. The
+		// fill makes the highlighted block unmistakable; the wireframe shows the
+		// voxel's true exposed shape. Both are unshaded emissive so they read
+		// against any background.
 		_highlightMaterial = new StandardMaterial3D
 		{
 			AlbedoColor = AddHighlightColor,
@@ -127,10 +132,27 @@ public partial class VoxelTool : Node3D
 			EmissionEnergyMultiplier = 2.5f,
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 		};
+		// Translucent fill: semi-transparent so the voxel beneath still shows
+		// through, but bright enough to clearly mark the targeted block.
+		_highlightFillMaterial = new StandardMaterial3D
+		{
+			AlbedoColor = new Color(AddHighlightColor, 0.35f),
+			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
+			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+			EmissionEnabled = true,
+			Emission = AddHighlightColor,
+			EmissionEnergyMultiplier = 1.2f,
+			CullMode = BaseMaterial3D.CullModeEnum.Disabled, // double-sided so it reads from inside too
+		};
 
 		// The highlight is a pivot Node3D (positioned at the targeted voxel's
-		// corner) with a child MeshInstance3D that holds the voxel-shaped
+		// center) with a child MeshInstance3D that holds the voxel-shaped
 		// wireframe in local 0..1 space and is scaled 105% by the voxel size.
+		// Its orientation is locked to the WORLD (set in _Process via
+		// GlobalTransform with an identity basis) because this tool is a child
+		// of the player's CharacterBody3D, which yaws with the mouse — without
+		// the lock the highlight would spin around the voxel as the camera turns.
 		_highlight = new Node3D { Name = "Highlight", Visible = false };
 		AddChild(_highlight);
 
@@ -146,6 +168,21 @@ public partial class VoxelTool : Node3D
 			Visible = false,
 		};
 		_highlight.AddChild(_highlightMeshInstance);
+
+		// Translucent filled box: a full voxel-size BoxMesh that fills the
+		// targeted block. The BoxMesh is centered on its own origin (local
+		// -0.5..0.5 per axis for a size-1 box), so with the pivot at the voxel
+		// center it fills the voxel exactly; it is scaled 105% with the rest of
+		// the highlight so it reads as the block slightly enlarged.
+		_highlightFillMesh = new BoxMesh { Size = new Vector3(1f, 1f, 1f) };
+		_highlightFill = new MeshInstance3D
+		{
+			Name = "HighlightFill",
+			Mesh = _highlightFillMesh,
+			MaterialOverride = _highlightFillMaterial,
+			Visible = false,
+		};
+		_highlight.AddChild(_highlightFill);
 
 		// On-screen debug: a CanvasLayer + Label that follows the camera (so it
 		// renders over the 3D world) and is re-shown on every tool switch.
@@ -225,10 +262,27 @@ public partial class VoxelTool : Node3D
 			// EnsureHighlightMesh) and is scaled 105% by the voxel size, so the
 			// wireframe reads as the voxel's shape slightly larger than the voxel,
 			// expanding around the voxel center.
+			//
+			// Orientation is locked to the world: this tool is a child of the
+			// player's CharacterBody3D, which yaws with the mouse (Player
+			// UpdateMouseLook sets the body's Y rotation). Setting only
+			// GlobalPosition would leave the highlight inheriting that yaw, so it
+			// would orbit the voxel as the camera turns. Giving it a
+			// GlobalTransform with an identity basis overrides the inherited
+			// rotation, keeping the wireframe axis-aligned with the world.
 			float vs = _world.VoxelSize;
-			_highlight.GlobalPosition = new Vector3(hitVoxel.X, hitVoxel.Y, hitVoxel.Z) * vs
-				+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
-			_highlightMeshInstance.Scale = new Vector3(vs * 1.05f, vs * 1.05f, vs * 1.05f);
+			_highlight.GlobalTransform = new Transform3D(
+				Basis.Identity,
+				new Vector3(hitVoxel.X, hitVoxel.Y, hitVoxel.Z) * vs
+				+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
+			// Both the wireframe and the fill box are centered on the local
+			// origin (the voxel center), so scaling each MeshInstance about its
+			// origin expands the highlight symmetrically about the voxel. 1.05x
+			// keeps the fill hugging the block (slightly larger so it's clearly
+			// the targeted one) and the wireframe reads just outside it.
+			float hs = vs * 1.05f;
+			_highlightMeshInstance.Scale = new Vector3(hs, hs, hs);
+			_highlightFill.Scale = new Vector3(hs, hs, hs);
 
 			// Re-shape the highlight to the target's own voxel geometry (cached
 			// per voxel so the mesh is only rebuilt when the target changes).
@@ -250,6 +304,7 @@ public partial class VoxelTool : Node3D
 			// so re-aiming at a partially-mined voxel resumes where it left off.
 			_highlight.Visible = false;
 			_highlightMeshInstance.Visible = false;
+			_highlightFill.Visible = false;
 		}
 
 		// Pickaxe: hold left mouse (captured) to damage the target over time.
@@ -413,12 +468,17 @@ public partial class VoxelTool : Node3D
 			Tool.Remove => RemoveHighlightColor,
 			_ => PickaxeHighlightColor,
 		};
-		// Recolor the highlight wireframe (both albedo and emission) so the
-		// glow matches the active tool.
+		// Recolor the highlight wireframe and the translucent fill (both albedo
+		// and emission) so the glow matches the active tool.
 		if (_highlightMaterial != null)
 		{
 			_highlightMaterial.AlbedoColor = color;
 			_highlightMaterial.Emission = color;
+		}
+		if (_highlightFillMaterial != null)
+		{
+			_highlightFillMaterial.AlbedoColor = new Color(color, 0.35f);
+			_highlightFillMaterial.Emission = color;
 		}
 		// Switching tools drops any in-progress pickaxe mining; the per-voxel
 		// damage table is kept so a voxel mined with the pickaxe can be
@@ -485,8 +545,14 @@ public partial class VoxelTool : Node3D
 		{
 			// Target turned to air: show nothing (the next frame hides it too).
 			_highlightMeshInstance.Visible = false;
+			_highlightFill.Visible = false;
 			return;
 		}
+
+		// The translucent fill box marks the targeted block and is always shown
+		// for a solid target — even when the wireframe has few or no exposed
+		// faces — so the highlight is unmistakable.
+		_highlightFill.Visible = true;
 
 		var data = new ChunkData(1, 1, 1);
 		data.Set(0, 0, 0, (byte)material);
@@ -511,8 +577,11 @@ public partial class VoxelTool : Node3D
 		// Mesh with the world's real palette so the material slot is valid.
 		// BuildVisual emits vertices in WORLD-VOXEL coordinates (origin = the
 		// target voxel * VoxelSize), so record the pivot's world position here
-		// and translate the resulting edges into the pivot's local frame
-		// (-0.5..0.5 * voxelSize per axis, centered on the voxel) in BuildEdgeMesh.
+		// and translate the resulting edges into the pivot's local frame. The
+		// pivot sits at the voxel CENTER, so the edges are centered on the local
+		// origin (-0.5..0.5 * voxelSize per axis) — that makes the MeshInstance
+		// origin coincide with the voxel center, so the 105% scale expands the
+		// wireframe symmetrically about the voxel.
 		float vs = _world.VoxelSize;
 		_highlightPivotWorld = new Vector3(voxel.X, voxel.Y, voxel.Z) * vs
 			+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
@@ -521,14 +590,15 @@ public partial class VoxelTool : Node3D
 		_meshedTarget = voxel;
 
 		// BuildEdgeMesh returns null when the voxel has no exposed faces (fully
-		// buried / at an unloaded border). In that case keep whatever mesh is
-		// already assigned and just hide the highlight — assigning a bare Mesh()
-		// would re-trigger the "required virtual method" error.
+		// buried / at an unloaded border). In that case the wireframe is hidden,
+		// but the pivot stays visible so the translucent FILL BOX still marks the
+		// targeted block. (Assigning a bare Mesh() would re-trigger the "required
+		// virtual method" error, so we keep the previous wireframe.)
 		if (wire == null)
 		{
 			_highlightWireframe = null;
 			_highlightMeshInstance.Visible = false;
-			_highlight.Visible = false;
+			_highlight.Visible = true; // keep the fill box visible
 			return;
 		}
 
@@ -568,11 +638,13 @@ public partial class VoxelTool : Node3D
 	/// unordered quantized vertex-key set) and drawn as line primitives, giving
 	/// a clean wireframe of the voxel's exposed surface.
 	///
-	/// <paramref name="worldOffset"/> is the pivot's absolute world position:
-	/// BuildVisual emits vertices in world-voxel coordinates, so each vertex is
-	/// translated by <c>-worldOffset</c> into the pivot's local frame (0..1 per
-	/// axis for a unit voxel). The caller then scales the MeshInstance3D by
-	/// voxelSize * 1.05 around the pivot to expand the wireframe.
+	/// <paramref name="worldOffset"/> is the pivot's absolute world position (the
+	/// targeted voxel's CENTER): BuildVisual emits vertices in world-voxel
+	/// coordinates, so each vertex is translated by <c>-worldOffset</c> into the
+	/// pivot's local frame — centered on the local origin (-0.5..0.5 per axis for
+	/// a unit voxel). The caller then scales the MeshInstance3D by voxelSize *
+	/// 1.05 around that origin, expanding the wireframe symmetrically about the
+	/// voxel center.
 	///
 	/// Vertices are read through a <see cref="MeshDataTool"/> per surface (the
 	/// supported API in Godot 4.8 C# — <see cref="ArrayMesh"/> exposes no direct

@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using FactorySim.Items;
 
 namespace FactorySim.Voxel;
 
@@ -299,6 +300,30 @@ public partial class VoxelWorld : Node3D
 	private Node3D _chunkRoot;
 	private readonly Dictionary<Vector2I, VoxelChunk> _chunks = new();
 	private bool _playerSpawned;
+
+	/// <summary>
+	/// Every voxel the player has edited this session, keyed by world voxel
+	/// (latest value wins). This is the persistence layer: <c>SetVoxel</c> is
+	/// the single choke point all edits route through, so recording here
+	/// captures adds, breaks, and pickaxe removals alike. Saved to / loaded
+	/// from the <c>WorldSave</c> service; a material id of 0 (air) means removed.
+	/// </summary>
+	private readonly Dictionary<Vector3I, byte> _edits = new();
+
+	/// <summary>
+	/// Health for every voxel the player has damaged that is still solid, keyed
+	/// by world voxel. Complementary to <see cref="_edits"/>: edits reset a
+	/// voxel to full health, so only voxels that were damaged (not replaced)
+	/// live here. Saved to / loaded from the <c>WorldSave</c> service.
+	/// </summary>
+	private readonly Dictionary<Vector3I, float> _damagedHealth = new();
+
+	/// <summary>
+	/// The <c>WorldSave</c> service node (looked up lazily). Owns the pending
+	/// snapshot loaded from disk and the save triggers. Null when there is no
+	/// save node in the scene (the world then runs without persistence).
+	/// </summary>
+	private WorldSave _save;
 	private VoxelMeshMode _lastBuiltMode = (VoxelMeshMode)(-1);
 	/// <summary>
 	/// Monotonic stamp for <see cref="VoxelChunk.EditPriority">: each dirty ring
@@ -357,6 +382,20 @@ public partial class VoxelWorld : Node3D
 		if (BiomeConfig != null && BiomeConfig.Count == 0)
 		{
 			SaveBiomeConfig();
+		}
+
+		// A "New World" session carries a user-chosen seed (published by the
+		// main menu's slot picker and read by this scene's WorldSave node in its
+		// own _Ready, which runs first — WorldSave is an earlier sibling).
+		// Apply it to Seed BEFORE BuildConfig() so the height/cave/forest/biome
+		// noise sources and GenConfig.Seed (ores/rocks) all pick it up. A load
+		// session (no session seed) keeps the export/scene seed, and a directly-
+		// run scene (no WorldSave node) also keeps the export seed.
+		var sessionSave = GetSaveService();
+		if (sessionSave != null && sessionSave.HasSessionSeed)
+		{
+			Seed = sessionSave.ActiveSessionSeed;
+			GD.Print($"[VoxelWorld] Applying session seed {Seed} for this world.");
 		}
 
 		_config = BuildConfig();
@@ -576,7 +615,8 @@ public partial class VoxelWorld : Node3D
 			playerNode.SetPhysicsProcess(false);
 			if (_chunks.TryGetValue(Vector2I.Zero, out VoxelChunk spawnChunk)
 				&& spawnChunk.DataReady && !spawnChunk.NeedsMesh
-				&& SpawnPlayerOnTerrain(playerNode))
+				&& !HasPendingEdits
+				&& SpawnOrRestorePlayer(playerNode))
 			{
 				_playerSpawned = true;
 				playerNode.SetPhysicsProcess(true);
@@ -700,6 +740,195 @@ public partial class VoxelWorld : Node3D
 		return chunk.Data.GetHealth(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ);
 	}
 
+	// ------------------------------------------------------------------
+	// World persistence (edits + health capture / replay)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Returns a copy of every voxel the player has edited this session
+	/// (world voxel → material id, 0 = air/removed). The <c>WorldSave</c>
+	/// service iterates this when collecting a snapshot.
+	/// </summary>
+	public IReadOnlyDictionary<Vector3I, int> GetEdits()
+	{
+		var copy = new Dictionary<Vector3I, int>(_edits.Count);
+		foreach (var kv in _edits)
+		{
+			copy[kv.Key] = kv.Value;
+		}
+		return copy;
+	}
+
+	/// <summary>
+	/// Returns a copy of every damaged-voxel health this session (world voxel →
+	/// remaining health 0..100). The <c>WorldSave</c> service iterates this when
+	/// collecting a snapshot (and filters out voxels that have since been removed).
+	/// </summary>
+	public IReadOnlyDictionary<Vector3I, float> GetDamagedHealth()
+	{
+		var copy = new Dictionary<Vector3I, float>(_damagedHealth.Count);
+		foreach (var kv in _damagedHealth)
+		{
+			copy[kv.Key] = kv.Value;
+		}
+		return copy;
+	}
+
+	/// <summary>
+	/// Re-applies a set of saved voxel edits to the world, for one chunk. Each
+	/// (world voxel, material) pair is written via <see cref="SetVoxel"/> into
+	/// the chunk it belongs to (voxels outside the chunk or out of range are
+	/// ignored — they belong to a neighbour). Does NOT re-mesh: the caller is
+	/// expected to flag the chunk + its 1-ring for a rebuild (see
+	/// <see cref="ApplyLoadedChunk"/>). Used on load to restore the player's
+	/// edits onto freshly generated terrain.
+	/// </summary>
+	public void ApplyEdits(IReadOnlyList<(Vector3I Voxel, int Material)> edits)
+	{
+		if (edits == null)
+		{
+			return;
+		}
+
+		foreach (var (v, material) in edits)
+		{
+			SetVoxel(v, material);
+		}
+	}
+
+	/// <summary>
+	/// Re-applies a set of saved damaged-voxel health values to the world, for
+	/// one chunk. Health is written with <c>ChunkData.SetHealth</c> directly (no
+	/// re-mesh, since health is invisible until a voxel breaks). Voxels in a
+	/// neighbour chunk or out of range are ignored.
+	/// </summary>
+	public void ApplyHealth(IReadOnlyList<(Vector3I Voxel, float Health)> health)
+	{
+		if (health == null)
+		{
+			return;
+		}
+
+		foreach (var (v, h) in health)
+		{
+			if (v.Y < 0 || v.Y >= ChunkHeight)
+			{
+				continue;
+			}
+
+			if (!_chunks.TryGetValue(ChunkCoordOf(v.X, v.Z), out VoxelChunk chunk))
+			{
+				continue;
+			}
+
+			int lx = v.X - chunk.Coord.X * ChunkSizeXZ;
+			int lz = v.Z - chunk.Coord.Y * ChunkSizeXZ;
+			chunk.Data.SetHealth(lx, v.Y, lz, h);
+		}
+	}
+
+	/// <summary>
+	/// The load-time hook: apply one chunk's saved edits + health (pulled from
+	/// the <c>WorldSave</c> service's pending snapshot) and flag the chunk plus
+	/// its 1-chunk ring for a rebuild with fresh edit priority, so the budget
+	/// loop meshes the edited chunk first. Called by <see cref="OnGenerationComplete"/>
+	/// the frame a chunk's data finishes generating. A no-op when there is no
+	/// pending snapshot (a fresh world).
+	/// </summary>
+	public void ApplyLoadedChunk(VoxelChunk chunk)
+	{
+		var save = GetSaveService();
+		if (save == null || save.PendingEdits == null)
+		{
+			return;
+		}
+
+		bool anything = false;
+
+		var edits = save.ConsumePendingEdits(chunk.Coord, ChunkSizeXZ);
+		if (edits.Count > 0)
+		{
+			ApplyEdits(edits);
+			anything = true;
+		}
+
+		var health = save.ConsumePendingHealth(chunk.Coord, ChunkSizeXZ);
+		if (health.Count > 0)
+		{
+			ApplyHealth(health);
+			anything = true;
+		}
+
+		if (!anything)
+		{
+			return;
+		}
+
+		// The edited chunk AND its 1-ring must re-mesh: border faces are culled
+		// against the neighbour's state, so the neighbours re-cull too. A fresh
+		// edit priority makes the budget loop rebuild this area before the
+		// surrounding (never-edited) chunks.
+		chunk.NeedsMesh = true;
+		chunk.EditPriority = ++_editPriorityCounter;
+		MarkNeighboursForRebuild(chunk.Coord);
+	}
+
+	/// <summary>
+	/// Restores the player's saved transform (position + yaw/pitch) in place of
+	/// the terrain spawn. Returns true when a saved player was applied (the
+	/// caller should NOT also run <c>SpawnPlayerOnTerrain</c>); false when there
+	/// was no saved player (fresh world — the normal terrain spawn applies).
+	/// </summary>
+	public bool RestorePlayerFromSave(Node3D player)
+	{
+		var save = GetSaveService();
+		if (save == null || !save.ConsumePendingPlayer(out Vector3 pos, out float yaw, out float pitch))
+		{
+			return false;
+		}
+
+		if (player is Player p)
+		{
+			p.RestoreFromSave(pos, yaw, pitch);
+			GD.Print($"[VoxelWorld] Restored player from save at {pos} (yaw={yaw:F2}, pitch={pitch:F2}).");
+		}
+		else
+		{
+			player.GlobalPosition = pos;
+		}
+		return true;
+	}
+
+	/// <summary>
+	/// True while the <c>WorldSave</c> service still holds unapplied saved edits
+	/// or health (i.e. the world has not finished re-applying the saved world).
+	/// Used to keep the spawn gate honest: when the saved player position sits in
+	/// a chunk other than (0,0), the gate waits until those chunks load and their
+	/// edits are applied before the player is placed. A fresh world (no save, or
+	/// a save with nothing to apply) reports false immediately.
+	/// </summary>
+	public bool HasPendingEdits
+	{
+		get
+		{
+			var save = GetSaveService();
+			return save != null && save.HasPendingEdits;
+		}
+	}
+
+	/// <summary>
+	/// Looks up (and caches) the <c>WorldSave</c> service node by name, or null
+	/// when the scene has none (the world then runs without persistence).
+	/// </summary>
+	private WorldSave GetSaveService()
+	{
+		if (_save == null && GetTree() != null)
+		{
+			_save = GetTree().Root.FindChild("WorldSave", recursive: true) as WorldSave;
+		}
+		return _save;
+	}
+
 	/// <summary>
 	/// Subtracts <paramref name="amount"/> (percentage points) from a voxel's
 	/// health, clamped at 0. Returns the voxel's health after the damage (full
@@ -718,7 +947,21 @@ public partial class VoxelWorld : Node3D
 		}
 
 		chunk.Data.Damage(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ, amount);
-		return chunk.Data.GetHealth(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ);
+		float health = chunk.Data.GetHealth(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ);
+
+		// Record the damage for persistence: only when the voxel is still solid
+		// and below full health. (A broken voxel is removed via SetVoxel, which
+		// handles its own persistence.) Full health clears the entry.
+		if (health < VoxelHealth.MaxHealth)
+		{
+			_damagedHealth[v] = health;
+		}
+		else
+		{
+			_damagedHealth.Remove(v);
+		}
+
+		return health;
 	}
 
 	/// <summary>
@@ -928,6 +1171,57 @@ public partial class VoxelWorld : Node3D
 		return true;
 	}
 
+	/// <summary>
+	/// Spawns the player: restores the saved transform when a save exists
+	/// (via <see cref="RestorePlayerFromSave"/>), otherwise places the player on
+	/// the generated terrain (via <see cref="SpawnPlayerOnTerrain"/>). After a
+	/// successful restore, the saved item drops are re-spawned onto the now-solid
+	/// spawn chunk. Returns false when the save has no player (so the caller
+	/// falls through to the terrain spawn).
+	/// </summary>
+	private bool SpawnOrRestorePlayer(Node3D player)
+	{
+		var save = GetSaveService();
+		if (save != null && save.Snapshot != null)
+		{
+			// A save exists: restore the player's saved transform (instead of the
+			// terrain spawn) and the saved inventory. The saved item drops are
+			// re-spawned from the ON-DISK snapshot (the authoritative copy), not
+			// the in-memory Snapshot, so a fresh world with a pending player
+			// still restores the drops that were on disk.
+			RestorePlayerFromSave(player);
+			RestoreInventoryFromSave(save.Snapshot);
+			save.ApplyDrops(save.Snapshot);
+			return true;
+		}
+		return SpawnPlayerOnTerrain(player);
+	}
+
+	/// <summary>
+	/// Restores the saved inventory (all 28 slots) from <paramref name="data"/>.
+	/// A no-op when there is no inventory node or the snapshot held no slots.
+	/// Called once, when the player is restored from a save.
+	/// </summary>
+	private void RestoreInventoryFromSave(WorldSaveFile.Data data)
+	{
+		if (data == null || data.Inventory.Count == 0)
+		{
+			return;
+		}
+
+		if (GetTree().GetFirstNodeInGroup("inventory") is Inventory inventory)
+		{
+			var ids = new int[data.Inventory.Count];
+			var counts = new int[data.Inventory.Count];
+			for (int i = 0; i < data.Inventory.Count; i++)
+			{
+				ids[i] = data.Inventory[i].MaterialId;
+				counts[i] = data.Inventory[i].Count;
+			}
+			inventory.LoadState(ids, counts);
+		}
+	}
+
 	/// <summary>Regenerates the data of every loaded chunk (for parameter testing).</summary>
 	public void RegenerateWorld()
 	{
@@ -950,6 +1244,46 @@ public partial class VoxelWorld : Node3D
 		{
 			lod.Invalidate();
 		}
+	}
+
+	// ------------------------------------------------------------------
+	// Test-only seams (used by WorldSaveTest; never called in gameplay)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Test-only: returns the current generation config without rebuilding it.
+	/// Lets <c>WorldSaveTest</c> generate a chunk synchronously against the same
+	/// config the world would use, so the terrain is deterministic per seed.
+	/// </summary>
+	public GenConfig BuildConfigForTest()
+	{
+		if (_config == null)
+		{
+			_config = BuildConfig();
+		}
+		return _config;
+	}
+
+	/// <summary>
+	/// Test-only: inserts an already-generated chunk into <see cref="_chunks"/>
+	/// (bypassing the async generation pipeline) so the world's edit/query
+	/// paths treat it as a loaded, ready chunk.
+	/// </summary>
+	public void RegisterChunkForTest(Vector2I coord, VoxelChunk chunk)
+	{
+		_chunks[coord] = chunk;
+	}
+
+	/// <summary>Test-only: writes a single voxel (the same path gameplay uses).</summary>
+	public void SetVoxelForTest(Vector3I v, int material)
+	{
+		SetVoxel(v, material);
+	}
+
+	/// <summary>Test-only: damages a voxel (the same path gameplay uses).</summary>
+	public float DamageVoxelForTest(Vector3I v, float amount)
+	{
+		return DamageVoxel(v, amount);
 	}
 
 	/// <summary>
@@ -1154,6 +1488,13 @@ public partial class VoxelWorld : Node3D
 		{
 			chunk.Data.SetHealth(lx, v.Y, lz, VoxelHealth.MaxHealth);
 		}
+
+		// Record the edit for persistence (latest value wins). SetVoxel is the
+		// single choke point: AddSphere/RemoveSphere/BreakVoxel all funnel
+		// through it, so this one write captures every player edit. A replaced
+		// voxel is at full health again, so drop any stale damaged entry.
+		_edits[v] = (byte)material;
+		_damagedHealth.Remove(v);
 	}
 
 	/// <summary>
@@ -1191,8 +1532,9 @@ public partial class VoxelWorld : Node3D
 
 	/// <summary>
 	/// Invoked on the main thread (via <c>CallDeferred</c>) when a chunk's
-	/// async terrain generation finishes. Marks the chunk's data ready and
-	/// re-meshes its neighbours so they close the MC seam with real data.
+	/// async terrain generation finishes. Marks the chunk's data ready, re-applies
+	/// any saved edits that belong to it (world persistence), and re-meshes its
+	/// neighbours so they close the MC seam with real data.
 	/// </summary>
 	private void OnGenerationComplete(Vector2I coord, VoxelChunk chunk)
 	{
@@ -1203,6 +1545,13 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 		current.DataReady = true;
+
+		// World persistence: re-apply this chunk's saved edits + health NOW,
+		// while its data is ready and before the budget loop meshes it. This
+		// stamps the chunk + 1-ring with a fresh edit priority so the edited
+		// area rebuilds first. A no-op when there is no pending snapshot
+		// (a fresh world with no save).
+		ApplyLoadedChunk(current);
 
 		// A neighbour's foliage stage may have queued canopy-overhang voxels for
 		// THIS chunk (it was still generating when they ran). Apply any that are
