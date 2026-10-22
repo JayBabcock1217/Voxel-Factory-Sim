@@ -339,10 +339,11 @@ public partial class WorldSave : Node
 		}
 
 		var data = CollectSnapshot();
-		WorldSaveFile.Write(SlotPath(slotId), data);
+		string path = SlotPath(slotId);
+		WorldSaveFile.Write(path, data);
 		Snapshot = data;
 		UpsertIndexEntry(slotId, slotName, data.Seed);
-		GD.Print($"[WorldSave] World saved to slot '{slotId}' ({SlotPath(slotId)}) " +
+		GD.Print($"[WorldSave] World saved to slot '{slotId}' ({path}) " +
 			$"({data.Edits.Count} edits, {data.Health.Count} health, " +
 			$" {data.Inventory.Count} slots, {data.Drops.Count} drops).");
 		return slotId;
@@ -366,7 +367,7 @@ public partial class WorldSave : Node
 		var loaded = WorldSaveFile.Read(path);
 		if (loaded == null)
 		{
-			// Read() already pushed the reason (corrupt / wrong version).
+			// Read() already pushed the reason (corrupt / wrong version / missing).
 			return false;
 		}
 
@@ -384,6 +385,29 @@ public partial class WorldSave : Node
 			$"({loaded.Edits.Count} edits, {loaded.Health.Count} health, " +
 			$"{loaded.Inventory.Count} slots, {loaded.Drops.Count} drops).");
 		return true;
+	}
+
+	/// <summary>
+	/// Ensures THIS node has a loaded <see cref="Snapshot"/> for its
+	/// <see cref="ActiveSlotId"/>, re-reading the slot file if the snapshot is
+	/// missing. This is the world's safety net: the world and the WorldSave node
+	/// can disagree about which node holds the snapshot (the menu's WorldSave and
+	/// the gameplay scene's WorldSave are different instances), so if the world's
+	/// node arrives with a null snapshot it reloads its own active slot directly
+	/// from disk. A no-op (returns false) when there is no active slot or the
+	/// slot has no usable data.
+	/// </summary>
+	public bool EnsureLoadedForSession()
+	{
+		if (Snapshot != null)
+		{
+			return true; // already loaded
+		}
+		if (string.IsNullOrEmpty(ActiveSlotId))
+		{
+			return false; // no slot for this session — nothing to load
+		}
+		return LoadFrom(ActiveSlotId);
 	}
 
 	// ------------------------------------------------------------------

@@ -404,13 +404,41 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// Number of chunk generations currently in flight on the thread pool.
 	/// Bumped in <see cref="StartGeneration"/>, released in
-	/// <see cref="OnGenerationComplete"/>. Used to cap concurrent generation
-	/// in the load loop.
+	/// <see cref="OnGenerationComplete"/>. Used together with
+	/// <see cref="_genQueue"/> to cap concurrent generation and to keep the
+	/// in-flight set to the nearest unfinished chunks (see
+	/// <see cref="PumpGenerationQueue"/>).
 	/// </summary>
 	private int _generatingBudget;
 
-	/// <summary>Maximum number of chunks to have their terrain generating at once.</summary>
-	private const int MaxConcurrentGenerations = 4;
+	/// <summary>
+	/// Nearest-first queue of chunk coords that need generating but are not yet
+	/// started. A chunk is enqueued by the load loop and dequeued (nearest
+	/// first) by <see cref="PumpGenerationQueue"/> whenever a generation slot
+	/// frees up. This is what gives generation *priority ordering*: the thread
+	/// pool runs tasks in whatever order it pleases, so without this gate a far
+	/// chunk could be mid-generation while nearer chunks wait — the in-flight
+	/// set is always the nearest <see cref="MaxConcurrentGenerations"/>
+	/// unfinished chunks, so completions always come from the nearest ring.
+	/// Ordered by squared distance to the player at enqueue time; the player
+	/// moves slowly relative to a chunk, so a stale ordering is acceptable and
+	/// re-queued on the next frame if still pending.
+	/// </summary>
+	private readonly System.Collections.Generic.List<(Vector2I Coord, float DistSq)> _genQueue = new();
+
+	/// <summary>
+	/// True while a coord is in <see cref="_genQueue"/> (not yet started), so the
+	/// load loop doesn't enqueue the same chunk twice in one frame.
+	/// </summary>
+	private readonly System.Collections.Generic.HashSet<Vector2I> _genQueued = new();
+
+	/// <summary>
+	/// Maximum number of chunks to have their terrain generating at once. Higher
+	/// = faster overall population; the nearest-first queue (see
+	/// <see cref="_genQueue"/>) keeps the in-flight set to the nearest
+	/// unfinished chunks regardless of this value.
+	/// </summary>
+	private const int MaxConcurrentGenerations = 8;
 
 	/// <summary>
 	/// Chunks within this many chunk-cells (Chebyshev distance) of the player carry a
@@ -649,28 +677,25 @@ public partial class VoxelWorld : Node3D
 
 		Vector2I playerChunk = ChunkCoordOf(playerNode.GlobalPosition);
 
-		// Load chunks in range, nearest first, in a spiral around the player's
-		// chunk: the chunk under the player is created before its neighbours,
-		// then each expanding ring in turn. Generation runs on the thread pool
-		// and is capped so a burst of new chunks never hitches the main thread;
-		// coords that don't fit the concurrent-generation budget stop the walk
-		// and are revisited on a later frame (SpiralCoords restarts from the
-		// center each frame and skips already-created chunks, so the spiral
-		// fills outward across frames).
+		// Enqueue every in-range chunk that isn't already loaded or queued, then
+		// pump the nearest-first generation queue. The queue (not the thread
+		// pool) decides which chunk generates next, so the in-flight set is
+		// always the nearest MaxConcurrentGenerations unfinished chunks and a far
+		// chunk can never be mid-generation while nearer ones wait. SpiralCoords
+		// is only used to *enumerate* in-range coords; the queue re-sorts them by
+		// true distance to the player each frame.
 		foreach (Vector2I coord in SpiralCoords(playerChunk, RenderDistanceChunks))
 		{
-			if (_chunks.ContainsKey(coord))
+			if (_chunks.ContainsKey(coord) || _genQueued.Contains(coord))
 			{
 				continue;
 			}
 
-			if (_generatingBudget >= MaxConcurrentGenerations)
-			{
-				break; // budget exhausted for this frame; revisit on a later frame.
-			}
-
-			CreateChunk(coord);
+			_genQueued.Add(coord);
+			_genQueue.Add((coord, DistanceSq(coord, playerChunk)));
 		}
+
+		PumpGenerationQueue(playerChunk);
 
 		// One-time spawn: voxel data is now generated asynchronously, but mesh +
 		// collision are only built in Rebuild() under the ChunksPerFrame budget.
@@ -922,7 +947,20 @@ public partial class VoxelWorld : Node3D
 	public void ApplyLoadedChunk(VoxelChunk chunk)
 	{
 		var save = GetSaveService();
-		if (save == null || save.PendingEdits == null)
+		if (save == null)
+		{
+			return;
+		}
+
+		// Safety net: chunk generation can finish BEFORE the spawn gate runs
+		// EnsureLoadedForSession, so this node's PendingEdits can be null even
+		// though a slot was chosen. Load its own active slot directly so the
+		// saved edits are not silently dropped.
+		if (save.PendingEdits == null && save.EnsureLoadedForSession())
+		{
+			// Re-check after the reload; the reload may have found no data.
+		}
+		if (save.PendingEdits == null)
 		{
 			return;
 		}
@@ -1001,16 +1039,62 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// Looks up (and caches) the <c>WorldSave</c> service node by name, or null
-	/// when the scene has none (the world then runs without persistence).
+	/// Looks up (and caches) the <c>WorldSave</c> service node for THIS scene,
+	/// or null when the scene has none (the world then runs without persistence).
+	///
+	/// The lookup prefers the node that is a DESCENDANT of the world's own scene
+	/// root (so it never binds to the main menu's WorldSave), then falls back to
+	/// any WorldSave in the tree. It re-resolves whenever the cached node leaves
+	/// the tree (a scene change) so a stale reference is never served.
 	/// </summary>
 	private WorldSave GetSaveService()
 	{
-		if (_save == null && GetTree() != null)
+		if (_save != null && _save.IsInsideTree())
 		{
-			_save = GetTree().Root.FindChild("WorldSave", recursive: true) as WorldSave;
+			return _save;
 		}
-		return _save;
+
+		// The cached node is gone (or was never set) — re-resolve.
+		_save = null;
+		var tree = GetTree();
+		if (tree == null)
+		{
+			return null;
+		}
+
+		// Strategy 1 (preferred): find the WorldSave under the world's own scene
+		// root. GetParent() walks up to the top-level scene instance, so this is
+		// scoped to THIS scene and can never match the menu's node.
+		var sceneRoot = GetParent();
+		while (sceneRoot != null && sceneRoot.GetParent() != null && sceneRoot.GetParent() is not Window)
+		{
+			sceneRoot = sceneRoot.GetParent();
+		}
+		if (sceneRoot != null)
+		{
+			_save = sceneRoot.FindChild("WorldSave", recursive: true) as WorldSave;
+			if (_save != null)
+			{
+				return _save;
+			}
+		}
+
+		// Strategy 2 (fallback): any WorldSave in the tree, preferring one that is
+		// currently in the tree and belongs to the active scene.
+		foreach (Node child in tree.Root.GetChildren())
+		{
+			if (child is Window)
+			{
+				continue;
+			}
+			var candidate = child.FindChild("WorldSave", recursive: true) as WorldSave;
+			if (candidate != null && candidate.IsInsideTree())
+			{
+				return candidate;
+			}
+		}
+
+		return null;
 	}
 
 	/// <summary>
@@ -1266,7 +1350,20 @@ public partial class VoxelWorld : Node3D
 	private bool SpawnOrRestorePlayer(Node3D player)
 	{
 		var save = GetSaveService();
-		if (save != null && save.Snapshot != null)
+		if (save == null)
+		{
+			return SpawnPlayerOnTerrain(player);
+		}
+
+		// Safety net: the world's WorldSave node and the menu's are DIFFERENT
+		// instances, so this one can arrive with a null snapshot even though a
+		// slot was chosen. If so, load its own active slot directly from disk.
+		if (save.Snapshot == null)
+		{
+			save.EnsureLoadedForSession();
+		}
+
+		if (save.Snapshot != null)
 		{
 			// A save exists: restore the player's saved transform (instead of the
 			// terrain spawn) and the saved inventory. The saved item drops are
@@ -1675,6 +1772,45 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Starts the nearest pending chunk generations to fill any free concurrent
+	/// slots. Pops from <see cref="_genQueue"/> in nearest-first order (re-sorting
+	/// by the player's CURRENT position, since the player may have moved since the
+	/// coord was enqueued) and calls <see cref="CreateChunk"/> until either the
+	/// queue is empty or <see cref="MaxConcurrentGenerations"/> are in flight.
+	/// Called every frame by the load loop and immediately from
+	/// <see cref="OnGenerationComplete"/> so a freed slot is refilled the same frame
+	/// a generation finishes — this is what keeps the in-flight set pinned to the
+	/// nearest unfinished chunks.
+	/// </summary>
+	private void PumpGenerationQueue(Vector2I playerChunk)
+	{
+		if (_genQueue.Count == 0)
+		{
+			return;
+		}
+
+		// Re-sort by the player's current position (the queue may hold coords
+		// enqueued a few frames ago at a different player location). Cheap: the
+		// queue is bounded by the render distance and is drained as fast as it
+		// fills.
+		_genQueue.Sort((a, b) => DistanceSq(a.Coord, playerChunk).CompareTo(DistanceSq(b.Coord, playerChunk)));
+
+		while (_genQueue.Count > 0 && _generatingBudget < MaxConcurrentGenerations)
+		{
+			// Take the nearest, but skip any that became loaded (e.g. freed and
+			// re-created, or a stale entry) — they are already handled.
+			var (coord, _) = _genQueue[0];
+			_genQueue.RemoveAt(0);
+			_genQueued.Remove(coord);
+			if (_chunks.ContainsKey(coord))
+			{
+				continue;
+			}
+			CreateChunk(coord);
+		}
+	}
+
+	/// <summary>
 	/// Invoked on the main thread (via <c>CallDeferred</c>) when a chunk's
 	/// async terrain generation finishes. Marks the chunk's data ready, re-applies
 	/// any saved edits that belong to it (world persistence), and re-meshes its
@@ -1683,6 +1819,11 @@ public partial class VoxelWorld : Node3D
 	private void OnGenerationComplete(Vector2I coord, VoxelChunk chunk)
 	{
 		_generatingBudget = Mathf.Max(0, _generatingBudget - 1);
+		// A slot just freed up: immediately start the next nearest pending chunk
+		// so the in-flight set stays pinned to the nearest unfinished chunks
+		// without waiting a full frame.
+		var playerForPump = GetTree()?.GetFirstNodeInGroup("player") as Node3D;
+		PumpGenerationQueue(ChunkCoordOf(playerForPump?.GlobalPosition ?? Vector3.Zero));
 		if (!_chunks.TryGetValue(coord, out VoxelChunk current) || current != chunk)
 		{
 			// Chunk was freed while generation was in flight.
@@ -1771,6 +1912,16 @@ public partial class VoxelWorld : Node3D
 		// re-open that edge at the boundary.
 		MarkNeighboursForRebuild(coord);
 		_chunks.Remove(coord);
+		// Drop any pending generation-queue entry for this coord so it can be
+		// re-enqueued if it comes back in range.
+		_genQueued.Remove(coord);
+		for (int i = _genQueue.Count - 1; i >= 0; i--)
+		{
+			if (_genQueue[i].Coord == coord)
+			{
+				_genQueue.RemoveAt(i);
+			}
+		}
 		chunk.QueueFree();
 	}
 
@@ -1879,6 +2030,12 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
+		// Build candidates gathered during the per-level visibility walk below,
+		// then scheduled NEAREST-FIRST across all levels (see the scheduling
+		// block at the end of this method). Deferring the build start is what
+		// makes distance order win over level/ring-walk order.
+		var buildCandidates = new List<(LodChunk Lod, float DistSq)>();
+
 		for (int k = 1; k <= LodLevels; k++)
 		{
 			int regionSizeChunks = 1 << k; // base chunks per side at this level
@@ -1927,22 +2084,22 @@ public partial class VoxelWorld : Node3D
 				// Top edge: (d, d) → (-d, d)
 				for (int ox = d; ox >= -d; ox--)
 				{
-					VisitLodCell(k, prx + ox, prz + d, regionSizeChunks, px, pz, ref inFlight, seen);
+					VisitLodCell(k, prx + ox, prz + d, regionSizeChunks, px, pz, seen, buildCandidates);
 				}
 				// Right edge: (-d, d-1) → (-d, -d)
 				for (int oz = d - 1; oz >= -d; oz--)
 				{
-					VisitLodCell(k, prx - d, prz + oz, regionSizeChunks, px, pz, ref inFlight, seen);
+					VisitLodCell(k, prx - d, prz + oz, regionSizeChunks, px, pz, seen, buildCandidates);
 				}
 				// Bottom edge: (-d+1, -d) → (d, -d)
 				for (int ox = -d + 1; ox <= d; ox++)
 				{
-					VisitLodCell(k, prx + ox, prz - d, regionSizeChunks, px, pz, ref inFlight, seen);
+					VisitLodCell(k, prx + ox, prz - d, regionSizeChunks, px, pz, seen, buildCandidates);
 				}
 				// Left edge: (d, -d+1) → (d, d-1)
 				for (int oz = -d + 1; oz <= d - 1; oz++)
 				{
-					VisitLodCell(k, prx + d, prz + oz, regionSizeChunks, px, pz, ref inFlight, seen);
+					VisitLodCell(k, prx + d, prz + oz, regionSizeChunks, px, pz, seen, buildCandidates);
 				}
 			}
 		}
@@ -1983,16 +2140,48 @@ public partial class VoxelWorld : Node3D
 				FreeLod(level, kv.Key.Item2);
 			}
 		}
+
+		// Schedule this frame's LOD builds NEAREST-FIRST across all levels. The
+		// visibility walk above recorded every region that needs a build; sorting
+		// them by squared distance to the player (stable) and starting up to the
+		// budget in that order is what makes the rings fill outward from the
+		// player instead of by level/ring-walk order. A coarser (farther) region
+		// can no longer grab a build slot before a nearer region that also needs
+		// one. (The free pass ran first, so a region freed this frame is not
+		// built.)
+		if (buildCandidates.Count > 0)
+		{
+			buildCandidates.Sort((a, b) => a.DistSq.CompareTo(b.DistSq));
+			foreach (var (lod, _) in buildCandidates)
+			{
+				if (inFlight >= MaxConcurrentLodBuilds)
+				{
+					break;
+				}
+				// The region may have been freed or already built since it was
+				// recorded; only start a build for a live, unbuilt region.
+				if (!lod.IsInsideTree() || lod.Built || lod.BuildInFlight)
+				{
+					continue;
+				}
+				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks);
+				inFlight++;
+			}
+		}
 	}
 
 	/// <summary>
 	/// Decides and applies the render state of one level-<paramref name="level"/>
-	/// region (called by <see cref="UpdateLod"/> for each annulus cell).
-	/// <paramref name="inFlight"/> is updated when a build is started.
+	/// region (called by <see cref="UpdateLod"/> for each annulus cell). Sets the
+	/// region's visibility (and creates it when first needed) and, when a build
+	/// is required, records it in <paramref name="buildCandidates"/>. The actual
+	/// build is started later by <see cref="UpdateLod"/>'s nearest-first
+	/// scheduling pass, so distance from the player — not level or ring-walk
+	/// order — decides which regions build first.
 	/// </summary>
 	private void VisitLodCell(
 		int level, int rx, int rz, int regionSizeChunks, float px, float pz,
-		ref int inFlight, HashSet<Vector2I> seen)
+		HashSet<Vector2I> seen, List<(LodChunk Lod, float DistSq)> buildCandidates)
 	{
 		var rc = new Vector2I(rx, rz);
 		if (!seen.Add(rc))
@@ -2050,10 +2239,9 @@ public partial class VoxelWorld : Node3D
 			{
 				lod.Visible = shouldRender;
 			}
-			if (shouldRender && !lod.Built && !lod.BuildInFlight && inFlight < MaxConcurrentLodBuilds)
+			if (shouldRender && !lod.Built && !lod.BuildInFlight)
 			{
-				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks);
-				inFlight++;
+				buildCandidates.Add((lod, d2));
 			}
 		}
 		else if (shouldRender)
@@ -2063,10 +2251,9 @@ public partial class VoxelWorld : Node3D
 			lod.Visible = true;
 			_lodRoot.AddChild(lod);
 			_lodChunks[(level, rc)] = lod;
-			if (inFlight < MaxConcurrentLodBuilds)
+			if (!lod.Built && !lod.BuildInFlight)
 			{
-				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks);
-				inFlight++;
+				buildCandidates.Add((lod, d2));
 			}
 		}
 	}

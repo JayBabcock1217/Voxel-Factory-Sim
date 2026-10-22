@@ -274,11 +274,19 @@ public static class WorldSaveFile
 			w.Write(d.Count);
 		}
 
-		// Trailing FNV-1a over every byte written above the checksum.
+		// Trailing FNV-1a over every byte written above the checksum. Flush the
+		// writer first so the underlying stream's Position reflects everything
+		// written, then capture the section length BEFORE seeking (after Seek(0),
+		// stream.Position is 0, which previously produced a zero-length buffer
+		// and a checksum over nothing — making every saved file fail its own
+		// checksum on read).
+		w.Flush();
+		long sectionLength = stream.Position;
 		stream.Seek(0, SeekOrigin.Begin);
-		byte[] sectionBytes = new byte[(int)stream.Position];
+		byte[] sectionBytes = new byte[sectionLength];
 		stream.Read(sectionBytes, 0, sectionBytes.Length);
 		uint checksum = Fnv1a(sectionBytes);
+		stream.Seek(sectionLength, SeekOrigin.Begin);
 		w.Write(checksum);
 		w.Flush();
 	}
