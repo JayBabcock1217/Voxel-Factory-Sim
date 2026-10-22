@@ -63,6 +63,15 @@ public partial class VoxelTool : Node3D
 	/// <summary>Highlight color for the targeted voxel.</summary>
 	[Export] public Color HighlightColor { get; set; } = new(0.6f, 0.9f, 1.0f);
 
+	/// <summary>
+	/// Color of the power-radius indicator sphere shown when the player aims at
+	/// a power source (a transparent yellow by default).
+	/// </summary>
+	[Export] public Color PowerRadiusColor { get; set; } = new(1.0f, 0.9f, 0.2f);
+
+	/// <summary>Opacity (0..1) of the power-radius indicator sphere fill.</summary>
+	[Export(PropertyHint.Range, "0.01,1,0.01")] public float PowerRadiusOpacity { get; set; } = 0.15f;
+
 	private VoxelWorld _world;
 	private Camera3D _camera;
 	private InventoryUI _ui;
@@ -74,6 +83,15 @@ public partial class VoxelTool : Node3D
 	private StandardMaterial3D _highlightFillMaterial;
 	private MeshInstance3D _highlightFill;
 	private BoxMesh _highlightFillMesh;
+
+	// Power-radius indicator: a transparent yellow sphere centered on a
+	// targeted power source, sized to the live power radius. Shown only while
+	// the player aims at a power-source machine (see _Process).
+	private Node3D _powerIndicator;
+	private MeshInstance3D _powerSphere;
+	private SphereMesh _powerSphereMesh;
+	private StandardMaterial3D _powerSphereMaterial;
+
 	private bool _hasTarget;
 	private Vector3I _targetVoxel;
 	private Vector3 _targetNormal;
@@ -216,6 +234,38 @@ public partial class VoxelTool : Node3D
 			Visible = false,
 		};
 		_highlight.AddChild(_highlightFill);
+
+		// POWER-RADIUS INDICATOR: a transparent yellow sphere, centered on a
+		// targeted power source, with a radius equal to the live power radius
+		// (in world units). It is a pivot Node3D (positioned at the source's
+		// voxel center) holding a child MeshInstance3D with a unit SphereMesh
+		// that is scaled by the radius each frame. The material is unshaded and
+		// translucent (alpha) with culling disabled so it reads as a soft
+		// volume even when the camera is inside it. Like the highlight, its
+		// orientation is locked to the world in _Process (identity basis) so it
+		// does not spin with the player's yaw.
+		_powerSphereMaterial = new StandardMaterial3D
+		{
+			AlbedoColor = new Color(PowerRadiusColor, PowerRadiusOpacity),
+			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
+			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+			CullMode = BaseMaterial3D.CullModeEnum.Disabled, // double-sided so it reads from inside
+		};
+		_powerSphereMesh = new SphereMesh { Radius = 0.5f, Height = 1f };
+		// A unit sphere (radius 0.5, height 1) centered on its origin: scaling
+		// the MeshInstance by (2 * radius) makes the world radius exactly
+		// `radius` (diameter = 2 * radius * 0.5 * scale... see _Process).
+		_powerSphere = new MeshInstance3D
+		{
+			Name = "PowerSphere",
+			Mesh = _powerSphereMesh,
+			MaterialOverride = _powerSphereMaterial,
+			Visible = false,
+		};
+		_powerIndicator = new Node3D { Name = "PowerRadiusIndicator", Visible = false };
+		_powerIndicator.AddChild(_powerSphere);
+		AddChild(_powerIndicator);
 
 		// Broken voxels become item drops (mining breaks raise VoxelBroken).
 		_world.VoxelBroken += OnVoxelBroken;
@@ -435,6 +485,11 @@ public partial class VoxelTool : Node3D
 		// voxels — if both are in sight, the nearer wins (right-click then opens
 		// the machine's UI rather than placing).
 		_targetMachine = FindTargetMachine(from, dir);
+
+		// POWER-RADIUS INDICATOR: while the player aims at a power source, show
+		// a transparent yellow sphere centered on it, sized to the live power
+		// radius (the range its power reaches). Hidden otherwise.
+		UpdatePowerIndicator();
 
 		// Push the targeted-voxel info to the top-right HUD readout each frame
 		// (the panel hides itself when there is no target).
@@ -1037,6 +1092,56 @@ public partial class VoxelTool : Node3D
 			}
 		}
 		return best;
+	}
+
+	/// <summary>
+	/// Shows the transparent yellow power-radius sphere while the targeted
+	/// machine is a power source (its definition's <see
+	/// cref="FactorySim.Machines.MachineDefinition.PowerOutput"/> is &gt; 0), and
+	/// hides it otherwise. When shown, the sphere is centered on the source's
+	/// voxel and scaled to the live power radius (world units = radius ×
+	/// VoxelSize), so the player can see exactly how far the source's power
+	/// reaches. The sphere's orientation is locked to the world (identity
+	/// basis) so it does not spin with the player's yaw.
+	/// </summary>
+	private void UpdatePowerIndicator()
+	{
+		if (_powerIndicator == null)
+		{
+			return;
+		}
+
+		bool isSource = _targetMachine != null
+			&& _targetMachine.Definition != null
+			&& _targetMachine.Definition.PowerOutput > 0f;
+
+		if (!isSource)
+		{
+			_powerIndicator.Visible = false;
+			_powerSphere.Visible = false;
+			return;
+		}
+
+		float vs = _world.VoxelSize;
+		// Center the indicator on the source's voxel center (the same convention
+		// the highlight uses).
+		var center = new Vector3(
+			_targetMachine.VoxelPos.X,
+			_targetMachine.VoxelPos.Y,
+			_targetMachine.VoxelPos.Z) * vs
+			+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
+		// Identity basis overrides the inherited player yaw (see the highlight).
+		_powerIndicator.GlobalTransform = new Transform3D(Basis.Identity, center);
+
+		// The unit SphereMesh has radius 0.5 (diameter 1), so scaling the
+		// MeshInstance by (2 * radius * voxelSize) makes the world radius exactly
+		// (radius * voxelSize).
+		float worldRadius = FactorySim.Machines.PowerNetwork.Radius * vs;
+		float scale = worldRadius * 2f;
+		_powerSphere.Scale = new Vector3(scale, scale, scale);
+
+		_powerIndicator.Visible = true;
+		_powerSphere.Visible = true;
 	}
 
 	/// <summary>

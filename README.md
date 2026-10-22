@@ -263,6 +263,12 @@ powers a cluster of machines until its output is exhausted — add too many
 machines and the area browns out. Passive machines (conveyors, power sources)
 consume no power and always run.
 
+**Radius indicator**: while you aim at a power source, a **transparent yellow
+sphere** appears centered on it, sized to the live power radius — so you can see
+exactly how far its power reaches before you place machines. The color and
+opacity are tunable via the `VoxelTool`'s `PowerRadiusColor` /
+`PowerRadiusOpacity` exports.
+
 ### Adding a new machine type
 
 1. Append a value to the `MachineType` enum (e.g. `Furnace = 206`).
