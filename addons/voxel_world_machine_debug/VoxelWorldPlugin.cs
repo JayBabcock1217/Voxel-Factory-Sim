@@ -75,7 +75,11 @@ public partial class VoxelWorldInspectorPlugin : EditorInspectorPlugin
 	{
 		if (@object.HasMethod("RebuildAllMachineCollisions"))
 		{
-			AddCustomControl(new VoxelWorldDebugControl());
+			// Pass the ACTUAL node being inspected (the VoxelWorld in the scene
+			// the user has open) so the buttons operate on it directly, rather
+			// than searching the editor's root tree (which doesn't contain the
+			// edited scene's nodes).
+			AddCustomControl(new VoxelWorldDebugControl(@object as Node));
 		}
 	}
 }
@@ -90,8 +94,21 @@ public partial class VoxelWorldInspectorPlugin : EditorInspectorPlugin
 [Tool]
 public partial class VoxelWorldDebugControl : Control
 {
+	/// <summary>
+	/// The <see cref="FactorySim.Voxel.VoxelWorld"/> node this control was
+	/// created for (the one being inspected). Passed in by
+	/// <see cref="VoxelWorldInspectorPlugin._ParseEnd"/> so the buttons
+	/// operate on the exact node in the edited scene.
+	/// </summary>
+	private readonly Node _worldNode;
+
 	private Button _rebuildBtn;
 	private Button _configBtn;
+
+	public VoxelWorldDebugControl(Node worldNode)
+	{
+		_worldNode = worldNode;
+	}
 
 	public override void _Ready()
 	{
@@ -127,38 +144,55 @@ public partial class VoxelWorldDebugControl : Control
 
 	private void OnGenerateCollisionBoxes()
 	{
-		// Finds the VoxelWorld in the scene tree (editor or play) and, for each
-		// machine definition in its MachineConfig, computes the collision box
-		// from the definition's mesh/scene (respecting Scale) and writes it onto
-		// the definition resource. This authors the collision data OUTSIDE OF
-		// RUNTIME — no live machines needed.
-		var sceneTree = Engine.GetMainLoop() as SceneTree;
-		if (sceneTree == null)
-		{
-			GD.PushWarning("[VoxelWorldPlugin] No scene tree found.");
-			return;
-		}
+		// Operate on the EXACT VoxelWorld node being inspected (passed in by the
+		// inspector plugin). This is the node in the scene the user has open —
+		// the editor's root tree does NOT contain the edited scene's nodes, so
+		// searching Root would fail.
+		//
+		// IMPORTANT: in the editor, a non-[Tool] C# script node is a PLACEHOLDER
+		// of its base type (Node3D), so `_worldNode as VoxelWorld` is null even
+		// though the node IS a VoxelWorld. We therefore read the MachineConfig
+		// via the dynamic Get() (which works on any Node), not a typed property.
+		FactorySim.Machines.MachineDefConfig config = null;
+		Node targetNode = null;
 
-		// Find the VoxelWorld (the object that has the RebuildAllMachineCollisions
-		// method — same heuristic used to detect it for the inspector).
-		FactorySim.Voxel.VoxelWorld world = null;
-		foreach (var node in sceneTree.Root.FindChildren("*", "Node3D", true, false))
+		if (_worldNode != null && _worldNode.HasMethod("RebuildAllMachineCollisions"))
 		{
-			if (node is FactorySim.Voxel.VoxelWorld w)
+			// The inspected node is a VoxelWorld (by the method heuristic). Read
+			// its MachineConfig dynamically (Get() returns a Variant; cast it).
+			targetNode = _worldNode;
+			var cfgVariant = _worldNode.Get("MachineConfig");
+			if (cfgVariant.VariantType == Variant.Type.Object)
 			{
-				world = w;
-				break;
+				config = (FactorySim.Machines.MachineDefConfig)cfgVariant.Obj;
 			}
 		}
 
-		if (world == null)
+		// Fallback: search the running scene tree (play mode, or no node captured).
+		if (targetNode == null)
 		{
-			GD.Print("[VoxelWorldPlugin] No VoxelWorld node found in the scene. " +
-				"Select the VoxelWorld in a scene (or the one in Scenes/Main.tscn) to generate collision boxes.");
+			var sceneTree = Engine.GetMainLoop() as SceneTree;
+			if (sceneTree != null)
+			{
+				foreach (var node in sceneTree.Root.FindChildren("*", "Node3D", true, false))
+				{
+					if (node is FactorySim.Voxel.VoxelWorld w)
+					{
+						targetNode = w;
+						config = w.MachineConfig;
+						break;
+					}
+				}
+			}
+		}
+
+		if (targetNode == null)
+		{
+			GD.Print("[VoxelWorldPlugin] No VoxelWorld node found. " +
+				"Select the VoxelWorld node in a scene to generate collision boxes.");
 			return;
 		}
 
-		var config = world.MachineConfig;
 		if (config == null)
 		{
 			GD.Print("[VoxelWorldPlugin] The VoxelWorld has no MachineConfig assigned. " +
@@ -200,12 +234,13 @@ public partial class VoxelWorldDebugControl : Control
 		// when the game is running (play mode). In the editor, show a hint.
 		if (!Engine.IsEditorHint())
 		{
-			var sceneTree = Engine.GetMainLoop() as SceneTree;
-			if (sceneTree == null)
+			// Prefer the exact node being inspected; fall back to a tree search.
+			var world = _worldNode as FactorySim.Voxel.VoxelWorld;
+			if (world == null)
 			{
-				return;
+				var sceneTree = Engine.GetMainLoop() as SceneTree;
+				world = sceneTree?.Root.FindChild("VoxelWorld", true, false) as FactorySim.Voxel.VoxelWorld;
 			}
-			var world = sceneTree.Root.FindChild("VoxelWorld", true, false) as FactorySim.Voxel.VoxelWorld;
 			if (world == null)
 			{
 				GD.PushWarning("[VoxelWorldPlugin] No VoxelWorld found in the scene tree.");
