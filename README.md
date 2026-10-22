@@ -211,27 +211,34 @@ translucent) and reflects your current rotation live.
   (no item is consumed). This prevents stacking machines in one cell or burying
   a machine inside terrain.
 
-### Machine config panel & collision refresh
+### Machine config panel & collision authoring
 
-Two quality-of-life tools for iterating on machine meshes and configs:
+Two quality-of-life tools for iterating on machine meshes and configs, provided
+by a lightweight `EditorPlugin` (`addons/voxel_world_machine_debug/`, enabled in
+`project.godot`). The buttons appear at the bottom of the `VoxelWorld` inspector
+whenever the node is selected.
 
 - **Machine config panel** — press **C** in-game (or click the "Open Machine
-  Config" button in the editor inspector, under the `VoxelWorld` node) to open
-  a panel listing every registered `MachineDefinition`: name, type, item id,
-  mesh status, scale, and power output. You can **add** a new definition (it
-  picks the first unused `MachineType`) and **remove** one. Changes are
-  in-memory; save the `MachineDefConfig` `.tres` in the editor to persist.
+  Config" button in the editor inspector) to open a panel listing every
+  registered `MachineDefinition`: name, type, item id, mesh status, scale,
+  collision box, and power output. You can **add** a new definition (it picks
+  the first unused `MachineType`) and **remove** one. Changes are in-memory;
+  save the `MachineDefConfig` `.tres` in the editor to persist.
 
-- **Rebuild Machine Collisions** — click the "Rebuild Machine Collisions"
-  button in the editor inspector (under the `VoxelWorld` node) or the
-  "Rebuild All Collisions" button in the config panel. This re-runs the
-  auto-generated box collision on every placed machine from its current visual
-  AABB. Use it after re-importing or re-scaling a Blender mesh so the collider
-  matches the new visuals.
+- **Generate Collision Boxes** — click this button in the editor (it works
+  **outside of runtime**, no live machines needed). For every machine definition
+  in the world's `MachineConfig`, it computes the collision box (AABB) from the
+  definition's mesh/scene (respecting the definition's `Scale`) and writes it
+  onto the definition resource as `CollisionBoxSize` + `CollisionBoxOffset`.
+  At runtime, a `Machine` uses this authored box when present (falling back to
+  auto-computing the AABB from its live visual when not). Use this after
+  re-importing or re-scaling a Blender mesh so the collider matches the new
+  visuals — then **save the `MachineDefConfig` `.tres`** to persist.
 
-The editor buttons are provided by a lightweight `EditorPlugin`
-(`Scripts/Editor/VoxelWorldPlugin.cs`, enabled in `project.godot`). They appear
-at the bottom of the `VoxelWorld` inspector whenever the node is selected.
+The collision box is stored as **data on the `MachineDefinition`**
+(`CollisionBoxSize`, `CollisionBoxOffset`, with a `HasCollisionBox` helper), so
+it is authored in the editor and travels with the resource — no runtime
+computation required.
 
 ### Item flow (conveyors + processors)
 

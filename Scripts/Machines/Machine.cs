@@ -301,6 +301,110 @@ public partial class Machine : StaticBody3D
 	}
 
 	/// <summary>
+	/// Computes the machine's collision box (size + center offset) from a
+	/// <see cref="MachineDefinition"/>'s mesh/scene — PURELY on the resource,
+	/// with NO live machine node or scene tree required. This is what the
+	/// editor's "Generate Collision Boxes" button calls to author the collision
+	/// box outside of runtime.
+	///
+	/// It temporarily instantiates the definition's mesh/scene (respecting the
+	/// definition's <see cref="MachineDefinition.Scale"/>) into a throwaway node
+	/// in the tree just long enough to read the combined AABB, then frees it.
+	/// The result is in the machine's LOCAL space (origin = voxel center),
+	/// matching what <see cref="BuildCollision"/> expects.
+	///
+	/// Returns the box size and center (in local space) via <paramref name="size"/>
+	/// and <paramref name="center"/>. Returns false when no usable mesh is found
+	/// (the caller should then fall back to a full-voxel box).
+	/// </summary>
+	public static bool TryGetCollisionBoxFromDefinition(MachineDefinition def,
+		out Vector3 size, out Vector3 center)
+	{
+		size = Vector3.Zero;
+		center = Vector3.Zero;
+
+		if (def == null)
+		{
+			return false;
+		}
+
+		// Case 1: a single Mesh. Measure it directly from the resource (no scene
+		// tree needed) — Mesh.GetAabb() returns the mesh's AABB in local space,
+		// which we scale by the definition's Scale. This is the common case (a
+		// Blender export assigned to the definition's Mesh field) and works
+		// entirely in the editor, outside of runtime.
+		if (def.Mesh != null)
+		{
+			Aabb meshAabb = def.Mesh.GetAabb();
+			if (meshAabb.Size.LengthSquared() <= 0f)
+			{
+				return false; // empty mesh
+			}
+
+			// Apply the definition's uniform scale to the AABB. Scaling about the
+			// mesh origin (0,0,0) matches how BuildVisual scales the MeshInstance3D.
+			Vector3 scaledMin = meshAabb.Position * def.Scale;
+			Vector3 scaledMax = (meshAabb.Position + meshAabb.Size) * def.Scale;
+			Aabb scaled = new Aabb(scaledMin, scaledMax - scaledMin);
+
+			const float pad = 0.05f;
+			scaled.Grow(pad);
+
+			size = scaled.Size;
+			center = scaled.Position + scaled.Size * 0.5f;
+			return true;
+		}
+
+		// Case 2: a PackedScene. A scene can't be measured without instantiating
+		// it, so we build a throwaway probe in the scene tree, measure the
+		// combined AABB of all its MeshInstance3Ds, then free the probe.
+		if (def.MeshScene != null)
+		{
+			var sceneTree = Engine.GetMainLoop() as SceneTree;
+			if (sceneTree == null)
+			{
+				return false; // no scene tree (shouldn't happen in editor/play)
+			}
+
+			var probe = new Node3D { Name = "_CollisionProbe" };
+			sceneTree.Root.AddChild(probe);
+			try
+			{
+				var visual = def.MeshScene.Instantiate();
+				visual.Name = "ProbeScene";
+				if (visual is Node3D sceneNode)
+				{
+					sceneNode.Scale = def.Scale;
+				}
+				probe.AddChild(visual);
+				visual.Notification((int)Node.NotificationPostEnterTree);
+
+				Aabb combined = default;
+				bool first = true;
+				CollectAabb(visual, ref combined, ref first);
+
+				if (first)
+				{
+					return false; // empty scene / no usable mesh
+				}
+
+				const float pad = 0.05f;
+				combined.Grow(pad);
+
+				size = combined.Size;
+				center = combined.Position + combined.Size * 0.5f;
+				return true;
+			}
+			finally
+			{
+				probe.QueueFree();
+			}
+		}
+
+		return false; // no mesh/scene assigned
+	}
+
+	/// <summary>
 	/// Builds the machine's collision shape so it blocks the player. The shape is
 	/// an AUTO-GENERATED <see cref="BoxShape3D"/> sized to the visual mesh's
 	/// bounding box (AABB) — this works for any imported mesh (single mesh,
@@ -309,43 +413,65 @@ public partial class Machine : StaticBody3D
 	/// small padding margin so the collider slightly overhangs the mesh (prevents
 	/// the player from clipping through thin parts).
 	///
+	/// When the definition has an AUTHORED collision box
+	/// (<see cref="MachineDefinition.HasCollisionBox"/>), that box is used
+	/// directly (it was computed in the editor and stored on the resource), so
+	/// the runtime collider matches what the user authored. Otherwise the AABB
+	/// is computed from the live visual.
+	///
 	/// The shape is built in the machine's LOCAL space (centered on the origin,
 	/// the voxel center), so it rotates WITH the machine when the placement
 	/// rotation (the R-key orientation) is applied to the body's Basis.
 	/// </summary>
 	private void BuildCollision(MachineDefinition def)
 	{
-		// Collect the combined AABB of every mesh in the machine's visual, in
-		// local space (the machine's origin is the voxel center). The visual was
-		// just built, so its meshes are in the tree and their AABBs are valid.
-		Aabb combined = default;
-		bool first = true;
-		CollectAabb(_meshInstance, ref combined, ref first);
-		CollectAabb(_meshSceneRoot, ref combined, ref first);
+		Vector3 boxSize;
+		Vector3 boxCenter;
 
-		// Fall back to a full-voxel box if no mesh produced a usable AABB (e.g.
-		// an empty scene), so the machine still collides with something sensible.
-		if (first)
+		if (def != null && def.HasCollisionBox)
 		{
-			combined = new Aabb(new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(1f, 1f, 1f));
+			// Use the authored box (computed in the editor, stored on the resource).
+			boxSize = def.CollisionBoxSize;
+			boxCenter = def.CollisionBoxOffset;
+		}
+		else
+		{
+			// No authored box: compute the combined AABB of every mesh in the
+			// machine's visual, in local space (the machine's origin is the voxel
+			// center). The visual was just built, so its meshes are in the tree
+			// and their AABBs are valid.
+			Aabb combined = default;
+			bool first = true;
+			CollectAabb(_meshInstance, ref combined, ref first);
+			CollectAabb(_meshSceneRoot, ref combined, ref first);
+
+			// Fall back to a full-voxel box if no mesh produced a usable AABB
+			// (e.g. an empty scene), so the machine still collides with something
+			// sensible.
+			if (first)
+			{
+				combined = new Aabb(new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(1f, 1f, 1f));
+			}
+
+			// Pad the box slightly so the collider overhangs the mesh a touch.
+			const float pad = 0.05f;
+			combined.Grow(pad);
+
+			boxSize = combined.Size;
+			boxCenter = combined.Position + combined.Size * 0.5f;
 		}
 
-		// Pad the box slightly so the collider overhangs the mesh a touch.
-		const float pad = 0.05f;
-		combined.Grow(pad);
-
 		// A BoxShape3D is always centered on its own origin, so position it at
-		// the (padded) AABB's center to sit exactly over the mesh (the mesh may
-		// not be centered on the machine's origin, e.g. a Blender export whose
-		// origin is at a corner).
-		var box = new BoxShape3D { Size = combined.Size };
-		Vector3 center = combined.Position + combined.Size * 0.5f;
+		// the box center to sit exactly over the mesh (the mesh may not be
+		// centered on the machine's origin, e.g. a Blender export whose origin is
+		// at a corner).
+		var box = new BoxShape3D { Size = boxSize };
 
 		_collision = new CollisionShape3D
 		{
 			Name = "MachineCollision",
 			Shape = box,
-			Transform = new Transform3D(Basis.Identity, center),
+			Transform = new Transform3D(Basis.Identity, boxCenter),
 		};
 		AddChild(_collision);
 	}

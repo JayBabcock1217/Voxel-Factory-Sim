@@ -82,6 +82,37 @@ public partial class MachineDefinition : Resource
 	/// </summary>
 	[Export] public Shape3D CollisionShape { get; set; }
 
+	/// <summary>
+	/// The machine's AUTO-GENERATED collision box, stored as data so it can be
+	/// authored in the editor (outside of runtime). This is the size of the box
+	/// collider (in local/world units, matching the mesh's scale). When
+	/// <see cref="HasCollisionBox"/> is true, a <see cref="Machine"/> uses this
+	/// box (plus <see cref="CollisionBoxOffset"/>) instead of recomputing the
+	/// AABB from the live visual at runtime.
+	///
+	/// Author it with the editor's "Generate Collision Boxes" button (in the
+	/// VoxelWorld inspector, via the Machine Debug plugin): it computes the AABB
+	/// of this definition's mesh/scene (respecting <see cref="Scale"/>) and
+	/// writes the result here. It is persisted with the .tres resource.
+	/// </summary>
+	[Export] public Vector3 CollisionBoxSize { get; set; }
+
+	/// <summary>
+	/// The center of the machine's collision box, in the machine's LOCAL space
+	/// (the machine's origin is the voxel center). The mesh may not be centered
+	/// on the origin (e.g. a Blender export whose origin is at a corner), so the
+	/// box is offset to sit over the visual. Pairs with <see cref="CollisionBoxSize"/>.
+	/// </summary>
+	[Export] public Vector3 CollisionBoxOffset { get; set; }
+
+	/// <summary>
+	/// True when a collision box has been authored (<see cref="CollisionBoxSize"/>
+	/// is non-degenerate). A zero/negative size means "not set" — the machine
+	/// falls back to auto-computing the AABB from its live visual.
+	/// </summary>
+	public bool HasCollisionBox =>
+		CollisionBoxSize.X > 0f && CollisionBoxSize.Y > 0f && CollisionBoxSize.Z > 0f;
+
 	[ExportGroup("Item")]
 	/// <summary>
 	/// The inventory item id used to place this machine. Defaults to
@@ -145,6 +176,8 @@ public partial class MachineDefinition : Resource
 	public void SetMeshScene(PackedScene value) { if (!ReferenceEquals(MeshScene, value)) { MeshScene = value; Raise(); } }
 	public void SetScale(Vector3 value) { if (Scale != value) { Scale = value; Raise(); } }
 	public void SetCollisionShape(Shape3D value) { if (!ReferenceEquals(CollisionShape, value)) { CollisionShape = value; Raise(); } }
+	public void SetCollisionBoxSize(Vector3 value) { if (CollisionBoxSize != value) { CollisionBoxSize = value; Raise(); } }
+	public void SetCollisionBoxOffset(Vector3 value) { if (CollisionBoxOffset != value) { CollisionBoxOffset = value; Raise(); } }
 	public void SetItemId(int value) { if (ItemId != value) { ItemId = value; Raise(); } }
 	public void SetPowerConsumption(float value) { if (PowerConsumption != value) { PowerConsumption = value; Raise(); } }
 	public void SetProcessTime(float value) { if (ProcessTime != value) { ProcessTime = value; Raise(); } }

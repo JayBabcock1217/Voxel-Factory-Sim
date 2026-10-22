@@ -300,6 +300,18 @@ public partial class MachineConfigPanel : CanvasLayer
 		};
 		hbox.AddChild(scaleLabel);
 
+		// Collision box status: shows whether an authored box exists on the
+		// definition (green) or it's using the runtime auto-computed AABB (grey).
+		var boxLabel = new Label
+		{
+			Text = def.HasCollisionBox
+				? $"Box: {def.CollisionBoxSize.X:F2}x{def.CollisionBoxSize.Y:F2}x{def.CollisionBoxSize.Z:F2}"
+				: "Box: auto",
+			CustomMinimumSize = new Vector2(150f, 0f),
+			Modulate = def.HasCollisionBox ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 1f, 1f, 0.5f),
+		};
+		hbox.AddChild(boxLabel);
+
 		var powerLabel = new Label
 		{
 			Text = $"Power out: {def.PowerOutput:F1}",
