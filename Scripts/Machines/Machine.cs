@@ -42,6 +42,14 @@ public partial class Machine : StaticBody3D
 	/// <summary>The definition this machine was built from (its type, mesh, and stats).</summary>
 	public MachineDefinition Definition { get; private set; }
 
+	/// <summary>
+	/// The <see cref="VoxelWorld"/> this machine was placed into. Set during
+	/// <see cref="Initialize"/>. Behavior subclasses use it to find neighbor
+	/// machines (conveyor pull/push, crafter ingredient gathering) and to query
+	/// the power network.
+	/// </summary>
+	public FactorySim.Voxel.VoxelWorld World { get; private set; }
+
 	/// <summary>The machine's kind (a shortcut for <see cref="Definition"/>.Type).</summary>
 	public MachineType Type => Definition?.Type ?? MachineType.Smelter;
 
@@ -108,13 +116,17 @@ public partial class Machine : StaticBody3D
 	/// Initializes this machine from a definition and places it at a world voxel.
 	/// Called by the spawner after the node is added to the tree. Builds the
 	/// visual (the definition's mesh/scene or a placeholder) and the collision
-	/// (if any), then calls <see cref="StartMachine"/>.
+	/// (if any), then calls <see cref="StartMachine"/>. <paramref name="world"/>
+	/// is the voxel world the machine was placed into (kept so behaviors can find
+	/// neighbors and query power).
 	/// </summary>
-	public void Initialize(MachineDefinition def, Vector3I voxelPos, float voxelSize)
+	public void Initialize(MachineDefinition def, Vector3I voxelPos, float voxelSize,
+		FactorySim.Voxel.VoxelWorld world)
 	{
 		Definition = def;
 		VoxelPos = voxelPos;
 		Health = def.Health;
+		World = world;
 
 		// Position the machine at the center of its voxel (the voxel's center is
 		// where the player aimed, the same convention the voxel highlight uses).
@@ -137,6 +149,7 @@ public partial class Machine : StaticBody3D
 		// A preview does not "run" — it is just a visual ghost.
 		if (!IsPreview)
 		{
+			IsRunning = true;
 			StartMachine();
 		}
 	}
@@ -344,18 +357,98 @@ public partial class Machine : StaticBody3D
 	}
 
 	// ------------------------------------------------------------------
+	// Neighbor / item-transfer helpers (shared by behavior subclasses)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The machine occupying a world voxel (any of the six face-adjacent "any
+	/// side" neighbors), or null when that cell has no (non-preview) machine.
+	/// Used by conveyors and processors to find what is next to them.
+	/// </summary>
+	protected Machine NeighborMachine(Vector3I voxelPos)
+	{
+		if (World == null)
+		{
+			return null;
+		}
+		return PowerNetwork.MachineAt(World, voxelPos);
+	}
+
+	/// <summary>
+	/// True when this machine currently has enough power to run (see
+	/// <see cref="PowerNetwork.IsPowered"/>). Passive machines (no
+	/// <see cref="MachineDefinition.PowerConsumption"/> and no output) always
+	/// return true. Behavior subclasses call this in their per-tick hook and
+	/// skip work when false (idle, keep buffers).
+	/// </summary>
+	protected bool HasPower()
+	{
+		if (World == null)
+		{
+			return true; // no world → don't gate
+		}
+		return PowerNetwork.IsPowered(World, VoxelPos);
+	}
+
+	/// <summary>
+	/// The six face-adjacent neighbor positions of this machine's voxel (the
+	/// "any side" set). Convenience wrapper around <see cref="PowerNetwork.Neighbors"/>.
+	/// </summary>
+	protected Vector3I[] NeighborPositions() => PowerNetwork.Neighbors(VoxelPos);
+
+	/// <summary>
+	/// The machine's INPUT buffer — where items enter (conveyors push into it,
+	/// the player inserts into it via the UI). The base machine has none (null);
+	/// a processor (crafter/smelter) overrides this to expose its input buffer.
+	/// A conveyor has no input buffer (it has a single slot, not an input).
+	/// </summary>
+	public virtual MachineBuffer InputBuffer => null;
+
+	/// <summary>
+	/// The machine's OUTPUT buffer — where items leave (conveyors pull from it).
+	/// The base machine has none (null); a processor overrides this to expose its
+	/// output buffer. A conveyor exposes its single slot here so an adjacent
+	/// conveyor can pull its item (see <see cref="ConveyorMachine"/>).
+	/// </summary>
+	public virtual MachineBuffer OutputBuffer => null;
+
+	/// <summary>
+	/// True when this machine can RECEIVE an item into its input from an adjacent
+	/// conveyor (i.e. it has a non-full input buffer). Conveyors use this to
+	/// decide whether to push. Virtual: a conveyor overrides it (it can receive
+	/// only when its single slot is empty, not when the buffer is "not full").
+	/// </summary>
+	public virtual bool CanReceive()
+	{
+		var input = InputBuffer;
+		return input != null && !input.IsFull;
+	}
+
+	/// <summary>
+	/// True when this machine has an item available to be PULLED from its output
+	/// by an adjacent conveyor. Conveyors use this to decide whether to pull.
+	/// Virtual: a conveyor overrides it (its output is its single slot).
+	/// </summary>
+	public virtual bool HasOutput()
+	{
+		var output = OutputBuffer;
+		return output != null && !output.IsEmpty;
+	}
+
+	// ------------------------------------------------------------------
 	// Behavior hooks (override in subclasses for machine-specific logic)
 	// ------------------------------------------------------------------
 
 	/// <summary>
-	/// Called once after the machine is placed and its visual built. Override to
-	/// start the machine's behavior (e.g. begin a processing timer, aim a
-	/// turret, start a conveyor belt). The base implementation just marks the
-	/// machine running.
+	/// Called once after the machine is placed and its visual built, once it is
+	/// marked running. Override to start the machine's behavior (e.g. begin a
+	/// processing timer, aim a turret, start a conveyor belt). The base does
+	/// nothing. (The machine is already running — the base marks it running in
+	/// <see cref="Initialize"/>.)
 	/// </summary>
 	protected virtual void StartMachine()
 	{
-		IsRunning = true;
+		// Base machines have no one-time start-up behavior; subclasses override.
 	}
 
 	/// <summary>

@@ -78,6 +78,15 @@ public partial class VoxelTool : Node3D
 	private Vector3I _targetVoxel;
 	private Vector3 _targetNormal;
 
+	/// <summary>
+	/// The machine the player is currently aiming at (closest machine whose
+	/// voxel is within <see cref="MaxRaycastDistance"/>), or null. Machines are
+	/// targeted IN ADDITION to voxels: if both a voxel and a machine are in the
+	/// line of sight, the NEARER one wins. Right-clicking opens that machine's
+	/// UI (see <see cref="MachineUI"/>); the target-info HUD shows its name.
+	/// </summary>
+	private Machine _targetMachine;
+
 	// -- Machine placement state (preview ghost + R-key rotation) -----------
 	//
 	// The transparent preview ghost: a Machine node (IsPreview = true) shown at
@@ -421,6 +430,12 @@ public partial class VoxelTool : Node3D
 			_highlightFill.Visible = false;
 		}
 
+		// MACHINE TARGETING: find the closest machine in the line of sight
+		// (within MaxRaycastDistance). Machines are targeted in ADDITION to
+		// voxels — if both are in sight, the nearer wins (right-click then opens
+		// the machine's UI rather than placing).
+		_targetMachine = FindTargetMachine(from, dir);
+
 		// Push the targeted-voxel info to the top-right HUD readout each frame
 		// (the panel hides itself when there is no target).
 		ResolveServices();
@@ -458,6 +473,26 @@ public partial class VoxelTool : Node3D
 			&& _hasTarget)
 		{
 			TryPlaceHeldMaterial();
+		}
+
+		// INTERACT: a single fresh RIGHT-mouse press (while captured) opens the
+		// UI of the machine the player is targeting (see _targetMachine). If no
+		// machine is targeted, right-click does nothing (it is NOT a mine or
+		// place action). When a machine IS targeted, the preview ghost is hidden
+		// for that frame so the player can see the real machine they are
+		// clicking.
+		if (@event is InputEventMouseButton rmouse
+			&& rmouse.ButtonIndex == MouseButton.Right
+			&& rmouse.Pressed
+			&& Input.MouseMode == Input.MouseModeEnum.Captured)
+		{
+			if (_targetMachine != null)
+			{
+				// Defer so the UI panel node is touched while no other signal is
+				// on the stack (the same deferred pattern the slot-picker
+				// confirm/cancel paths use).
+				CallDeferred(nameof(OpenTargetMachineUI));
+			}
 		}
 
 		// Hotbar selection (mouse wheel + number keys 1-9,0). This is a player
@@ -528,6 +563,34 @@ public partial class VoxelTool : Node3D
 		{
 			UpdatePreview();
 		}
+	}
+
+	/// <summary>
+	/// Opens (or re-targets) the <see cref="MachineUI"/> for the currently
+	/// targeted machine. Called deferred from the right-click in <see
+	/// cref="_Input"/>. Resolves the MachineUI node (a child of the world or
+	/// found via group) and hands it the targeted machine. If the machine is
+	/// already the open UI's target, a second right-click closes it (toggle).
+	/// </summary>
+	private void OpenTargetMachineUI()
+	{
+		if (_targetMachine == null)
+		{
+			return;
+		}
+		ResolveServices();
+		// The MachineUI installs itself into the "machine_ui" group (the same
+		// pattern the inventory / target-info / FPS UIs use), so find it there.
+		MachineUI machineUI = null;
+		foreach (var n in GetTree().GetNodesInGroup("machine_ui"))
+		{
+			if (n is MachineUI mu)
+			{
+				machineUI = mu;
+				break;
+			}
+		}
+		machineUI?.OpenFor(_targetMachine, _inventory);
 	}
 
 	/// <summary>
@@ -883,7 +946,97 @@ public partial class VoxelTool : Node3D
 		info.Distance = distance;
 		info.Category = CategoryDisplayName(ToolAffinity.CategoryOf(material));
 		info.BestTool = unbreakable ? "" : BestToolName(material);
+
+		// If a machine is the target (nearer than the voxel behind it), show a
+		// machine readout instead of the material rows. The voxel info is still
+		// computed (above) but the panel emphasizes the machine.
+		if (_targetMachine != null && _targetMachine.Definition != null)
+		{
+			info.IsMachine = true;
+			info.MachineLine = BuildMachineLine(_targetMachine, cameraPos);
+		}
 		return info;
+	}
+
+	/// <summary>
+	/// Builds the one-line machine readout for the target HUD: the machine's
+	/// display name plus a short status (e.g. "— needs power", "— 50%").
+	/// </summary>
+	private string BuildMachineLine(Machine m, Vector3 cameraPos)
+	{
+		string name = string.IsNullOrEmpty(m.Definition.Name) ? m.Type.ToString() : m.Definition.Name;
+		string status = "";
+		var def = m.Definition;
+		if (def.PowerConsumption > 0f)
+		{
+			status = PowerNetwork.IsPowered(_world, m.VoxelPos) ? "" : " — needs power";
+		}
+		else if (def.PowerOutput > 0f)
+		{
+			status = $" — outputs {def.PowerOutput:0.#}";
+		}
+		if (m is FactorySim.Machines.CrafterMachine crafter)
+		{
+			if (crafter.Recipe != null)
+			{
+				int pct = Mathf.RoundToInt(crafter.CraftProgress * 100f);
+				status += crafter.Recipe != null ? $" — {pct}%" : "";
+			}
+			else
+			{
+				status += " — no recipe";
+			}
+		}
+		return $"{name}{status}";
+	}
+
+	/// <summary>
+	/// Finds the closest machine in the line of sight from the camera, within
+	/// <see cref="MaxRaycastDistance"/>. A machine is targeted when the camera's
+	/// ray passes within one voxel of its center. Returns null when no machine
+	/// is in range (the target then stays a plain voxel).
+	/// </summary>
+	private Machine FindTargetMachine(Vector3 from, Vector3 dir)
+	{
+		Machine best = null;
+		float bestDist = MaxRaycastDistance;
+
+		var machinesRoot = GetTree().Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			return null;
+		}
+
+		float vs = _world.VoxelSize;
+		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+		{
+			if (!(machinesRoot.GetChild(i) is Machine m) || m.IsPreview)
+			{
+				continue;
+			}
+			// The machine's world-space center (voxel center).
+			Vector3 center = new Vector3(m.VoxelPos.X, m.VoxelPos.Y, m.VoxelPos.Z) * vs
+				+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
+			Vector3 toCenter = center - from;
+			float t = toCenter.Dot(dir);
+			if (t <= 0f || t > MaxRaycastDistance)
+			{
+				continue; // behind the camera or beyond range
+			}
+			// Perpendicular distance from the ray to the machine center.
+			float perp = (toCenter - dir * t).Length();
+			if (perp > vs * 0.75f)
+			{
+				continue; // ray misses the machine
+			}
+			// Use the distance along the ray (t) for nearest-wins.
+			if (t < bestDist)
+			{
+				bestDist = t;
+				best = m;
+			}
+		}
+		return best;
 	}
 
 	/// <summary>

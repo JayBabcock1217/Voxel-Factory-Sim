@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://power_source_def1"]
+
+[ext_resource type="Script" uid="uid://cf5kkq6h6vxmo" path="res://Scripts/Machines/MachineDefinition.cs" id="1_no5oj"]
+
+[resource]
+script = ExtResource("1_no5oj")
+Type = 205
+Name = "Power Source"
+PowerOutput = 64.0
+PowerConsumption = 0.0
+BufferSize = 0
+Health = 200
+metadata/_custom_type_script = "uid://cf5kkq6h6vxmo"

@@ -77,7 +77,7 @@ public static class MachineSpawner
 
 		// Initialize AFTER it is in the tree (GlobalPosition needs a tree).
 		var def = MachineRegistry.GetByItemId(itemId);
-		machine.Initialize(def, voxelPos, world.VoxelSize);
+		machine.Initialize(def, voxelPos, world.VoxelSize, world);
 
 		return machine;
 	}

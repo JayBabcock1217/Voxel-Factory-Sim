@@ -120,9 +120,12 @@ public static class MachineRegistry
 	}
 
 	/// <summary>
-	/// Constructs the right <see cref="Machine"/> node for a definition: loads
-	/// the definition's <see cref="MachineDefinition.MachineSceneOverride"/>
-	/// scene when set, otherwise constructs the base <see cref="Machine"/>.
+	/// Constructs the right <see cref="Machine"/> node for a definition:
+	///   1. A custom <see cref="MachineDefinition.MachineSceneOverride"/> scene
+	///      ALWAYS wins (the escape hatch for fully custom machine nodes).
+	///   2. Else the <see cref="MachineBehaviorRegistry"/> picks the built-in
+	///      behavior subclass for the type (conveyor/crafter/power source) or
+	///      falls back to the base <see cref="Machine"/> for static machines.
 	/// The returned node is not yet in the tree.
 	/// </summary>
 	public static Machine CreateMachineForDef(MachineDefinition def)
@@ -142,17 +145,19 @@ public static class MachineRegistry
 				{
 					return custom;
 				}
-				// The scene's root isn't a Machine — fall back to the base and
-				// warn (the user pointed at the wrong scene).
-				GD.PushWarning($"[MachineRegistry] Machine scene '{def.MachineSceneOverride}' for {def.Type} is not a Machine; using the base Machine.");
+				// The scene's root isn't a Machine — fall back to the behavior
+				// registry and warn (the user pointed at the wrong scene).
+				GD.PushWarning($"[MachineRegistry] Machine scene '{def.MachineSceneOverride}' for {def.Type} is not a Machine; using the behavior registry.");
 			}
 			else
 			{
-				GD.PushError($"[MachineRegistry] Failed to load machine scene '{def.MachineSceneOverride}' for {def.Type}; using the base Machine.");
+				GD.PushError($"[MachineRegistry] Failed to load machine scene '{def.MachineSceneOverride}' for {def.Type}; using the behavior registry.");
 			}
 		}
 
-		return new Machine();
+		// No override: use the built-in behavior for the type (or the base
+		// Machine for static types).
+		return MachineBehaviorRegistry.CreateForType(def.Type);
 	}
 
 	private static PackedScene LoadScene(string path)

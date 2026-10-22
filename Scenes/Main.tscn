@@ -10,6 +10,7 @@
 [ext_resource type="Script" uid="uid://dthtm23wmaj37" path="res://Scripts/UI/PauseMenu.cs" id="7_pausemenu"]
 [ext_resource type="Script" uid="uid://bbv1r43h3vyi3" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
 [ext_resource type="Script" uid="uid://deaijk5gbbwkh" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
+[ext_resource type="Script" uid="uid://wbdkby8q2ljs" path="res://Scripts/UI/MachineUI.cs" id="10_machineui"]
 
 [sub_resource type="ProceduralSkyMaterial" id="SkyMaterial_world"]
 sky_top_color = Color(0.25, 0.45, 0.75, 1)
@@ -82,6 +83,10 @@ script = ExtResource("6_fpscounter")
 
 [node name="TargetInfoUI" type="Node" parent="." unique_id=943405515]
 script = ExtResource("9_targetinfo")
+
+[node name="MachineUI" type="CanvasLayer" parent="." unique_id=4210001]
+layer = 120
+script = ExtResource("10_machineui")
 
 [node name="PauseMenu" type="CanvasLayer" parent="." unique_id=-2147483648]
 layer = 50

@@ -58,7 +58,8 @@ To play, open the project in the Godot 4.8 editor (mono build) and press
 | R | Cycle the machine placement rotation (12 orientations: 4×90° about X/Y/Z) — shown in the preview |
 | Left mouse (hold) | Mine the target — **when holding a tool** |
 | Left mouse (click) | Place the held item — a block voxel, or a **machine** (spawns its mesh) |
-| Tab | Open / close the inventory (crafting + dev panes) |
+| Right mouse (click) | Open the **machine UI** of the targeted machine (recipe, buffers, progress) |
+| Tab | Open / close the inventory (crafting + dev panes) — also closes the machine UI |
 | F | Regenerate loaded chunks (debug) |
 | Escape | Toggle mouse capture / close menus |
 
@@ -91,11 +92,18 @@ Scripts/
     MachineType.cs         Enum of machine kinds (Smelter, Crafter, Turret, ...)
     MachineDefinition.cs   Per-machine data resource: mesh, stats, item id
     MachineDefConfig.cs    Registry of machine definitions (a .tres you edit)
-    Machine.cs             Base Node3D for a placed machine (mesh + behavior hooks)
+    Machine.cs             Base StaticBody3D for a placed machine (mesh + hooks + buffers)
     MachineRegistry.cs     item id -> definition -> Machine node factory
     MachineSpawner.cs      Spawns Machine nodes (occupancy check) into "Machines"
     MachineRotation.cs     12 placement orientations (4x90 about X/Y/Z) + Basis helper
+    MachineBuffer.cs       A machine's item buffer (input/output slots)
+    MachineBehaviorRegistry.cs  Maps MachineType -> behavior subclass
+    ConveyorMachine.cs     Conveyor behavior: 1-slot pull/push, any side
+    CrafterMachine.cs      Crafter behavior: gather -> craft -> output (powered)
+    PowerSourceMachine.cs  Power source behavior (passive producer)
+    PowerNetwork.cs        Range-based power (production - consumption in radius)
   UI/InventoryUI.cs        Inventory screen (slots, crafting pane, dev pane)
+  UI/MachineUI.cs          Machine interaction UI (right-click: recipe, buffers, progress)
   Voxel/                   World + save system (FactorySim.Voxel)
     VoxelWorld.cs          Chunk manager / generation orchestration
     VoxelChunk.cs          Per-chunk data + mesh + collision
@@ -133,10 +141,15 @@ base of the factory design system. Machines are first-class inventory items
 (item ids 200–299, the `MachineType` enum values) that, when placed, spawn a
 `Machine` node rendering a **custom mesh imported from Blender**.
 
-The five starter machine kinds are `Smelter`, `Crafter`, `Turret`,
-`DefenseWall`, and `Conveyor` (`MachineType`). They are all placeable out of
-the box (rendering a small placeholder cube); to give a machine its real look
-and stats you register a `MachineDefinition` for it.
+The starter machine kinds are `Smelter`, `Crafter`, `Turret`, `DefenseWall`,
+`Conveyor`, and `PowerSource` (`MachineType`). They are all placeable out of the
+box (rendering a small placeholder cube); to give a machine its real look and
+stats you register a `MachineDefinition` for it. The `Conveyor`, `Crafter`, and
+`PowerSource` have built-in behaviors (item transport, automated crafting, and
+power generation respectively — see [Item flow](#item-flow-conveyors--processors),
+[Machine UI](#machine-ui-right-click-a-machine), and
+[Power](#power-range-based)). The `Smelter`, `Turret`, and `DefenseWall` are
+currently placeable placeholders (static meshes) whose behaviors come next.
 
 ### How it fits together
 
@@ -193,13 +206,72 @@ translucent) and reflects your current rotation live.
   (no item is consumed). This prevents stacking machines in one cell or burying
   a machine inside terrain.
 
+### Item flow (conveyors + processors)
+
+Machines move items between each other. There are no inserters — **conveyors**
+are the only transport. A placed `Conveyor` has a single item slot and, on a
+throttled tick (~4 ops/sec, tunable via the conveyor behavior's
+`TransferInterval` export), it:
+
+1. **PULLs** — if its slot is empty, it takes one item from an adjacent
+   machine's **output** buffer.
+2. **PUSH**es — if its slot has an item, it moves it into an adjacent machine's
+   **input** buffer.
+
+"Adjacent" is any of the six face-neighbors (±X, ±Y, ±Z), so items enter and
+leave a machine from **any side**. A conveyor prefers to push into a **processor**
+(a machine with a real input buffer, e.g. a crafter) over another conveyor, so
+items flow toward machines; it falls back to a free neighbor conveyor slot to
+chain along a belt.
+
+A **Crafter** is the first real processor: it gathers recipe ingredients from
+adjacent conveyors into its input buffer, runs the recipe it is set to (over the
+recipe's craft time), and puts the product in its output buffer — which adjacent
+conveyors then pull. A crafter **consumes power** (its definition's
+`PowerConsumption`); with no power it idles but **keeps its buffers** (no items
+lost).
+
+### Machine UI (right-click a machine)
+
+**Right-click** a targeted machine to open its UI (the top-right target HUD also
+shows the machine's name + a short status). The panel shows:
+
+- The machine's name and a status line (power state / output / craft progress).
+- For a **crafter**: a recipe picker (a dropdown of every recipe in the shared
+  crafting database) and a live craft-progress bar. Picking a recipe sets what
+  the crafter produces; "(No recipe — idle)" stops it.
+- The machine's **input** and **output** buffer slots. **Left-click** a slot to
+  move one item between it and your selected hotbar slot; **right-click** to move
+  a whole stack (direction is decided by which side has the item).
+
+Close with **Tab**, **Escape**, or the close button. Right-clicking the
+already-open machine toggles it closed. The panel hides itself automatically if
+the machine is broken while it is open.
+
+### Power (range-based)
+
+Power is **not** carried on wires or conveyors — it is **range-based**. A
+`PowerSource` machine produces a fixed rate of power (its definition's
+`PowerOutput`) and feeds **every consumer machine within its radius** (a simple
+Euclidean distance in world-voxel units, any direction — no cables to lay). The
+radius is the `VoxelWorld`'s **`PowerRadius`** export (default 8).
+
+For a given consumer, available power = (sum of every power source in its
+radius) − (sum of every *other* consumer in that radius). A machine is "powered"
+when its own `PowerConsumption` is met by that amount. This means one source
+powers a cluster of machines until its output is exhausted — add too many
+machines and the area browns out. Passive machines (conveyors, power sources)
+consume no power and always run.
+
 ### Adding a new machine type
 
-1. Append a value to the `MachineType` enum (e.g. `Furnace = 205`).
+1. Append a value to the `MachineType` enum (e.g. `Furnace = 206`).
 2. (Optional) Create a `Machine` subclass with its behavior, override the
-   virtual hooks, and save it as a `.tscn`.
-3. Create a `MachineDefinition` for it (pointing at its mesh; set
-   `MachineSceneOverride` to your subclass scene if it has custom logic).
+   virtual hooks, and register it in `MachineBehaviorRegistry` (one line mapping
+   the type → your subclass). Static machines (no per-tick logic) need no
+   subclass — the base `Machine` is the fallback.
+3. Create a `MachineDefinition` for it (pointing at its mesh; set `PowerOutput`
+   / `PowerConsumption` / `BufferSize` / `ProcessTime` as needed).
 4. Add the definition to your `MachineDefConfig`.
 
 No spawner / tool / save code changes are needed — the system picks the new

@@ -38,6 +38,31 @@ public sealed class CraftingDatabase
 	/// <summary>All registered recipes (unfiltered, all research levels).</summary>
 	public IReadOnlyList<CraftingRecipe> AllRecipes => _recipes;
 
+	// ------------------------------------------------------------------
+	// Shared (static) instance
+	// ------------------------------------------------------------------
+
+	private static CraftingDatabase _shared;
+
+	/// <summary>
+	/// A process-wide shared <see cref="CraftingDatabase"/> holding the default
+	/// recipe set, accessible to systems that have no scene node to own their own
+	/// (notably placeable machines like the <see cref="Machines.CrafterMachine"/>).
+	/// It is built once (lazily) from <see cref="BuildDefaultDatabase"/>. The
+	/// inventory UI keeps its OWN instance for the interactive crafting pane
+	/// (which tracks the player's live inventory); machines use this shared one
+	/// only to look up recipes by product/ingredient — they never call
+	/// <see cref="Craft"/> on it (machines consume from their own buffers).
+	/// </summary>
+	public static CraftingDatabase Shared
+	{
+		get
+		{
+			_shared ??= BuildDefaultDatabase();
+			return _shared;
+		}
+	}
+
 	/// <summary>
 	/// The recipes the player can currently see/craft (filtered by
 	/// <see cref="UnlockedResearchLevel"/>). The tech-tree stub: with the level at

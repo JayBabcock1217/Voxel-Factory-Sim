@@ -33,6 +33,7 @@ public enum MachineType
 	Turret = 202,       // offensive structure
 	DefenseWall = 203,  // passive defensive barrier
 	Conveyor = 204,     // moves items between machines
+	PowerSource = 205,  // produces power for nearby machines (range-based)
 
-	// -- Future machines append here (e.g. Furnace = 205, Drill = 206, ...) --
+	// -- Future machines append here (e.g. Furnace = 206, Drill = 207, ...) --
 }

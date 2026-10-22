@@ -290,6 +290,15 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public FactorySim.Machines.MachineDefConfig MachineConfig { get; private set; }
 
+	/// <summary>
+	/// The radius (in world-voxel units) over which a power source machine feeds
+	/// nearby consumer machines. Tunable here; forwarded to
+	/// <see cref="FactorySim.Machines.PowerNetwork"/> in <see cref="_Ready"/>.
+	/// A value under 0.5 falls back to the network's default (8).
+	/// </summary>
+	[Export(PropertyHint.Range, "0,64,0.5")]
+	public float PowerRadius { get; set; } = FactorySim.Machines.PowerNetwork.DefaultRadius;
+
 	[ExportGroup("Debug")]
 	/// <summary>Pressing this key regenerates all loaded chunks with the current parameters.</summary>
 	[Export]
@@ -528,6 +537,8 @@ public partial class VoxelWorld : Node3D
 		// Publish the machine registry to the static MachineRegistry (and any
 		// change to the config re-publishes). Null = machines disabled.
 		FactorySim.Machines.MachineRegistry.SetConfig(MachineConfig);
+		// Forward the tunable power radius to the range-based power network.
+		FactorySim.Machines.PowerNetwork.SetRadius(PowerRadius);
 		if (BiomeConfig != null)
 		{
 			BiomeConfig.PropertyChanged -= OnBiomeConfigChanged; // dedupe on re-ready

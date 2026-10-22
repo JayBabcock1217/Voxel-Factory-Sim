@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://crafter_def1"]
+
+[ext_resource type="Script" uid="uid://cf5kkq6h6vxmo" path="res://Scripts/Machines/MachineDefinition.cs" id="1_no5oj"]
+
+[resource]
+script = ExtResource("1_no5oj")
+Type = 201
+Name = "Crafter"
+PowerConsumption = 4.0
+PowerOutput = 0.0
+BufferSize = 4
+ProcessTime = 1.5
+Health = 150
+metadata/_custom_type_script = "uid://cf5kkq6h6vxmo"

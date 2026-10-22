@@ -54,6 +54,7 @@ public partial class TargetInfoUI : Node
 	private Label _categoryLabel;
 	private Label _distanceLabel;
 	private Label _unbreakableLabel;
+	private Label _machineLabel;
 
 	/// <summary>
 	/// The snapshot of target-voxel information to display. The VoxelTool builds
@@ -75,6 +76,15 @@ public partial class TargetInfoUI : Node
 		public float Distance;
 		/// <summary>True when the material cannot be broken (e.g. bedrock).</summary>
 		public bool Unbreakable;
+		/// <summary>
+		/// A one-line machine readout (e.g. "Crafter — 50% — needs power"), shown
+		/// in place of the material rows when the player is aiming at a machine
+		/// (machines are targeted in preference to the voxel behind them). Empty
+		/// when the target is a plain voxel.
+		/// </summary>
+		public string MachineLine;
+		/// <summary>True when the target is a machine (not a plain voxel).</summary>
+		public bool IsMachine;
 	}
 
 	public override void _Ready()
@@ -180,6 +190,10 @@ public partial class TargetInfoUI : Node
 		_unbreakableLabel.Visible = false;
 		vbox.AddChild(_unbreakableLabel);
 
+		_machineLabel = MakeLabel("Machine: —", 13, new Color(0.6f, 0.9f, 1.0f));
+		_machineLabel.Visible = false;
+		vbox.AddChild(_machineLabel);
+
 		_panel.Visible = false; // hidden until the tool reports a target
 		_layer.AddChild(_panel);
 		AddChild(_layer);
@@ -241,6 +255,11 @@ public partial class TargetInfoUI : Node
 		_categoryLabel.Text = $"Category: {info.Category}";
 		_distanceLabel.Text = $"Distance: {info.Distance:0.0}m";
 		_unbreakableLabel.Visible = info.Unbreakable;
+		_machineLabel.Visible = info.IsMachine;
+		if (info.IsMachine)
+		{
+			_machineLabel.Text = info.MachineLine;
+		}
 
 		// Resize the panel background to fit its rows: the VBox's combined
 		// minimum size is the height the content actually needs, so adding the

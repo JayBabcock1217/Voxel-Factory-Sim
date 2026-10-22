@@ -97,6 +97,7 @@ public static class ItemRegistry
 		(MachineType.Turret,       "Turret",       new Color(0.65f, 0.30f, 0.30f)),
 		(MachineType.DefenseWall,  "Defense Wall", new Color(0.45f, 0.50f, 0.45f)),
 		(MachineType.Conveyor,     "Conveyor",     new Color(0.60f, 0.55f, 0.35f)),
+		(MachineType.PowerSource,  "Power Source", new Color(0.85f, 0.75f, 0.25f)),
 	};
 
 	/// <summary>

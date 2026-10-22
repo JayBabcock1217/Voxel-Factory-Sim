@@ -114,6 +114,14 @@ public partial class MachineDefinition : Resource
 	[Export(PropertyHint.Range, "0,100000,1")] public int Health { get; set; } = 100;
 
 	/// <summary>
+	/// Power this machine PRODUCES per second (0 = not a power source). A
+	/// machine with a non-zero value is a power source: it feeds the range-based
+	/// power network to all consumer machines within <see cref="PowerNetwork.Radius"/>.
+	/// See <see cref="MachineDefinition.PowerConsumption"/> for the consumer side.
+	/// </summary>
+	[Export(PropertyHint.Range, "0,1024,0.1")] public float PowerOutput { get; set; }
+
+	/// <summary>
 	/// An optional path to a concrete <see cref="Machine"/> subclass scene for
 	/// this machine type. Leave empty to use the base <see cref="Machine"/>
 	/// behavior. When set, the <see cref="MachineRegistry"/> instantiates this
@@ -143,5 +151,6 @@ public partial class MachineDefinition : Resource
 	public void SetOutputCount(int value) { if (OutputCount != value) { OutputCount = value; Raise(); } }
 	public void SetBufferSize(int value) { if (BufferSize != value) { BufferSize = value; Raise(); } }
 	public void SetHealth(int value) { if (Health != value) { Health = value; Raise(); } }
+	public void SetPowerOutput(float value) { if (PowerOutput != value) { PowerOutput = value; Raise(); } }
 	public void SetMachineSceneOverride(string value) { if (MachineSceneOverride != value) { MachineSceneOverride = value ?? ""; Raise(); } }
 }
