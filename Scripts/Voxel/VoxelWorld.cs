@@ -277,6 +277,19 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public VoxelMaterialConfig MaterialConfig { get; private set; } = new();
 
+	[ExportGroup("Machines")]
+	/// <summary>
+	/// The registry of machine definitions for this world — the factory design
+	/// system's data. Assign a <see cref="FactorySim.Machines.MachineDefConfig"/>
+	/// resource here (create one, add a <see cref="FactorySim.Machines.MachineDefinition"/>
+	/// per machine, each pointing at an imported Blender mesh). When a player
+	/// places a machine item, the world spawns a <see cref="FactorySim.Machines.Machine"/>
+	/// node using this registry. Leave unset (null) to disable machines; the
+	/// dev panel still lists machine items with fallback names.
+	/// </summary>
+	[Export]
+	public FactorySim.Machines.MachineDefConfig MachineConfig { get; private set; }
+
 	[ExportGroup("Debug")]
 	/// <summary>Pressing this key regenerates all loaded chunks with the current parameters.</summary>
 	[Export]
@@ -511,6 +524,10 @@ public partial class VoxelWorld : Node3D
 			MaterialConfig.PropertyChanged -= OnMaterialConfigChanged; // dedupe on re-ready
 			MaterialConfig.PropertyChanged += OnMaterialConfigChanged;
 		}
+
+		// Publish the machine registry to the static MachineRegistry (and any
+		// change to the config re-publishes). Null = machines disabled.
+		FactorySim.Machines.MachineRegistry.SetConfig(MachineConfig);
 		if (BiomeConfig != null)
 		{
 			BiomeConfig.PropertyChanged -= OnBiomeConfigChanged; // dedupe on re-ready
@@ -540,6 +557,17 @@ public partial class VoxelWorld : Node3D
 			MaterialConfig.PropertyChanged += OnMaterialConfigChanged;
 			ApplyMaterials();
 		}
+	}
+
+	/// <summary>
+	/// Sets (or clears) the machine registry and re-publishes it to the static
+	/// <see cref="FactorySim.Machines.MachineRegistry"/>. The inspector calls this
+	/// when the export is reassigned; <c>null</c> disables machines.
+	/// </summary>
+	public void SetMachineConfig(FactorySim.Machines.MachineDefConfig value)
+	{
+		MachineConfig = value;
+		FactorySim.Machines.MachineRegistry.SetConfig(value);
 	}
 
 	private void OnMaterialConfigChanged(VoxelMaterialEntry _) => ApplyMaterials();

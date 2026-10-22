@@ -502,12 +502,16 @@ public partial class VoxelTool : Node3D
 	}
 
 	/// <summary>
-	/// The default place-ability: if the held item is a placeable material (not
-	/// a tool, not empty), place one voxel of it into the cell adjacent to the
-	/// targeted face (<c>_targetVoxel + _targetNormal</c>), consuming one item
-	/// from the selected hotbar slot. Does nothing when the held item is a tool
-	/// (tools mine, they don't place) or when there is no room / the cell is
-	/// occupied.
+	/// The default place-ability. The held item decides what happens:
+	///
+	/// - A MACHINE item: spawn a <see cref="FactorySim.Machines.Machine"/> node
+	///   (its imported mesh + behavior) into the cell adjacent to the targeted
+	///   face. This is the factory design system's placement path.
+	/// - A PLACEABLE MATERIAL: place one voxel of it into that same cell.
+	///
+	/// In both cases one item is consumed from the selected hotbar slot. Does
+	/// nothing when the held item is a tool (tools mine, they don't place),
+	/// empty, or when the target cell is not free.
 	/// </summary>
 	private void TryPlaceHeldMaterial()
 	{
@@ -515,10 +519,6 @@ public partial class VoxelTool : Node3D
 		if (held.IsEmpty || held.IsTool)
 		{
 			return; // tools don't place; empty does nothing
-		}
-		if (!VoxelMaterialIds.IsPlaceableMaterialId(held.MaterialId))
-		{
-			return;
 		}
 
 		// The cell to place into: the empty cell on the far side of the targeted
@@ -529,9 +529,32 @@ public partial class VoxelTool : Node3D
 			Mathf.RoundToInt(_targetNormal.Y),
 			Mathf.RoundToInt(_targetNormal.Z));
 
-		if (!_world.PlaceVoxel(place, held.MaterialId))
+		bool placed;
+		if (held.IsMachine)
 		{
-			return; // already solid, out of range, or an unloaded chunk
+			// Machine: spawn a Machine node at the target cell. The spawner
+			// returns null when the machine isn't registered (no def) — in that
+			// case nothing is placed and nothing is consumed.
+			var machine = FactorySim.Machines.MachineSpawner.SpawnMachine(_world, held.MaterialId, place);
+			placed = machine != null;
+			// A machine occupies its cell visually/collision-wise but does NOT
+			// stamp a voxel, so the voxel cell may already be solid under an
+			// existing block; we still allow the machine to sit there (the user
+			// placed it intentionally). No voxel write is needed.
+		}
+		else
+		{
+			// Material: place a voxel.
+			if (!VoxelMaterialIds.IsPlaceableMaterialId(held.MaterialId))
+			{
+				return;
+			}
+			placed = _world.PlaceVoxel(place, held.MaterialId);
+		}
+
+		if (!placed)
+		{
+			return; // already solid (material), unregistered machine, or bad cell
 		}
 
 		// Consume one item from the selected hotbar slot.

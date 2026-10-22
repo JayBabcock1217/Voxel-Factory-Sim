@@ -945,10 +945,12 @@ public partial class InventoryUI : CanvasLayer
 		devScroll.AddChild(_devList);
 
 		// Populate the list from the registry: every placeable material (from the
-		// world's material config) + every tool. Future items appear here
-		// automatically as they're added to the config / tool table.
+		// world's material config) + every tool + every machine. Future items
+		// appear here automatically as they're added to the config / tool /
+		// machine tables. The machine config (if the world has one) lets machine
+		// rows use the user's custom definition names.
 		_devItems.Clear();
-		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig));
+		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig));
 		foreach (var item in _devItems)
 		{
 			_devList.AddChild(CreateDevRow(item));
@@ -1092,14 +1094,16 @@ public partial class InventoryUI : CanvasLayer
 			_devTipItem = hovered;
 			_devTipName.Text = hovered.Name;
 
-			// Description: tools get a short blurb; materials use their config
-			// description (falling back to a generic line when there is none).
+			// Description: tools and machines get short blurbs; materials use
+			// their config description (falling back to a generic line).
 			string desc = hovered.IsTool
 				? "Hold this in your hotbar to break blocks. Each tool is faster on some materials than others."
+				: hovered.IsMachine
+				? "Place this in the world to build a machine. Its appearance and behavior come from its MachineDefinition (imported mesh + stats)."
 				: MaterialDescription(hovered.MaterialId);
 			if (string.IsNullOrEmpty(desc))
 			{
-				desc = hovered.IsTool ? "A tool item." : "A placeable block.";
+				desc = hovered.IsTool ? "A tool item." : hovered.IsMachine ? "A machine item." : "A placeable block.";
 			}
 			_devTipDesc.Text = desc;
 
@@ -1174,9 +1178,12 @@ public partial class InventoryUI : CanvasLayer
 		};
 		button.AddChild(icon);
 
-		// Name label to the right of the icon. Tools get a "(tool)" tag so they
-		// are visually distinct from placeable materials.
-		string label = item.IsTool ? $"{item.Name} (tool)" : item.Name;
+		// Name label to the right of the icon. Tools get a "(tool)" tag and
+		// machines a "(machine)" tag so they're visually distinct from
+		// placeable materials.
+		string label = item.IsTool ? $"{item.Name} (tool)"
+			: item.IsMachine ? $"{item.Name} (machine)"
+			: item.Name;
 		var labelCtl = new Label
 		{
 			Name = "Label",
@@ -1213,30 +1220,30 @@ public partial class InventoryUI : CanvasLayer
 			return;
 		}
 
-		if (item.IsTool)
+		if (item.IsTool || item.IsMachine)
 		{
-			// Tools are single items and must keep their ToolType; place into the
-			// first empty slot (CollectItem would rebuild the stack and drop the
-			// tool type). If there's no room, find a slot to overwrite as a
-			// last resort is NOT done — a full inventory means the player must
-			// make room first.
-			var tool = FactorySim.Items.ItemStack.From(item.MaterialId, 1);
-			tool.ToolType = item.ToolType;
+			// Tools AND machines are single items that must keep their type tag
+			// (ToolType / MachineType); place into the first empty slot
+			// (CollectItem would rebuild the stack and drop the type). If there's
+			// no room, a full inventory means the player must make room first.
+			var single = FactorySim.Items.ItemStack.From(item.MaterialId, 1);
+			single.ToolType = item.IsTool ? item.ToolType : null;
+			single.MachineType = item.IsMachine ? item.MachineKind : null;
 			for (int i = 0; i < Inventory.TotalSlots; i++)
 			{
 				if (_inventory.Slots[i].IsEmpty)
 				{
-					_inventory.Slots[i] = tool;
+					_inventory.Slots[i] = single;
 					_inventory.RaiseChangedPublic();
 					return;
 				}
 			}
-			// No empty slot: try to merge with an existing identical tool (rare;
-			// tools don't stack, so this is just a safety net).
+			// No empty slot: if already holding an identical one, do nothing
+			// (safety net — tools and machines don't stack).
 			for (int i = 0; i < Inventory.TotalSlots; i++)
 			{
 				var s = _inventory.Slots[i];
-				if (s.MaterialId == item.MaterialId && s.IsTool)
+				if (s.MaterialId == item.MaterialId && (s.IsTool || s.IsMachine))
 				{
 					return; // already holding one; do nothing
 				}
@@ -1452,6 +1459,16 @@ public partial class InventoryUI : CanvasLayer
 			return new Color(0.6f, 0.6f, 0.6f);
 		}
 
+		// Machines aren't palette materials either; give them their own icon color.
+		if (FactorySim.Voxel.VoxelMaterialIds.IsMachineId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Machines.MachineType>(materialId.ToString(), out var machine))
+			{
+				return FactorySim.Items.ItemRegistry.MachineColor(machine);
+			}
+			return new Color(0.6f, 0.6f, 0.6f);
+		}
+
 		if (_world != null && _world.Palette != null
 			&& _world.Palette.Materials.Length > 0
 			&& materialId > 0 && materialId - 1 < _world.Palette.Materials.Length)
@@ -1476,6 +1493,13 @@ public partial class InventoryUI : CanvasLayer
 			if (Enum.TryParse<FactorySim.Items.ToolType>(materialId.ToString(), out var tool))
 			{
 				return FactorySim.Items.ItemRegistry.ToolName(tool);
+			}
+		}
+		if (FactorySim.Voxel.VoxelMaterialIds.IsMachineId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Machines.MachineType>(materialId.ToString(), out var machine))
+			{
+				return FactorySim.Items.ItemRegistry.MachineName(machine);
 			}
 		}
 		if (_world != null && _world.MaterialConfig != null)

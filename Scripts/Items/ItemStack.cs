@@ -1,3 +1,5 @@
+using FactorySim.Machines;
+
 namespace FactorySim.Items;
 
 /// <summary>
@@ -26,15 +28,27 @@ public class ItemStack
 	/// <summary>
 	/// The tool kind this stack represents, when <see cref="MaterialId"/> is a
 	/// tool id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsToolId"/>).
-	/// <see langword="null"/> for plain materials and empty stacks.
+	/// <see langword="null"/> for plain materials, machines, and empty stacks.
 	/// </summary>
 	public ToolType? ToolType { get; set; }
+
+	/// <summary>
+	/// The machine kind this stack represents, when <see cref="MaterialId"/> is
+	/// a machine id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsMachineId"/>).
+	/// <see langword="null"/> for plain materials, tools, and empty stacks. When
+	/// set, placing this item spawns a <see cref="FactorySim.Machines.Machine"/>
+	/// node (its imported mesh) instead of a voxel.
+	/// </summary>
+	public MachineType? MachineType { get; set; }
 
 	/// <summary>True when the stack holds nothing.</summary>
 	public bool IsEmpty => MaterialId == 0 || Count <= 0;
 
 	/// <summary>True when this stack is a tool (carries a non-null <see cref="ToolType"/>).</summary>
 	public bool IsTool => ToolType.HasValue;
+
+	/// <summary>True when this stack is a machine item (carries a non-null <see cref="MachineType"/>).</summary>
+	public bool IsMachine => MachineType.HasValue;
 
 	/// <summary>Creates a stack of <paramref name="count"/> of a material.</summary>
 	public static ItemStack From(int materialId, int count = 1)
@@ -47,5 +61,14 @@ public class ItemStack
 			MaterialId = (int)type,
 			Count = 1,
 			ToolType = type,
+		};
+
+	/// <summary>Creates a single machine item of the given <paramref name="type"/>.</summary>
+	public static ItemStack FromMachine(MachineType type)
+		=> new()
+		{
+			MaterialId = (int)type,
+			Count = 1,
+			MachineType = type,
 		};
 }

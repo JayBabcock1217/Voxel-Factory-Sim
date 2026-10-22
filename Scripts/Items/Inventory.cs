@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using FactorySim.Machines;
 
 namespace FactorySim.Items;
 
@@ -294,6 +295,15 @@ public partial class Inventory : Node
 				{
 					stack.ToolType = tool;
 					stack.Count = 1; // tools are single items, never stacked
+				}
+				// Same reconstruction for machines: machine ids are the MachineType
+				// enum values, so a saved machine item recovers its MachineType
+				// here (and is single-counted like a tool).
+				else if (FactorySim.Voxel.VoxelMaterialIds.IsMachineId(materialIds[i])
+					&& Enum.TryParse<MachineType>(materialIds[i].ToString(), out var machine))
+				{
+					stack.MachineType = machine;
+					stack.Count = 1; // machines are single items, never stacked
 				}
 				Slots[i] = stack;
 			}

@@ -2,6 +2,7 @@ using Godot;
 using System;
 using System.Collections.Generic;
 using FactorySim.Voxel;
+using FactorySim.Machines;
 
 namespace FactorySim.Items;
 
@@ -16,24 +17,32 @@ public readonly struct ItemEntry
 	public int MaterialId { get; }
 	public bool IsTool { get; }
 	public ToolType? ToolType { get; }
+	/// <summary>True when this entry is a machine item (carries a <see cref="MachineType"/>).</summary>
+	public bool IsMachine { get; }
+	/// <summary>The machine kind, when this entry is a machine item (null otherwise).</summary>
+	public MachineType? MachineKind { get; }
 	public string Name { get; }
 	public Color IconColor { get; }
 
-	public ItemEntry(int materialId, bool isTool, ToolType? toolType, string name, Color iconColor)
+	public ItemEntry(int materialId, bool isTool, ToolType? toolType, string name, Color iconColor,
+		bool isMachine = false, MachineType? machineKind = null)
 	{
 		MaterialId = materialId;
 		IsTool = isTool;
 		ToolType = toolType;
 		Name = name;
 		IconColor = iconColor;
+		IsMachine = isMachine;
+		MachineKind = machineKind;
 	}
 
 	public override bool Equals(object obj) => obj is ItemEntry other && Equals(other);
 
 	public bool Equals(ItemEntry other) =>
-		MaterialId == other.MaterialId && IsTool == other.IsTool && ToolType == other.ToolType;
+		MaterialId == other.MaterialId && IsTool == other.IsTool && ToolType == other.ToolType
+		&& IsMachine == other.IsMachine && MachineKind == other.MachineKind;
 
-	public override int GetHashCode() => HashCode.Combine(MaterialId, IsTool, ToolType);
+	public override int GetHashCode() => HashCode.Combine(MaterialId, IsTool, ToolType, IsMachine, MachineKind);
 
 	public static bool operator ==(ItemEntry left, ItemEntry right) => left.Equals(right);
 
@@ -77,6 +86,43 @@ public static class ItemRegistry
 		}
 	}
 
+	// Machine display metadata (name + icon color). Like the tool table, this is
+	// a STATIC fallback for when a machine has no registered MachineDefinition
+	// (so the dev panel can still list it). When a MachineDefConfig is provided
+	// to AllItems, the definition's own name/color win (see AllMachines).
+	private static readonly (MachineType Type, string Name, Color Color)[] _machines =
+	{
+		(MachineType.Smelter,      "Smelter",      new Color(0.70f, 0.45f, 0.30f)),
+		(MachineType.Crafter,      "Crafter",      new Color(0.50f, 0.55f, 0.60f)),
+		(MachineType.Turret,       "Turret",       new Color(0.65f, 0.30f, 0.30f)),
+		(MachineType.DefenseWall,  "Defense Wall", new Color(0.45f, 0.50f, 0.45f)),
+		(MachineType.Conveyor,     "Conveyor",     new Color(0.60f, 0.55f, 0.35f)),
+	};
+
+	/// <summary>
+	/// Every machine entry. When <paramref name="config"/> is provided and has a
+	/// registered definition for a machine type, the definition's Name is used
+	/// (so the dev panel shows the user's custom name); otherwise the static
+	/// fallback name/color below is used. This keeps the dev panel useful even
+	/// before the user has registered any machine definitions.
+	/// </summary>
+	public static IReadOnlyList<ItemEntry> AllMachines(FactorySim.Machines.MachineDefConfig config = null)
+	{
+		var list = new List<ItemEntry>(_machines.Length);
+		foreach (var (type, fallbackName, color) in _machines)
+		{
+			string name = fallbackName;
+			var def = config?.GetByType(type);
+			if (def != null && !string.IsNullOrEmpty(def.Name))
+			{
+				name = def.Name;
+			}
+			list.Add(new ItemEntry((int)type, false, null, name, color,
+				isMachine: true, machineKind: type));
+		}
+		return list;
+	}
+
 	/// <summary>
 	/// Every placeable material, in id order, read from the given
 	/// <paramref name="config"/>. A material with no def (or an unknown id) is
@@ -111,13 +157,17 @@ public static class ItemRegistry
 
 	/// <summary>
 	/// The full ordered item list: all materials first (id order), then all
-	/// tools. This is what the dev panel renders as its scrollable list.
+	/// tools, then all machines. This is what the dev panel renders as its
+	/// scrollable list. <paramref name="machineConfig"/> (optional) lets machine
+	/// entries use a registered definition's name when available.
 	/// </summary>
-	public static List<ItemEntry> AllItems(VoxelMaterialConfig config)
+	public static List<ItemEntry> AllItems(VoxelMaterialConfig config,
+		FactorySim.Machines.MachineDefConfig machineConfig = null)
 	{
 		var list = new List<ItemEntry>();
 		list.AddRange(AllMaterials(config));
 		list.AddRange(AllTools);
+		list.AddRange(AllMachines(machineConfig));
 		return list;
 	}
 
@@ -149,6 +199,32 @@ public static class ItemRegistry
 	public static Color ToolColor(ToolType type)
 	{
 		foreach (var (t, _, color) in _tools)
+		{
+			if (t == type)
+			{
+				return color;
+			}
+		}
+		return new Color(0.6f, 0.6f, 0.6f);
+	}
+
+	/// <summary>The display name for a machine type (falls back to the enum name).</summary>
+	public static string MachineName(MachineType type)
+	{
+		foreach (var (t, name, _) in _machines)
+		{
+			if (t == type)
+			{
+				return name;
+			}
+		}
+		return type.ToString();
+	}
+
+	/// <summary>The icon color for a machine type (a neutral grey fallback).</summary>
+	public static Color MachineColor(MachineType type)
+	{
+		foreach (var (t, _, color) in _machines)
 		{
 			if (t == type)
 			{

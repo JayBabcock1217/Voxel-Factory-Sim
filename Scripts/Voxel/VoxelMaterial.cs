@@ -62,8 +62,26 @@ public static class VoxelMaterialIds
 	/// <summary>True when <paramref name="id"/> is a tool item id (not a placeable material).</summary>
 	public static bool IsToolId(int id) => id >= ToolFirst && id <= ToolLast;
 
+	// ------------------------------------------------------------------
+	// Machine items (not placeable voxels; they live in the inventory and, when
+	// placed, spawn a Machine node with its imported mesh — the factory design
+	// system). These ids are NOT solid materials: the world never stamps them
+	// and the mesh/palette builders never see them. They exist so a machine is
+	// a first-class inventory item (see ItemStack.MachineType / ItemRegistry).
+	//
+	// The range starts at 200 (above the tool block, 100-103) and is deliberately
+	// wide (up to 299) so many future machine types can be added without
+	// touching the range. The MachineType enum's underlying values are the
+	// machine item ids (the same convention as ToolType).
+	// ------------------------------------------------------------------
+	public const int MachineFirst = 200;
+	public const int MachineLast = 299;
+
+	/// <summary>True when <paramref name="id"/> is in the machine item id range (a broad test; a machine also needs a registered definition).</summary>
+	public static bool IsMachineId(int id) => id >= MachineFirst && id <= MachineLast;
+
 	/// <summary>True when <paramref name="id"/> is a placeable material (a solid voxel you can hold and place).</summary>
-	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id);
+	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id) && !IsMachineId(id);
 }
 
 /// <summary>

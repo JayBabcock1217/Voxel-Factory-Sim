@@ -20,7 +20,12 @@ save/load system and a world-slot picker.
   materials (a shovel is fast on sand but slow on stone, a pickaxe the reverse).
   Hold a placeable material to place it into the world.
 - **Crafting + dev items** — a crafting pane (recipes) and a dev pane (god-mode
-  list of every material + tool) in the inventory screen.
+  list of every material + tool + machine) in the inventory screen.
+- **Machines (factory design system)** — a data-driven, extensible system for
+  placing machines (smelters, crafters, turrets, defense walls, conveyors, …)
+  that render **custom meshes imported from Blender**. Each machine is a
+  `MachineDefinition` resource (mesh + stats + item id); placing a machine item
+  spawns a `Machine` node with that mesh. See [Machines](#machines-factory-design-system).
 - **Save / load** — multiple named world slots, each a small binary file
   (only your edits + player state + inventory — including held tools — are
   persisted; terrain is regenerated from the seed). Autosaves on quit.
@@ -51,7 +56,7 @@ To play, open the project in the Godot 4.8 editor (mono build) and press
 | Shift (left) | Sprint |
 | 1–9, 0 / wheel | Select hotbar slot (the held item) |
 | Left mouse (hold) | Mine the target — **when holding a tool** |
-| Left mouse (click) | Place the held material — **when holding a block** |
+| Left mouse (click) | Place the held item — a block voxel, or a **machine** (spawns its mesh) |
 | Tab | Open / close the inventory (crafting + dev panes) |
 | F | Regenerate loaded chunks (debug) |
 | Escape | Toggle mouse capture / close menus |
@@ -81,6 +86,13 @@ Scripts/
     ToolAffinity.cs        Central tool-vs-material break-rate table
     CraftingRecipe.cs      A recipe (ingredients -> product)
     CraftingDatabase.cs    Recipe registry + "how many can I make"
+  Machines/                Machine / factory design system (FactorySim.Machines)
+    MachineType.cs         Enum of machine kinds (Smelter, Crafter, Turret, ...)
+    MachineDefinition.cs   Per-machine data resource: mesh, stats, item id
+    MachineDefConfig.cs    Registry of machine definitions (a .tres you edit)
+    Machine.cs             Base Node3D for a placed machine (mesh + behavior hooks)
+    MachineRegistry.cs     item id -> definition -> Machine node factory
+    MachineSpawner.cs      Spawns Machine nodes into the shared "Machines" container
   UI/InventoryUI.cs        Inventory screen (slots, crafting pane, dev pane)
   Voxel/                   World + save system (FactorySim.Voxel)
     VoxelWorld.cs          Chunk manager / generation orchestration
@@ -111,6 +123,67 @@ with a `Migrate` hook for forward compatibility, and corrupted files (bad
 magic or missing checksum) are auto-repaired on read.
 
 Run `WorldSaveTest.tscn` from the editor to verify the format end-to-end.
+
+## Machines (factory design system)
+
+A data-driven, extensible system for placing **machines** in the world — the
+base of the factory design system. Machines are first-class inventory items
+(item ids 200–299, the `MachineType` enum values) that, when placed, spawn a
+`Machine` node rendering a **custom mesh imported from Blender**.
+
+The five starter machine kinds are `Smelter`, `Crafter`, `Turret`,
+`DefenseWall`, and `Conveyor` (`MachineType`). They are all placeable out of
+the box (rendering a small placeholder cube); to give a machine its real look
+and stats you register a `MachineDefinition` for it.
+
+### How it fits together
+
+| Piece | Role |
+|---|---|
+| `MachineType` (enum) | The machine kind. Its `(int)` value is the machine's item id. **Add a new machine type by appending a value here.** |
+| `MachineDefinition` (Resource) | Per-machine data: the `Type`, a display `Name`, the imported **`Mesh`** (or a `PackedScene`), a `Scale`, an optional `CollisionShape`, and generic behavior params (power, process time, output, buffer, health). Also an optional `MachineSceneOverride` to select a `Machine` subclass. |
+| `MachineDefConfig` (Resource) | The registry: an array of `MachineDefinition`s. Assign this to the `VoxelWorld`'s `MachineConfig` export. |
+| `Machine` (Node3D) | The placed node: renders the definition's mesh (or a placeholder cube), adds the collision shape, and exposes virtual hooks (`StartMachine` / `ProcessMachine` / `ShutdownMachine` / `OnBroken`) that subclasses override for machine-specific logic. |
+| `MachineRegistry` (static) | Maps an item id → `MachineDefinition` → the right `Machine` node (loading the definition's `MachineSceneOverride` when set). |
+| `MachineSpawner` (static) | Parents a `Machine` into the shared "Machines" scene container, positions it at its voxel, and starts it. |
+
+### Importing a Blender mesh
+
+1. Export the machine from Blender as **`.glb` or `.gltf`** (File → Export →
+   glTF 2.0). Keep it roughly centered on its origin and at a sane scale
+   (adjust later with the definition's `Scale` if needed).
+2. Drop the `.glb`/`.gltf` file into the project (e.g. a `Models/` folder).
+   Godot imports it automatically and it appears in the FileSystem dock as a
+   `PackedScene` (you can get its `Mesh` from the imported scene).
+3. Create a `MachineDefinition` resource (FileSystem dock → right-click →
+   **New Resource** → `MachineDefinition`) and fill in:
+   - `Type` — the machine kind,
+   - `Name` / `Description`,
+   - `Mesh` — assign the imported mesh (drag it from the FileSystem dock, or
+     use the resource picker), or set `MeshScene` to the whole imported scene,
+   - `Scale` — fit the mesh to the voxel grid,
+   - `CollisionShape` (optional) — a `BoxShape3D` / `SphereShape3D` so the
+     machine blocks the player,
+   - behavior params as needed.
+4. Create (or edit) a `MachineDefConfig` resource, add your
+   `MachineDefinition`s to its `Machines` array.
+5. In `Scenes/Main.tscn`, select the `VoxelWorld` node and assign your
+   `MachineDefConfig` to its **Machines → MachineConfig** export.
+
+Now the machine items appear in the dev pane (with your custom names), and
+placing one spawns a `Machine` node with your Blender mesh.
+
+### Adding a new machine type
+
+1. Append a value to the `MachineType` enum (e.g. `Furnace = 205`).
+2. (Optional) Create a `Machine` subclass with its behavior, override the
+   virtual hooks, and save it as a `.tscn`.
+3. Create a `MachineDefinition` for it (pointing at its mesh; set
+   `MachineSceneOverride` to your subclass scene if it has custom logic).
+4. Add the definition to your `MachineDefConfig`.
+
+No spawner / tool / save code changes are needed — the system picks the new
+type up from the enum + registry.
 
 ## Testing & CI
 
