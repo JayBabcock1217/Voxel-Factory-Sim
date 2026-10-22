@@ -1093,8 +1093,14 @@ public partial class VoxelWorld : Node3D
 			return _save;
 		}
 
-		// The cached node is gone (or was never set) — re-resolve.
+		// The cached node is gone (or was never set) — re-resolve. This can be
+		// reached from a deferred callback during teardown, when the world is no
+		// longer in the tree; GetTree() throws in that case, so bail out early.
 		_save = null;
+		if (!IsInsideTree())
+		{
+			return null;
+		}
 		var tree = GetTree();
 		if (tree == null)
 		{
@@ -1460,6 +1466,13 @@ public partial class VoxelWorld : Node3D
 	private void RestoreInventoryFromSave(WorldSaveFile.Data data)
 	{
 		if (data == null || data.Inventory.Count == 0)
+		{
+			return;
+		}
+
+		// Guard against an out-of-tree call (GetTree() throws when the world has
+		// left the tree); a no-op then.
+		if (!IsInsideTree())
 		{
 			return;
 		}
@@ -1892,6 +1905,17 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	private void OnGenerationComplete(Vector2I coord, VoxelChunk chunk)
 	{
+		// This runs on the main thread via CallDeferred, so it can fire AFTER
+		// the world has left the tree (e.g. the player quit to the menu while a
+		// chunk was still generating). GetTree() throws on a node that is not in
+		// the tree, so guard with IsInsideTree() and bail out: there is nothing
+		// left to mesh or persist into once the world is gone.
+		if (!IsInsideTree())
+		{
+			_generatingBudget = Mathf.Max(0, _generatingBudget - 1);
+			return;
+		}
+
 		_generatingBudget = Mathf.Max(0, _generatingBudget - 1);
 		// A slot just freed up: immediately start the next nearest pending chunk
 		// so the in-flight set stays pinned to the nearest unfinished chunks
