@@ -30,8 +30,14 @@ namespace FactorySim.Machines;
 /// Machines are parented to a shared "Machines" container in the scene (created
 /// on demand, like the "Drops" container for item drops), so all machines are
 /// siblings and can be found/cleared from one place.
+///
+/// The machine is a <see cref="StaticBody3D"/> (not a plain Node3D) so its
+/// <see cref="CollisionShape3D"/> actually participates in physics — in Godot 4 a
+/// collision shape only collides when its nearest ancestor is a physics body. A
+/// StaticBody3D is the right choice for a static structure: the player's
+/// CharacterBody3D MoveAndSlide() is blocked by it, and it never needs to move.
 /// </summary>
-public partial class Machine : Node3D
+public partial class Machine : StaticBody3D
 {
 	/// <summary>The definition this machine was built from (its type, mesh, and stats).</summary>
 	public MachineDefinition Definition { get; private set; }
@@ -242,7 +248,9 @@ public partial class Machine : Node3D
 		}
 
 		// A ghost must not block the player or count as solid: remove any
-		// collision the spawner added for a real machine.
+		// collision the spawner added for a real machine. A StaticBody3D with no
+		// collision shape is inert (it registers no physics geometry), so
+		// removing the shape is sufficient to make the ghost non-blocking.
 		if (_collision != null)
 		{
 			_collision.QueueFree();
@@ -257,22 +265,82 @@ public partial class Machine : Node3D
 	}
 
 	/// <summary>
-	/// Adds a collision shape to the machine when its definition has one, so the
-	/// machine blocks the player and can be targeted. No-op when the definition
-	/// has no collision shape (the machine is then visual-only).
+	/// Builds the machine's collision shape so it blocks the player. The shape is
+	/// an AUTO-GENERATED <see cref="BoxShape3D"/> sized to the visual mesh's
+	/// bounding box (AABB) — this works for any imported mesh (single mesh,
+	/// multi-mesh scene, or the placeholder cube) and always produces a
+	/// non-degenerate box, so a machine always collides. The box is sized with a
+	/// small padding margin so the collider slightly overhangs the mesh (prevents
+	/// the player from clipping through thin parts).
+	///
+	/// The shape is built in the machine's LOCAL space (centered on the origin,
+	/// the voxel center), so it rotates WITH the machine when the placement
+	/// rotation (the R-key orientation) is applied to the body's Basis.
 	/// </summary>
 	private void BuildCollision(MachineDefinition def)
 	{
-		if (def.CollisionShape == null)
+		// Collect the combined AABB of every mesh in the machine's visual, in
+		// local space (the machine's origin is the voxel center). The visual was
+		// just built, so its meshes are in the tree and their AABBs are valid.
+		Aabb combined = default;
+		bool first = true;
+		CollectAabb(_meshInstance, ref combined, ref first);
+		CollectAabb(_meshSceneRoot, ref combined, ref first);
+
+		// Fall back to a full-voxel box if no mesh produced a usable AABB (e.g.
+		// an empty scene), so the machine still collides with something sensible.
+		if (first)
 		{
-			return;
+			combined = new Aabb(new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(1f, 1f, 1f));
 		}
+
+		// Pad the box slightly so the collider overhangs the mesh a touch.
+		const float pad = 0.05f;
+		combined.Grow(pad);
+
+		// A BoxShape3D is always centered on its own origin, so position it at
+		// the (padded) AABB's center to sit exactly over the mesh (the mesh may
+		// not be centered on the machine's origin, e.g. a Blender export whose
+		// origin is at a corner).
+		var box = new BoxShape3D { Size = combined.Size };
+		Vector3 center = combined.Position + combined.Size * 0.5f;
+
 		_collision = new CollisionShape3D
 		{
 			Name = "MachineCollision",
-			Shape = def.CollisionShape,
+			Shape = box,
+			Transform = new Transform3D(Basis.Identity, center),
 		};
 		AddChild(_collision);
+	}
+
+	/// <summary>
+	/// Folds a node's mesh AABB(s) into <paramref name="combined"/> (union).
+	/// Handles a single <see cref="MeshInstance3D"/> or a scene root (recursing
+	/// into all descendants that are MeshInstance3Ds). <paramref name="first"/>
+	/// starts true and is set false once a non-empty AABB is folded in.
+	/// </summary>
+	private static void CollectAabb(Node node, ref Aabb combined, ref bool first)
+	{
+		if (node == null)
+		{
+			return;
+		}
+		if (node is MeshInstance3D mi)
+		{
+			Aabb a = mi.GetAabb(); // local-space AABB of the mesh (incl. node scale)
+			// A zero-size AABB means no mesh (or an empty one) — skip it. Aabb
+			// has no IsEmpty property in this SDK, so test the size directly.
+			if (a.Size.LengthSquared() > 0f)
+			{
+				combined = first ? a : combined.Merge(a);
+				first = false;
+			}
+		}
+		for (int i = 0; i < node.GetChildCount(); i++)
+		{
+			CollectAabb(node.GetChild(i), ref combined, ref first);
+		}
 	}
 
 	// ------------------------------------------------------------------
