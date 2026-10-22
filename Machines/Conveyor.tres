@@ -11,5 +11,5 @@ Type = 204
 Name = "Conveyor"
 MeshScene = ExtResource("1_ihl8n")
 CollisionShape = SubResource("BoxShape3D_ihl8n")
-CollisionBoxSize = Vector3(2, 0.5, 2)
+CollisionBoxSize = Vector3(1, 0.25, 1)
 metadata/_custom_type_script = "uid://cf5kkq6h6vxmo"
