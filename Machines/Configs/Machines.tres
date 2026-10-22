@@ -1,9 +1,9 @@
 [gd_resource type="Resource" script_class="MachineDefConfig" format=3 uid="uid://bvpsa7aw0qu3k"]
 
 [ext_resource type="Resource" uid="uid://ds32bat8tkrjs" path="res://Machines/Conveyor.tres" id="1_2aiml"]
-[ext_resource type="Resource" uid="uid://crafter_def1" path="res://Machines/Crafter.tres" id="2_crafter"]
-[ext_resource type="Resource" uid="uid://power_source_def1" path="res://Machines/PowerSource.tres" id="3_powersrc"]
 [ext_resource type="Script" uid="uid://d1020urv3ilhg" path="res://Scripts/Machines/MachineDefConfig.cs" id="1_q1vid"]
+[ext_resource type="Resource" path="res://Machines/Crafter.tres" id="2_crafter"]
+[ext_resource type="Resource" path="res://Machines/PowerSource.tres" id="3_powersrc"]
 
 [resource]
 script = ExtResource("1_q1vid")

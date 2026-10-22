@@ -355,9 +355,18 @@ public partial class Machine : StaticBody3D
 			return true;
 		}
 
-		// Case 2: a PackedScene. A scene can't be measured without instantiating
-		// it, so we build a throwaway probe in the scene tree, measure the
-		// combined AABB of all its MeshInstance3Ds, then free the probe.
+		// Case 2: a PackedScene. We can't measure a scene's AABB without
+		// instantiating it, but calling MeshInstance3D.GetAabb() on a freshly
+		// instantiated (not-yet-rendered) scene in the EDITOR returns a stale or
+		// empty AABB. So instead we:
+		//   1. Instantiate the scene into a throwaway probe (to read each
+		//      MeshInstance3D's GlobalTransform, which bakes in the scene root's
+		//      scale + any per-mesh transforms).
+		//   2. Measure each mesh's TRUE AABB from the Mesh RESOURCE itself
+		//      (Mesh.GetAabb() is accurate and doesn't require rendering).
+		//   3. Transform each mesh AABB by the instance's GlobalTransform and
+		//      union them.
+		// This gives a correct box in the editor, outside of runtime.
 		if (def.MeshScene != null)
 		{
 			var sceneTree = Engine.GetMainLoop() as SceneTree;
@@ -374,14 +383,15 @@ public partial class Machine : StaticBody3D
 				visual.Name = "ProbeScene";
 				if (visual is Node3D sceneNode)
 				{
+					// Apply the definition's scale to the scene root, matching
+					// how BuildVisual scales the instantiated scene.
 					sceneNode.Scale = def.Scale;
 				}
 				probe.AddChild(visual);
-				visual.Notification((int)Node.NotificationPostEnterTree);
 
 				Aabb combined = default;
 				bool first = true;
-				CollectAabb(visual, ref combined, ref first);
+				CollectMeshResourceAabb(visual, ref combined, ref first);
 
 				if (first)
 				{
@@ -474,6 +484,92 @@ public partial class Machine : StaticBody3D
 			Transform = new Transform3D(Basis.Identity, boxCenter),
 		};
 		AddChild(_collision);
+	}
+
+	/// <summary>
+	/// Folds the TRUE mesh-resource AABB(s) of a scene into <paramref
+	/// name="combined"/> (union), in the scene root's local space. Unlike
+	/// <see cref="CollectAabb"/> (which calls MeshInstance3D.GetAabb() and can
+	/// be stale for a freshly-instantiated, unrendered scene in the editor),
+	/// this reads each <see cref="Mesh"/> resource's own AABB (accurate, no
+	/// rendering required) and transforms it by the MeshInstance3D's
+	/// <see cref="Node3D.GlobalTransform"/> — which bakes in the scene root's
+	/// scale, the definition's Scale, and any per-mesh transforms/offsets.
+	/// Recurses into all descendant MeshInstance3Ds.
+	/// </summary>
+	private static void CollectMeshResourceAabb(Node node, ref Aabb combined, ref bool first)
+	{
+		if (node == null)
+		{
+			return;
+		}
+
+		if (node is MeshInstance3D mi && mi.Mesh != null)
+		{
+			Aabb meshAabb = mi.Mesh.GetAabb();
+			if (meshAabb.Size.LengthSquared() > 0f)
+			{
+				// Compute the mesh instance's effective transform in the scene
+				// root's space by walking the parent chain (synchronous — does
+				// not rely on GlobalTransform being resolved, which isn't
+				// reliable for a freshly-instantiated scene in the editor).
+				Transform3D effective = mi.Transform;
+				for (Node3D p = mi.GetParent() as Node3D; p != null; p = p.GetParent() as Node3D)
+				{
+					effective = p.Transform * effective;
+				}
+
+				// Transform the mesh's local AABB into the scene root's space by
+				// transforming its 8 corners and re-deriving the AABB.
+				Aabb transformed = TransformAabb(meshAabb, effective);
+				combined = first ? transformed : combined.Merge(transformed);
+				first = false;
+			}
+		}
+
+		for (int i = 0; i < node.GetChildCount(); i++)
+		{
+			CollectMeshResourceAabb(node.GetChild(i), ref combined, ref first);
+		}
+	}
+
+	/// <summary>
+	/// Transforms an AABB by a <see cref="Transform3D"/> by transforming its 8
+	/// corners and re-deriving the (possibly rotated) AABB. The SDK's
+	/// <see cref="Aabb"/> has no Transform method, so we do it by hand. For a
+	/// mesh whose transform includes rotation, the result is the axis-aligned
+	/// bounding box of the transformed corners (a slight over-approximation,
+	/// which is fine for a collision box).
+	/// </summary>
+	private static Aabb TransformAabb(Aabb input, Transform3D transform)
+	{
+		Vector3 min = input.Position;
+		Vector3 max = input.Position + input.Size;
+
+		Vector3 outMin = Vector3.Inf;
+		Vector3 outMax = -Vector3.Inf;
+
+		// Transform all 8 corners.
+		for (int cx = 0; cx <= 1; cx++)
+		for (int cy = 0; cy <= 1; cy++)
+		for (int cz = 0; cz <= 1; cz++)
+		{
+			Vector3 corner = new Vector3(
+				cx == 0 ? min.X : max.X,
+				cy == 0 ? min.Y : max.Y,
+				cz == 0 ? min.Z : max.Z);
+			Vector3 transformed = transform * corner;
+			outMin = new Vector3(
+				System.Math.Min(outMin.X, transformed.X),
+				System.Math.Min(outMin.Y, transformed.Y),
+				System.Math.Min(outMin.Z, transformed.Z));
+			outMax = new Vector3(
+				System.Math.Max(outMax.X, transformed.X),
+				System.Math.Max(outMax.Y, transformed.Y),
+				System.Math.Max(outMax.Z, transformed.Z));
+		}
+
+		return new Aabb(outMin, outMax - outMin);
 	}
 
 	/// <summary>
