@@ -590,6 +590,15 @@ public partial class VoxelTool : Node3D
 				{
 					CycleMachineRotation();
 				}
+				else if (@event is InputEventKey ckey
+					&& ckey.Pressed && !ckey.Echo
+					&& (ckey.PhysicalKeycode == Key.C || ckey.Keycode == Key.C))
+				{
+					// C key: toggle the machine-config panel (the list of all
+					// registered machine definitions, with add/remove).
+					var world = GetTree()?.GetFirstNodeInGroup("voxel_world") as VoxelWorld;
+					world?.OpenMachineConfigPanel();
+				}
 				else
 				{
 					int slot = HotbarSlotFromEvent(@event);

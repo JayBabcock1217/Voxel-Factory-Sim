@@ -581,6 +581,60 @@ public partial class VoxelWorld : Node3D
 		FactorySim.Machines.MachineRegistry.SetConfig(value);
 	}
 
+	/// <summary>
+	/// Rebuilds the auto-generated box collision on every machine currently in
+	/// the scene. Called by the editor's "Rebuild Machine Collisions" button
+	/// (via the <see cref="FactorySim.Editor.VoxelWorldPlugin"/>). Use this
+	/// after re-importing or re-scaling a Blender mesh so the collider matches
+	/// the new visuals. Machines that are not yet in the tree (e.g. spawned
+	/// but not yet _Ready) are skipped.
+	/// </summary>
+	public void RebuildAllMachineCollisions()
+	{
+		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			GD.Print("[VoxelWorld] No machines container found — nothing to rebuild.");
+			return;
+		}
+
+		int rebuilt = 0;
+		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+		{
+			if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
+			{
+				m.RebuildCollision();
+				rebuilt++;
+			}
+		}
+		GD.Print($"[VoxelWorld] Rebuilt collision on {rebuilt} machine(s).");
+	}
+
+	/// <summary>
+	/// Opens the in-game machine-config panel (the list of all registered
+	/// machine definitions with add/remove). Called by the editor's
+	/// "Open Machine Config" button (via the <see cref="FactorySim.Editor.VoxelWorldPlugin"/>).
+	/// The panel is a CanvasLayer that toggles on/off.
+	/// </summary>
+	public void OpenMachineConfigPanel()
+	{
+		var tree = GetTree();
+		if (tree == null)
+		{
+			return;
+		}
+
+		// Find or create the MachineConfigPanel CanvasLayer in the scene.
+		var panel = tree.Root.FindChild("MachineConfigPanel", true, false) as FactorySim.UI.MachineConfigPanel;
+		if (panel == null)
+		{
+			panel = new FactorySim.UI.MachineConfigPanel { Name = "MachineConfigPanel" };
+			tree.Root.AddChild(panel);
+			panel.Configure(MachineConfig);
+		}
+		panel.Toggle();
+	}
+
 	private void OnMaterialConfigChanged(VoxelMaterialEntry _) => ApplyMaterials();
 
 	public void SetBiomeConfig(BiomeConfig value)

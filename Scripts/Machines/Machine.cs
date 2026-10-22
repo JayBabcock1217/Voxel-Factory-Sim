@@ -278,6 +278,28 @@ public partial class Machine : StaticBody3D
 	}
 
 	/// <summary>
+	/// Rebuilds this machine's collision shape from its CURRENT visual. Use
+	/// this after the visual has changed (e.g. the definition's mesh or scale
+	/// was re-imported, or the machine was re-initialized with a new definition).
+	/// The old collision shape is freed and a new one is generated from the
+	/// current visual's AABB. Preview machines (ghosts) have no collision and
+	/// are left unchanged.
+	/// </summary>
+	public void RebuildCollision()
+	{
+		if (IsPreview)
+		{
+			return; // ghosts have no collision
+		}
+		if (_collision != null)
+		{
+			_collision.QueueFree();
+			_collision = null;
+		}
+		BuildCollision(Definition);
+	}
+
+	/// <summary>
 	/// Builds the machine's collision shape so it blocks the player. The shape is
 	/// an AUTO-GENERATED <see cref="BoxShape3D"/> sized to the visual mesh's
 	/// bounding box (AABB) — this works for any imported mesh (single mesh,

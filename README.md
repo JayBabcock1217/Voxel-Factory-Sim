@@ -211,6 +211,28 @@ translucent) and reflects your current rotation live.
   (no item is consumed). This prevents stacking machines in one cell or burying
   a machine inside terrain.
 
+### Machine config panel & collision refresh
+
+Two quality-of-life tools for iterating on machine meshes and configs:
+
+- **Machine config panel** — press **C** in-game (or click the "Open Machine
+  Config" button in the editor inspector, under the `VoxelWorld` node) to open
+  a panel listing every registered `MachineDefinition`: name, type, item id,
+  mesh status, scale, and power output. You can **add** a new definition (it
+  picks the first unused `MachineType`) and **remove** one. Changes are
+  in-memory; save the `MachineDefConfig` `.tres` in the editor to persist.
+
+- **Rebuild Machine Collisions** — click the "Rebuild Machine Collisions"
+  button in the editor inspector (under the `VoxelWorld` node) or the
+  "Rebuild All Collisions" button in the config panel. This re-runs the
+  auto-generated box collision on every placed machine from its current visual
+  AABB. Use it after re-importing or re-scaling a Blender mesh so the collider
+  matches the new visuals.
+
+The editor buttons are provided by a lightweight `EditorPlugin`
+(`Scripts/Editor/VoxelWorldPlugin.cs`, enabled in `project.godot`). They appear
+at the bottom of the `VoxelWorld` inspector whenever the node is selected.
+
 ### Item flow (conveyors + processors)
 
 Machines move items between each other. There are no inserters — **conveyors**
