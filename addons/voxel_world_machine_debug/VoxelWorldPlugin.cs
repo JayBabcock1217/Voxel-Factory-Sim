@@ -206,6 +206,9 @@ public partial class VoxelWorldDebugControl : Control
 		int authored = 0;
 		int skipped = 0;
 
+		int saved = 0;
+		int saveFailed = 0;
+
 		foreach (var def in defs)
 		{
 			if (def == null)
@@ -218,6 +221,31 @@ public partial class VoxelWorldDebugControl : Control
 				def.SetCollisionBoxOffset(center);
 				authored++;
 				GD.Print($"[VoxelWorldPlugin]   '{def.Name}' ({def.Type}) -> box {size.X:F3} x {size.Y:F3} x {size.Z:F3} @ offset {center.X:F3}, {center.Y:F3}, {center.Z:F3}");
+
+				// Persist the change to DISK. The definitions are separate .tres
+				// files (referenced from the MachineDefConfig), so saving the
+				// individual definition resource writes the new box to its file.
+				// Without this, the in-memory change is lost on reload and the
+				// game loads the old box from disk.
+				string path = def.ResourcePath;
+				if (!string.IsNullOrEmpty(path))
+				{
+					var err = ResourceSaver.Save(def, path);
+					if (err == Error.Ok)
+					{
+						saved++;
+					}
+					else
+					{
+						saveFailed++;
+						GD.PushWarning($"[VoxelWorldPlugin]   Failed to save '{path}' (error {err}).");
+					}
+				}
+				else
+				{
+					saveFailed++;
+					GD.PushWarning($"[VoxelWorldPlugin]   '{def.Name}' has no resource path (inline resource?) — not saved to disk.");
+				}
 			}
 			else
 			{
@@ -227,7 +255,8 @@ public partial class VoxelWorldDebugControl : Control
 		}
 
 		GD.Print($"[VoxelWorldPlugin] Generated collision boxes for {authored}/{defs.Length} definition(s) " +
-			$"({skipped} skipped). Save the MachineDefConfig .tres to persist.");
+			$"({skipped} skipped). Saved {saved} to disk" +
+			(saveFailed > 0 ? $", {saveFailed} failed." : "."));
 	}
 
 	private void OnConfigPressed()
