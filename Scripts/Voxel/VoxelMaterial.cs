@@ -113,6 +113,22 @@ public sealed class VoxelMaterialPalette
 	/// <summary>Per-material texture tiling, consumed by the mesh builders when they emit UVs.</summary>
 	public float[] TextureScales { get; private set; } = Array.Empty<float>();
 
+	/// <summary>
+	/// The texture for each solid voxel type (index = material id - 1). Null when
+	/// the material has no texture (flat color). Exposed so the inventory /
+	/// hotbar / recipe UI can draw the SAME texture it uses on the terrain as an
+	/// item icon. Updated in place by <see cref="Apply"/>.
+	/// </summary>
+	public Texture2D[] Textures { get; private set; } = Array.Empty<Texture2D>();
+
+	/// <summary>
+	/// The texture for material <paramref name="id"/> (null when the material has
+	/// no texture or the id is unconfigured). The inventory / hotbar / recipe UI
+	/// uses this to draw the terrain's own texture as the item icon.
+	/// </summary>
+	public Texture2D GetTexture(int id)
+		=> id > 0 && id < Textures.Length ? Textures[id - 1] : null;
+
 	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
 	public int MaterialCount { get; private set; }
 
@@ -143,6 +159,9 @@ public sealed class VoxelMaterialPalette
 				ApplyEntry(Materials[i], defs[i].Entry);
 			}
 			TextureScales[i] = defs[i].Entry != null ? defs[i].Entry.TextureScale : 1f;
+			// Expose the texture directly so the UI can draw the same texture
+			// it uses on the terrain as the item icon.
+			Textures[i] = defs[i].Entry != null ? defs[i].Entry.Texture : null;
 		}
 	}
 
@@ -161,13 +180,16 @@ public sealed class VoxelMaterialPalette
 
 		var old = Materials;
 		var oldScales = TextureScales;
+		var oldTextures = Textures;
 		var newMaterials = new StandardMaterial3D[count];
 		var newScales = new float[count];
+		var newTextures = new Texture2D[count];
 		int keep = Math.Min(old.Length, count);
 		for (int i = 0; i < keep; i++)
 		{
 			newMaterials[i] = old[i];
 			newScales[i] = oldScales[i];
+			newTextures[i] = i < oldTextures.Length ? oldTextures[i] : null;
 		}
 		for (int i = keep; i < count; i++)
 		{
@@ -182,10 +204,12 @@ public sealed class VoxelMaterialPalette
 				SpecularMode = BaseMaterial3D.SpecularModeEnum.SchlickGgx,
 			};
 			newScales[i] = 1f;
+			newTextures[i] = null;
 		}
 
 		Materials = newMaterials;
 		TextureScales = newScales;
+		Textures = newTextures;
 		MaterialCount = count;
 	}
 

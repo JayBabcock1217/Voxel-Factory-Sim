@@ -1555,7 +1555,7 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// Restores the saved inventory (all 28 slots) from <paramref name="data"/>.
+	/// Restores the saved inventory (all 144 slots) from <paramref name="data"/>.
 	/// A no-op when there is no inventory node or the snapshot held no slots.
 	/// Called once, when the player is restored from a save.
 	/// </summary>

@@ -23,7 +23,7 @@ namespace FactorySim.Voxel;
 /// [4 bytes]  healthCount (u32)
 ///   healthCount × [x,y,z (i32 each) + health (f32)]                 (16 bytes each)
 /// [16 bytes] player position (f32 x3) + yaw, pitch (f32 x2)
-/// [4 bytes]  slotCount (u32)  -- always the inventory's TotalSlots
+/// [4 bytes]  slotCount (u32)  -- the inventory's TotalSlots (currently 144)
 ///   slotCount × [materialId (i32) + count (i32)]                    (8 bytes each)
 /// [4 bytes]  dropCount (u32)
 ///   dropCount × [pos (f32 x3) + materialId (i32) + count (i32)]     (24 bytes each)

@@ -11,12 +11,11 @@ namespace FactorySim.UI;
 /// The Minecraft-style inventory screen: a full-screen <see cref="CanvasLayer"/>
 /// built entirely in code (no .tscn), shown/hidden with TAB.
 ///
-/// Layout: a centered panel with 28 slots — 2 rows of 10 for storage
-/// (inventory slots 10-27) and a bottom row of 10 for the hotbar
-/// (slots 0-9) — plus a cursor stack that follows the mouse while dragging.
-/// A persistent 10-slot hotbar is also rendered at the bottom of the screen
-/// (always visible) with a selection highlight; number keys 1-0 and the mouse
-/// wheel change the selected slot.
+/// Layout: a centered panel with 144 slots — a 6×20 grid of storage
+/// (inventory slots 24-143) above a 24-slot hotbar row (slots 0-23) — plus a
+/// cursor stack that follows the mouse while dragging. A persistent 24-slot
+/// hotbar is also rendered at the bottom of the screen (always visible) with a
+/// selection highlight; number keys and the mouse wheel change the selected slot.
 ///
 /// Interactions (per slot):
 /// - Left-click: pick up / place / merge / swap (Minecraft single-click rules)
@@ -40,11 +39,11 @@ public partial class InventoryUI : CanvasLayer
 	private Control _root;
 	private Panel _panel;
 	private readonly Control[] _slotControls = new Control[Inventory.TotalSlots];
-	private readonly ColorRect[] _slotIcons = new ColorRect[Inventory.TotalSlots];
+	private readonly TextureRect[] _slotIcons = new TextureRect[Inventory.TotalSlots];
 	private readonly Label[] _slotCounts = new Label[Inventory.TotalSlots];
 
 	private Control _cursor;
-	private ColorRect _cursorIcon;
+	private TextureRect _cursorIcon;
 	private Label _cursorCount;
 	private ItemStack _cursorStack = ItemStack.From(0);
 
@@ -62,7 +61,7 @@ public partial class InventoryUI : CanvasLayer
 	private ScrollContainer _craftScroll;
 	private VBoxContainer _craftList;
 	private readonly List<CraftingRecipe> _visibleRecipes = new();
-	private readonly Dictionary<CraftingRecipe, ColorRect> _recipeIcons = new();
+	private readonly Dictionary<CraftingRecipe, TextureRect> _recipeIcons = new();
 	private readonly Dictionary<CraftingRecipe, Label> _recipeNames = new();
 	private readonly Dictionary<CraftingRecipe, Label> _recipeCounts = new();
 	private readonly Dictionary<CraftingRecipe, Button> _recipeButtons = new();
@@ -111,7 +110,7 @@ public partial class InventoryUI : CanvasLayer
 	// Persistent hotbar (always visible at the bottom of the screen).
 	private Panel _hotbar;
 	private readonly Control[] _hotbarSlots = new Control[Inventory.HotbarSize];
-	private readonly ColorRect[] _hotbarIcons = new ColorRect[Inventory.HotbarSize];
+	private readonly TextureRect[] _hotbarIcons = new TextureRect[Inventory.HotbarSize];
 	// A small tooltip label just above the hotbar naming the item in the
 	// currently selected slot (the player's "held" item). Updated whenever the
 	// selection or that slot's contents change.
@@ -406,11 +405,10 @@ public partial class InventoryUI : CanvasLayer
 		AddChild(_root);
 		_root.GuiInput += OnRootGuiInput;
 
-		const int storageCols = 9;
-		// Panel width is driven by the widest row (the 10-slot hotbar) PLUS the
+		// Panel width is driven by the widest row (the 24-slot hotbar) PLUS the
 		// dev pane on the left. Layout: [pad | dev pane | gap | slot grid | pad].
 		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
-		float gridH = 3 * SlotSize + 2 * SlotGap;
+		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		const float devW = 240f;
 		const float devGap = 16f;
 		const float pad = 12f;
@@ -419,7 +417,7 @@ public partial class InventoryUI : CanvasLayer
 		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
 		Vector2 panelPos = new Vector2(
 			Math.Max(0f, (viewportSize.X - panelW) / 2f),
-			(viewportSize.Y - panelH) / 2f);
+			Math.Max(0f, (viewportSize.Y - panelH) / 2f));
 
 		_panel = new Panel
 		{
@@ -462,23 +460,24 @@ public partial class InventoryUI : CanvasLayer
 		title.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
 		_panel.AddChild(title);
 
-		// Slot grid: rows 0-1 = storage (9 cols each, slots 10-27),
-		// row 2 = hotbar (10 cols, slots 0-9). The grid is shifted right of the
+		// Slot grid: rows 0..5 = storage (20 cols each, slots 24-143),
+		// row 6 = hotbar (24 cols, slots 0-23). The grid is shifted right of the
 		// dev pane: it starts at x = pad + devW + devGap. Storage rows are
-		// centered within the grid's own width.
+		// centered within the grid's own width (the hotbar row is wider — 24).
 		float gridX = pad + devW + devGap;
 		float gridY = 36f;
-		float storageRowW = storageCols * SlotSize + (storageCols - 1) * SlotGap;
+		float storageRowW = Inventory.StorageCols * SlotSize + (Inventory.StorageCols - 1) * SlotGap;
 		float storageOffsetX = (gridW - storageRowW) / 2f;
-		for (int row = 0; row < 3; row++)
+		for (int row = 0; row < Inventory.StorageRows + 1; row++)
 		{
-			int cols = row < 2 ? storageCols : Inventory.HotbarSize;
-			float rowX = row < 2 ? gridX + storageOffsetX : gridX;
+			bool isHotbarRow = row == Inventory.StorageRows;
+			int cols = isHotbarRow ? Inventory.HotbarSize : Inventory.StorageCols;
+			float rowX = isHotbarRow ? gridX : gridX + storageOffsetX;
 			for (int col = 0; col < cols; col++)
 			{
-				int slotIndex = row < 2
-					? Inventory.HotbarSize + row * storageCols + col
-					: col;
+				int slotIndex = isHotbarRow
+					? col
+					: Inventory.HotbarSize + row * Inventory.StorageCols + col;
 				CreateSlot(slotIndex, new Vector2(rowX + col * (SlotSize + SlotGap), gridY + row * (SlotSize + SlotGap)));
 			}
 		}
@@ -493,9 +492,11 @@ public partial class InventoryUI : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 			Visible = false,
 		};
-		_cursorIcon = new ColorRect
+		_cursorIcon = new TextureRect
 		{
 			LayoutMode = 3, // Position
+			ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+			StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_cursorIcon.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -627,11 +628,12 @@ public partial class InventoryUI : CanvasLayer
 			_hotbarSlotBg[i].SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
 			slot.AddChild(_hotbarSlotBg[i]);
 
-			_hotbarIcons[i] = new ColorRect
+			_hotbarIcons[i] = new TextureRect
 			{
-				Color = Colors.Transparent,
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 				LayoutMode = 3, // Position
+				ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+				StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			};
 			// Inset the icon slightly so it doesn't fill the whole slot.
 			_hotbarIcons[i].Position = new Vector2(6f, 6f);
@@ -702,7 +704,7 @@ public partial class InventoryUI : CanvasLayer
 	private void BuildCrafting()
 	{
 		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
-		float gridH = 3 * SlotSize + 2 * SlotGap;
+		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		const float craftW = 320f;   // wider crafting pane
 		const float gap = 16f;        // gap between the slot grid and the pane
 		const float pad = 12f;        // panel padding (matches BuildUi)
@@ -1166,16 +1168,19 @@ public partial class InventoryUI : CanvasLayer
 		};
 		button.Text = "";
 
-		// Icon swatch (the item's color) on the left.
-		var icon = new ColorRect
+		// Icon on the left: the terrain's own texture when configured, else a
+		// flat color swatch (same logic as the inventory slots).
+		var icon = new TextureRect
 		{
 			Name = "Icon",
 			LayoutMode = 3, // Position
 			Position = new Vector2(6f, 5f),
 			Size = new Vector2(20f, 20f),
-			Color = item.IconColor,
+			ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+			StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
+		SetIcon(icon, item.MaterialId);
 		button.AddChild(icon);
 
 		// Name label to the right of the icon. Tools get a "(tool)" tag and
@@ -1379,11 +1384,12 @@ public partial class InventoryUI : CanvasLayer
 		background.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
 		slot.AddChild(background);
 
-		_slotIcons[slotIndex] = new ColorRect
+		_slotIcons[slotIndex] = new TextureRect
 		{
 			Name = "Icon",
 			LayoutMode = 3, // Position
-			Color = Colors.Transparent,
+			ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+			StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_slotIcons[slotIndex].SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -1433,12 +1439,14 @@ public partial class InventoryUI : CanvasLayer
 		var stack = _inventory.Slots[i];
 		if (stack.IsEmpty)
 		{
-			_slotIcons[i].Color = Colors.Transparent;
+			_slotIcons[i].Texture = null;
 			_slotCounts[i].Text = "";
 			return;
 		}
 
-		_slotIcons[i].Color = LookUpColor(stack.MaterialId);
+		// Use the terrain's own texture as the icon when one is configured;
+		// fall back to the material's albedo color otherwise.
+		SetIcon(_slotIcons[i], stack.MaterialId);
 		// Show the count only for partial stacks (full stacks match Minecraft's look).
 		_slotCounts[i].Text = stack.Count.ToString();
 	}
@@ -1480,6 +1488,41 @@ public partial class InventoryUI : CanvasLayer
 			}
 		}
 		return new Color(0.5f, 0.5f, 0.5f);
+	}
+
+	/// <summary>
+	/// Sets the icon on a <see cref="TextureRect"/> for the given material id:
+	/// the terrain's own texture when one is configured (so the icon always
+	/// matches what shows up on the terrain), or a flat color swatch otherwise.
+	/// This is the single place that decides how an item is drawn as an icon.
+	/// </summary>
+	private void SetIcon(TextureRect icon, int materialId)
+	{
+		if (icon == null)
+		{
+			return;
+		}
+
+		// Terrain materials with a configured texture use the same texture on
+		// the terrain AND as the item icon.
+		if (_world != null && _world.Palette != null
+			&& !FactorySim.Voxel.VoxelMaterialIds.IsToolId(materialId)
+			&& !FactorySim.Voxel.VoxelMaterialIds.IsMachineId(materialId))
+		{
+			var tex = _world.Palette.GetTexture(materialId);
+			if (tex != null)
+			{
+				icon.Texture = tex;
+				return;
+			}
+		}
+
+		// No texture (or a tool/machine): draw a flat color swatch. Build a
+		// 1×1 ImageTexture of the icon color so the TextureRect has something
+		// to draw (a null texture would leave the slot blank).
+		var img = Image.CreateEmpty(1, 1, false, Image.Format.Rgba8);
+		img.Fill(LookUpColor(materialId));
+		icon.Texture = ImageTexture.CreateFromImage(img);
 	}
 
 	/// <summary>
@@ -1526,7 +1569,7 @@ public partial class InventoryUI : CanvasLayer
 			return;
 		}
 
-		_cursorIcon.Color = LookUpColor(_cursorStack.MaterialId);
+		SetIcon(_cursorIcon, _cursorStack.MaterialId);
 		_cursorCount.Text = _cursorStack.Count.ToString();
 	}
 
@@ -1552,12 +1595,12 @@ public partial class InventoryUI : CanvasLayer
 			var stack = _inventory.Slots[i];
 			if (stack.IsEmpty)
 			{
-				_hotbarIcons[i].Color = Colors.Transparent;
+				_hotbarIcons[i].Texture = null;
 				_hotbarCounts[i].Text = "";
 			}
 			else
 			{
-				_hotbarIcons[i].Color = LookUpColor(stack.MaterialId);
+				SetIcon(_hotbarIcons[i], stack.MaterialId);
 				_hotbarCounts[i].Text = stack.Count.ToString();
 			}
 		}
@@ -1735,14 +1778,16 @@ public partial class InventoryUI : CanvasLayer
 		button.AddChild(rowBg);
 
 		float iconSize = 30f;
-		var icon = new ColorRect
+		var icon = new TextureRect
 		{
-			Color = LookUpColor(recipe.ProductId),
 			LayoutMode = 3, // Position
 			Position = new Vector2(6f, 5f),
 			Size = new Vector2(iconSize, iconSize),
+			ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+			StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
+		SetIcon(icon, recipe.ProductId);
 		button.AddChild(icon);
 
 		var name = new Label
@@ -2006,13 +2051,15 @@ public partial class InventoryUI : CanvasLayer
 			{
 				bool isMissing = missingIds.Contains(materialId);
 				var line = new HBoxContainer { LayoutMode = 2 };
-				var dot = new ColorRect
+				var dot = new TextureRect
 				{
-					Color = LookUpColor(materialId),
 					CustomMinimumSize = new Vector2(12f, 12f),
 					Size = new Vector2(12f, 12f),
+					ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+					StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 					MouseFilter = Control.MouseFilterEnum.Ignore,
 				};
+				SetIcon(dot, materialId);
 				line.AddChild(dot);
 				var lbl = new Label
 				{
