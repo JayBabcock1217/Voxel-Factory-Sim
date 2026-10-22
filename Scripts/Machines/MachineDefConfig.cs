@@ -21,6 +21,7 @@ namespace FactorySim.Machines;
 /// Like <see cref="VoxelMaterialConfig"/>, it is a Godot <see cref="Resource"/>
 /// so it can be saved as a .tres and edited in the inspector.
 /// </summary>
+[Tool]
 [GlobalClass]
 public partial class MachineDefConfig : Resource
 {

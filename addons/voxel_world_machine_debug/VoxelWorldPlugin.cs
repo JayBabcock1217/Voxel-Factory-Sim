@@ -149,22 +149,24 @@ public partial class VoxelWorldDebugControl : Control
 		// the editor's root tree does NOT contain the edited scene's nodes, so
 		// searching Root would fail.
 		//
-		// IMPORTANT: in the editor, a non-[Tool] C# script node is a PLACEHOLDER
-		// of its base type (Node3D), so `_worldNode as VoxelWorld` is null even
-		// though the node IS a VoxelWorld. We therefore read the MachineConfig
-		// via the dynamic Get() (which works on any Node), not a typed property.
+		// MachineDefConfig / MachineDefinition are [Tool] resources, so their C#
+		// types ARE available in the editor and the MachineConfig property can be
+		// cast to the typed resource. We still read it via the dynamic Get()
+		// (because the VoxelWorld node itself is a base-type placeholder in the
+		// editor, so a typed property access won't compile through it).
 		FactorySim.Machines.MachineDefConfig config = null;
 		Node targetNode = null;
 
 		if (_worldNode != null && _worldNode.HasMethod("RebuildAllMachineCollisions"))
 		{
 			// The inspected node is a VoxelWorld (by the method heuristic). Read
-			// its MachineConfig dynamically (Get() returns a Variant; cast it).
+			// its MachineConfig dynamically (Get() returns a Variant; the
+			// resource is a [Tool] type, so the Obj is castable).
 			targetNode = _worldNode;
 			var cfgVariant = _worldNode.Get("MachineConfig");
 			if (cfgVariant.VariantType == Variant.Type.Object)
 			{
-				config = (FactorySim.Machines.MachineDefConfig)cfgVariant.Obj;
+				config = cfgVariant.Obj as FactorySim.Machines.MachineDefConfig;
 			}
 		}
 

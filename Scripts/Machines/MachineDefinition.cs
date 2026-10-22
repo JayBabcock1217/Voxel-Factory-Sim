@@ -27,6 +27,7 @@ namespace FactorySim.Machines;
 /// can edit every field — including assigning the imported mesh — in the
 /// inspector and save it as a .tres, exactly like <see cref="VoxelMaterialDef"/>.
 /// </summary>
+[Tool]
 [GlobalClass]
 public partial class MachineDefinition : Resource
 {
