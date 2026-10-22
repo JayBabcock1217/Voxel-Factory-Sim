@@ -20,11 +20,10 @@ namespace FactorySim.Editor;
 /// buttons are effectively no-ops.
 ///
 /// Setup:
-///   1. This file is paired with <c>VoxelWorldPlugin.tscn</c> (an
-///      <c>EditorPlugin</c> node with this script).
-///   2. The plugin is enabled in <c>project.godot</c> under
-///      <c>[editor_plugins]</c>.
-///   3. Select any <see cref="FactorySim.Voxel.VoxelWorld"/> node — the
+///   1. The plugin is enabled in <c>project.godot</c> under
+///      <c>[editor_plugins]</c> by referencing this <c>.cs</c> file directly
+///      (Godot instantiates the <c>EditorPlugin</c> class from the script).
+///   2. Select any <see cref="FactorySim.Voxel.VoxelWorld"/> node — the
 ///      "Machine Debug" buttons appear at the bottom of its inspector.
 /// </summary>
 [Tool]
