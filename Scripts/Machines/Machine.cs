@@ -37,6 +37,7 @@ namespace FactorySim.Machines;
 /// StaticBody3D is the right choice for a static structure: the player's
 /// CharacterBody3D MoveAndSlide() is blocked by it, and it never needs to move.
 /// </summary>
+[Tool]
 public partial class Machine : StaticBody3D
 {
 	/// <summary>The definition this machine was built from (its type, mesh, and stats).</summary>

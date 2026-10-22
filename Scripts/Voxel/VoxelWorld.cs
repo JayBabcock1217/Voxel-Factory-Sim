@@ -583,31 +583,72 @@ public partial class VoxelWorld : Node3D
 
 	/// <summary>
 	/// Rebuilds the auto-generated box collision on every machine currently in
-	/// the scene. Called by the editor's "Rebuild Machine Collisions" button
-	/// (via the <see cref="FactorySim.Editor.VoxelWorldPlugin"/>). Use this
-	/// after re-importing or re-scaling a Blender mesh so the collider matches
-	/// the new visuals. Machines that are not yet in the tree (e.g. spawned
-	/// but not yet _Ready) are skipped.
+	/// the scene tree. Called by the editor's "Rebuild Machine Collisions"
+	/// button (via the <see cref="FactorySim.Editor.VoxelWorldPlugin"/>) and by
+	/// the config panel's "Rebuild All Collisions" button.
+	///
+	/// Works in both the editor and play mode:
+	///   - **Play mode**: finds the "Machines" container (where spawned machines
+	///     live) and rebuilds each non-preview machine's collision.
+	///   - **Editor**: searches the entire scene tree for any <see cref="FactorySim.Machines.Machine"/>
+	///     nodes (e.g. machines placed in a test scene) and rebuilds those.
+	///     If no machine nodes are found, logs a hint that machines are
+	///     spawned at runtime.
+	///
+	/// Use this after re-importing or re-scaling a Blender mesh so the collider
+	/// matches the new visuals.
 	/// </summary>
 	public void RebuildAllMachineCollisions()
 	{
-		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
-		if (machinesRoot == null)
+		var tree = GetTree();
+		if (tree == null)
 		{
-			GD.Print("[VoxelWorld] No machines container found — nothing to rebuild.");
+			GD.PushWarning("[VoxelWorld] Not in a scene tree — cannot rebuild collisions.");
 			return;
 		}
 
 		int rebuilt = 0;
-		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+
+		// Primary path: the "Machines" container (where spawned machines live
+		// at runtime).
+		var machinesRoot = tree.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot != null)
 		{
-			if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
+			for (int i = 0; i < machinesRoot.GetChildCount(); i++)
 			{
-				m.RebuildCollision();
-				rebuilt++;
+				if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
+				{
+					m.RebuildCollision();
+					rebuilt++;
+				}
 			}
 		}
-		GD.Print($"[VoxelWorld] Rebuilt collision on {rebuilt} machine(s).");
+
+		// Secondary path (editor): search the whole tree for any Machine nodes
+		// that aren't already in the "Machines" container (e.g. machines placed
+		// directly in a test scene).
+		if (rebuilt == 0)
+		{
+			foreach (var node in tree.Root.FindChildren("*", "Machine", true, false))
+			{
+				if (node is FactorySim.Machines.Machine m && !m.IsPreview)
+				{
+					m.RebuildCollision();
+					rebuilt++;
+				}
+			}
+			if (rebuilt == 0)
+			{
+				GD.Print("[VoxelWorld] No machine nodes found in the scene tree. " +
+					"Machines are spawned at runtime; to test collision in the editor, " +
+					"place a Machine node in a test scene and select it, or run the game.");
+			}
+		}
+
+		if (rebuilt > 0)
+		{
+			GD.Print($"[VoxelWorld] Rebuilt collision on {rebuilt} machine(s).");
+		}
 	}
 
 	/// <summary>

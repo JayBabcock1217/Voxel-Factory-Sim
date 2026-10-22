@@ -121,39 +121,80 @@ public partial class VoxelWorldDebugControl : Control
 
 	private void OnRebuildPressed()
 	{
-		var world = FindVoxelWorld();
-		if (world == null)
+		// Works in both the editor and play mode: searches the scene tree
+		// for Machine nodes and rebuilds their collision shapes. In the
+		// editor, this finds machines placed directly in a test scene.
+		// In play mode, it finds machines in the "Machines" container.
+		var sceneTree = Engine.GetMainLoop() as SceneTree;
+		if (sceneTree == null)
 		{
-			GD.PushWarning("[VoxelWorldPlugin] No VoxelWorld found in the scene tree.");
+			GD.PushWarning("[VoxelWorldPlugin] No scene tree found.");
 			return;
 		}
-		world.RebuildAllMachineCollisions();
-		GD.Print("[VoxelWorldPlugin] Machine collisions rebuilt.");
+
+		int rebuilt = 0;
+
+		// Primary: the "Machines" container (runtime-spawned machines).
+		var machinesRoot = sceneTree.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot != null)
+		{
+			for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+			{
+				if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
+				{
+					m.RebuildCollision();
+					rebuilt++;
+				}
+			}
+		}
+
+		// Secondary: any Machine nodes elsewhere in the tree (editor test scenes).
+		if (rebuilt == 0)
+		{
+			foreach (var node in sceneTree.Root.FindChildren("*", "Machine", true, false))
+			{
+				if (node is FactorySim.Machines.Machine m && !m.IsPreview)
+				{
+					m.RebuildCollision();
+					rebuilt++;
+				}
+			}
+		}
+
+		if (rebuilt > 0)
+		{
+			GD.Print($"[VoxelWorldPlugin] Rebuilt collision on {rebuilt} machine(s).");
+		}
+		else
+		{
+			GD.Print("[VoxelWorldPlugin] No machine nodes found. " +
+				"Machines are spawned at runtime; to test collision in the editor, " +
+				"place a Machine node in a test scene, or run the game.");
+		}
 	}
 
 	private void OnConfigPressed()
 	{
-		var world = FindVoxelWorld();
-		if (world == null)
+		// The config panel is an in-game CanvasLayer. It can only be opened
+		// when the game is running (play mode). In the editor, show a hint.
+		if (!Engine.IsEditorHint())
 		{
-			GD.PushWarning("[VoxelWorldPlugin] No VoxelWorld found in the scene tree.");
+			var sceneTree = Engine.GetMainLoop() as SceneTree;
+			if (sceneTree == null)
+			{
+				return;
+			}
+			var world = sceneTree.Root.FindChild("VoxelWorld", true, false) as FactorySim.Voxel.VoxelWorld;
+			if (world == null)
+			{
+				GD.PushWarning("[VoxelWorldPlugin] No VoxelWorld found in the scene tree.");
+				return;
+			}
+			world.OpenMachineConfigPanel();
 			return;
 		}
-		world.OpenMachineConfigPanel();
-	}
 
-	/// <summary>
-	/// Finds the <see cref="FactorySim.Voxel.VoxelWorld"/> in the running
-	/// scene tree by name.
-	/// </summary>
-	private static FactorySim.Voxel.VoxelWorld FindVoxelWorld()
-	{
-		var sceneTree = Engine.GetMainLoop() as SceneTree;
-		if (sceneTree == null)
-		{
-			return null;
-		}
-		var found = sceneTree.Root.FindChild("VoxelWorld", true, false);
-		return found as FactorySim.Voxel.VoxelWorld;
+		GD.Print("[VoxelWorldPlugin] The machine config panel opens in play mode. " +
+			"Run the game and press C, or edit the MachineDefConfig .tres directly in the editor.");
 	}
 }
