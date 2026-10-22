@@ -3,12 +3,13 @@
 [ext_resource type="PackedScene" uid="uid://canuo546wkmue" path="res://Scenes/Player.tscn" id="1_player"]
 [ext_resource type="Script" uid="uid://daj7bhoiisoas" path="res://Scripts/Voxel/VoxelWorld.cs" id="2_voxelworld"]
 [ext_resource type="Resource" uid="uid://ceagxkmog2hqm" path="res://Resources/BiomeConfig.tres" id="3_biomeconfig"]
+[ext_resource type="Resource" uid="uid://bvpsa7aw0qu3k" path="res://Machines/Configs/Machines.tres" id="3_bmxlf"]
 [ext_resource type="Script" uid="uid://bf5pg3ribm0gm" path="res://Scripts/Items/Inventory.cs" id="4_inventory"]
 [ext_resource type="Script" uid="uid://kue2smumh6k5" path="res://Scripts/UI/InventoryUI.cs" id="5_inventoryui"]
 [ext_resource type="Script" uid="uid://b6yvt3qixbivc" path="res://Scripts/UI/FpsCounter.cs" id="6_fpscounter"]
-[ext_resource type="Script" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
 [ext_resource type="Script" uid="uid://dthtm23wmaj37" path="res://Scripts/UI/PauseMenu.cs" id="7_pausemenu"]
-[ext_resource type="Script" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
+[ext_resource type="Script" uid="uid://bbv1r43h3vyi3" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
+[ext_resource type="Script" uid="uid://deaijk5gbbwkh" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
 
 [sub_resource type="ProceduralSkyMaterial" id="SkyMaterial_world"]
 sky_top_color = Color(0.25, 0.45, 0.75, 1)
@@ -56,6 +57,7 @@ EnableRocks = false
 MeshMode = 1
 LodRenderDistanceChunks = 128
 LodDistanceBase = 1.5
+MachineConfig = ExtResource("3_bmxlf")
 
 [node name="Player" type="Node3D" parent="." unique_id=481445753]
 
@@ -78,12 +80,12 @@ script = ExtResource("5_inventoryui")
 [node name="FpsCounter" type="Node" parent="." unique_id=1562140855]
 script = ExtResource("6_fpscounter")
 
-[node name="TargetInfoUI" type="Node" parent="."]
+[node name="TargetInfoUI" type="Node" parent="." unique_id=943405515]
 script = ExtResource("9_targetinfo")
 
 [node name="PauseMenu" type="CanvasLayer" parent="." unique_id=-2147483648]
 layer = 50
 script = ExtResource("7_pausemenu")
 
-[node name="WorldSave" type="Node" parent="."]
+[node name="WorldSave" type="Node" parent="." unique_id=1310270954]
 script = ExtResource("8_worldsave")

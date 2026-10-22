@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://ds32bat8tkrjs"]
+
+[ext_resource type="PackedScene" uid="uid://bvddk8s8fq16v" path="res://Blender/Factory.blend" id="1_ihl8n"]
+[ext_resource type="Script" uid="uid://cf5kkq6h6vxmo" path="res://Scripts/Machines/MachineDefinition.cs" id="1_no5oj"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ihl8n"]
+
+[resource]
+script = ExtResource("1_no5oj")
+Type = 204
+Name = "Conveyor"
+MeshScene = ExtResource("1_ihl8n")
+CollisionShape = SubResource("BoxShape3D_ihl8n")
+metadata/_custom_type_script = "uid://cf5kkq6h6vxmo"

@@ -26,6 +26,12 @@ window/stretch/aspect="expand"
 
 project/assembly_name="Factory Sim"
 
+[file_customization]
+
+folder_colors={
+"res://Blender/": "orange"
+}
+
 [gui]
 
 common/auto_focus_strategy=1
