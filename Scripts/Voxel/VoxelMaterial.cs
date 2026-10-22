@@ -40,6 +40,30 @@ public static class VoxelMaterialIds
 	public const int Coal = 20;
 	public const int StoneBrick = 21;
 	public const int MachineFrame = 22;
+
+	// ------------------------------------------------------------------
+	// Tool items (not placeable voxels; they live in the inventory and are
+	// selected from the hotbar to break blocks). These ids are NOT solid
+	// materials — the world never stamps them, and the mesh/palette builders
+	// never see them. They exist so a tool is a first-class inventory item
+	// (see ItemStack.ToolType / ItemRegistry).
+	// ------------------------------------------------------------------
+	public const int ToolShovel = 100;
+	public const int ToolPickaxe = 101;
+	public const int ToolAxe = 102;
+	public const int ToolSword = 103;
+
+	/// <summary>First id in the tool block (tools are a contiguous range).</summary>
+	public const int ToolFirst = ToolShovel;
+
+	/// <summary>Last id in the tool block (inclusive).</summary>
+	public const int ToolLast = ToolSword;
+
+	/// <summary>True when <paramref name="id"/> is a tool item id (not a placeable material).</summary>
+	public static bool IsToolId(int id) => id >= ToolFirst && id <= ToolLast;
+
+	/// <summary>True when <paramref name="id"/> is a placeable material (a solid voxel you can hold and place).</summary>
+	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id);
 }
 
 /// <summary>

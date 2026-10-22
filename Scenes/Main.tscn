@@ -6,6 +6,7 @@
 [ext_resource type="Script" uid="uid://bf5pg3ribm0gm" path="res://Scripts/Items/Inventory.cs" id="4_inventory"]
 [ext_resource type="Script" uid="uid://kue2smumh6k5" path="res://Scripts/UI/InventoryUI.cs" id="5_inventoryui"]
 [ext_resource type="Script" uid="uid://b6yvt3qixbivc" path="res://Scripts/UI/FpsCounter.cs" id="6_fpscounter"]
+[ext_resource type="Script" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
 [ext_resource type="Script" uid="uid://dthtm23wmaj37" path="res://Scripts/UI/PauseMenu.cs" id="7_pausemenu"]
 [ext_resource type="Script" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
 
@@ -76,6 +77,9 @@ script = ExtResource("5_inventoryui")
 
 [node name="FpsCounter" type="Node" parent="." unique_id=1562140855]
 script = ExtResource("6_fpscounter")
+
+[node name="TargetInfoUI" type="Node" parent="."]
+script = ExtResource("9_targetinfo")
 
 [node name="PauseMenu" type="CanvasLayer" parent="." unique_id=-2147483648]
 layer = 50

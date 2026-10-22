@@ -283,13 +283,36 @@ public partial class Inventory : Node
 		{
 			if (i < n && materialIds[i] != 0 && counts[i] > 0)
 			{
-				Slots[i] = ItemStack.From(materialIds[i], counts[i]);
+				var stack = ItemStack.From(materialIds[i], counts[i]);
+				// Reconstruct a tool's ToolType from its material id: tool ids
+				// (see VoxelMaterialIds.ToolFirst..ToolLast) are the ToolType
+				// enum values themselves, and SaveState only persisted the id +
+				// count (not the ToolType), so we recover it here. Without this,
+				// a saved tool would load as a plain, unrecognizable material.
+				if (FactorySim.Voxel.VoxelMaterialIds.IsToolId(materialIds[i])
+					&& Enum.TryParse<ToolType>(materialIds[i].ToString(), out var tool))
+				{
+					stack.ToolType = tool;
+					stack.Count = 1; // tools are single items, never stacked
+				}
+				Slots[i] = stack;
 			}
 			else
 			{
 				Slots[i] = ItemStack.From(0);
 			}
 		}
+		RaiseChanged();
+	}
+
+	/// <summary>
+	/// Fires <see cref="InventoryChanged"/> so the UI refreshes. Exposed so
+	/// external systems that mutate a slot directly (e.g. the tool's place
+	/// ability consuming one item, or the dev panel granting an item) can
+	/// notify the UI without duplicating the slot-mutation logic.
+	/// </summary>
+	public void RaiseChangedPublic()
+	{
 		RaiseChanged();
 	}
 

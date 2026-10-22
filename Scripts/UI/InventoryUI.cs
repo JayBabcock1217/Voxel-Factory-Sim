@@ -88,12 +88,41 @@ public partial class InventoryUI : CanvasLayer
 	private Label _recipeTipDesc;
 	private VBoxContainer _recipeTipIngredients;
 
+	// Dev pane (left side of the inventory panel): a scrollable list of EVERY
+	// item in the game (all placeable materials + all tools). Clicking an entry
+	// grants one of that item into the inventory (a full material stack, or a
+	// single tool). It is the debug/god-mode way to give yourself any item so
+	// you can test placement, breaking, and tool affinities without crafting.
+	private Panel _devPanel;
+	private VBoxContainer _devList;
+	private readonly List<FactorySim.Items.ItemEntry> _devItems = new();
+	// Dev-pane hover tooltip: shows the item's name + description when a dev
+	// row is hovered (mirrors the recipe tooltip). The row->button map is used
+	// to hit-test which row the mouse is over.
+	private Panel _devTooltip;
+	private VBoxContainer _devTipContent;
+	private Label _devTipName;
+	private Label _devTipDesc;
+	private readonly Dictionary<FactorySim.Items.ItemEntry, Control> _devHoverRects = new();
+	// The item the dev tooltip is currently showing (null when hidden), so the
+	// content is only re-filled when the hovered item actually changes.
+	private FactorySim.Items.ItemEntry? _devTipItem;
+
 	// Persistent hotbar (always visible at the bottom of the screen).
 	private Panel _hotbar;
 	private readonly Control[] _hotbarSlots = new Control[Inventory.HotbarSize];
 	private readonly ColorRect[] _hotbarIcons = new ColorRect[Inventory.HotbarSize];
+	// A small tooltip label just above the hotbar naming the item in the
+	// currently selected slot (the player's "held" item). Updated whenever the
+	// selection or that slot's contents change.
+	private Label _hotbarTooltip;
 	private readonly Label[] _hotbarCounts = new Label[Inventory.HotbarSize];
-	private ReferenceRect _hotbarHighlight;
+	// Per-slot selection highlight: the ColorRect behind each slot's icon. The
+	// selected slot's background is tinted greenish; the rest use the dark base.
+	private readonly ColorRect[] _hotbarSlotBg = new ColorRect[Inventory.HotbarSize];
+	// The two background colors used for the selection tint (unselected vs. selected).
+	private static readonly Color HotbarBgUnselected = new Color(0.1f, 0.1f, 0.12f, 0.7f);
+	private static readonly Color HotbarBgSelected = new Color(0.22f, 0.55f, 0.28f, 0.85f);
 	private int _selectedHotbarSlot;
 
 	private int _dragSlot = -1;
@@ -130,6 +159,7 @@ public partial class InventoryUI : CanvasLayer
 		BuildUi();
 		RefreshHotbar();
 		BuildCrafting();
+		BuildDevPanel();
 		RefreshCrafting();
 	}
 
@@ -152,6 +182,7 @@ public partial class InventoryUI : CanvasLayer
 
 		UpdateTooltip();
 		UpdateRecipeTooltip();
+		UpdateDevTooltip();
 		ProcessCraftQueue(delta);
 	}
 
@@ -224,6 +255,55 @@ public partial class InventoryUI : CanvasLayer
 	private bool IsOpen()
 		=> _inventory != null && _inventory.IsOpen;
 
+	/// <summary>
+	/// The index (0..HotbarSize-1) of the currently selected hotbar slot. This
+	/// is the slot whose item is "active" in the player's hand — the tool
+	/// system reads it to decide which tool breaks blocks, and the place
+	/// ability reads it to decide which material to place.
+	/// </summary>
+	public int SelectedHotbarSlot => _selectedHotbarSlot;
+
+	/// <summary>
+	/// The item currently in the selected hotbar slot (empty when that slot is
+	/// empty or the UI isn't wired to an inventory yet). This is the player's
+	/// "held" item: a tool (shovel/pickaxe/...) or a placeable material.
+	/// </summary>
+	public ItemStack SelectedHotbarItem
+	{
+		get
+		{
+			if (_inventory == null)
+			{
+				return ItemStack.From(0);
+			}
+			int slot = Mathf.Clamp(_selectedHotbarSlot, 0, Inventory.HotbarSize - 1);
+			return _inventory.Slots[slot];
+		}
+	}
+
+	/// <summary>
+	/// Cycles the selected hotbar slot by <paramref name="delta"/> (wraps).
+	/// Exposed so the 3D-world input path (the VoxelTool, which is the node
+	/// actually receiving wheel / number-key events while the mouse is captured
+	/// and the inventory is closed) can drive the selection. No-op while the
+	/// inventory is open (the UI owns the selection then).
+	/// </summary>
+	public void CycleHotbarFromWorld(int delta)
+	{
+		CycleHotbar(delta);
+	}
+
+	/// <summary>
+	/// Sets the selected hotbar slot directly (0..HotbarSize-1). Exposed for the
+	/// 3D-world number-key path, same rationale as
+	/// <see cref="CycleHotbarFromWorld"/>. No-op while the inventory is open or
+	/// the index is out of range.
+	/// </summary>
+	public void SelectHotbarSlotFromWorld(int index)
+	{
+		SelectHotbarSlot(index);
+	}
+
 	public override void _UnhandledKeyInput(InputEvent @event)
 	{
 		if (!(@event is InputEventKey key && key.Pressed && !key.Echo))
@@ -238,43 +318,13 @@ public partial class InventoryUI : CanvasLayer
 			return;
 		}
 
-		// Number keys 1-9,0 select hotbar slots (disabled while inventory is open).
-		if (!IsOpen())
-		{
-			int slot = -1;
-			if (key.Keycode >= Key.Key1 && key.Keycode <= Key.Key9)
-			{
-				slot = (int)key.Keycode - (int)Key.Key1; // 0-8
-			}
-			else if (key.Keycode == Key.Key0)
-			{
-				slot = 9;
-			}
-			else if (key.PhysicalKeycode >= Key.Key1 && key.PhysicalKeycode <= Key.Key9)
-			{
-				slot = (int)key.PhysicalKeycode - (int)Key.Key1;
-			}
-			else if (key.PhysicalKeycode == Key.Key0)
-			{
-				slot = 9;
-			}
-
-			if (slot >= 0)
-			{
-				SelectHotbarSlot(slot);
-			}
-		}
-	}
-
-	/// <summary>Mouse wheel cycles the hotbar selection (disabled while inventory is open).</summary>
-	public override void _UnhandledInput(InputEvent @event)
-	{
-		if (@event is InputEventMouseButton wheel
-			&& wheel.Pressed
-			&& (wheel.ButtonIndex == MouseButton.WheelUp || wheel.ButtonIndex == MouseButton.WheelDown))
-		{
-			CycleHotbar(wheel.ButtonIndex == MouseButton.WheelUp ? 1 : -1);
-		}
+		// Note: hotbar selection (number keys 1-9,0 and the mouse wheel) is
+		// owned entirely by the VoxelTool's 3D-world input path — it is a player
+		// action taken while the inventory is CLOSED (mouse captured). It is
+		// deliberately NOT handled here: while the inventory is open the player
+		// rearranges items by clicking, and there is no hotbar selection to
+		// change. (See VoxelTool._Input, which drives
+		// CycleHotbarFromWorld / SelectHotbarSlotFromWorld.)
 	}
 
 	/// <summary>Opens/closes the inventory: toggles the model, the panel, and the mouse.</summary>
@@ -308,6 +358,13 @@ public partial class InventoryUI : CanvasLayer
 		if (_hotbar != null)
 		{
 			_hotbar.Visible = !open;
+		}
+		// The held-item name label sits just above the hotbar, so it hides with
+		// it while the inventory panel is open (the panel's bottom row serves as
+		// the hotbar then, and there is no standalone hotbar to label).
+		if (_hotbarTooltip != null)
+		{
+			_hotbarTooltip.Visible = !open;
 		}
 		if (_root != null)
 		{
@@ -350,14 +407,18 @@ public partial class InventoryUI : CanvasLayer
 		_root.GuiInput += OnRootGuiInput;
 
 		const int storageCols = 9;
-		// Panel width is driven by the widest row (the 10-slot hotbar).
+		// Panel width is driven by the widest row (the 10-slot hotbar) PLUS the
+		// dev pane on the left. Layout: [pad | dev pane | gap | slot grid | pad].
 		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
 		float gridH = 3 * SlotSize + 2 * SlotGap;
-		float panelW = gridW + 24f;
+		const float devW = 240f;
+		const float devGap = 16f;
+		const float pad = 12f;
+		float panelW = pad + devW + devGap + gridW + pad;
 		float panelH = gridH + 56f;
 		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
 		Vector2 panelPos = new Vector2(
-			(viewportSize.X - panelW) / 2f,
+			Math.Max(0f, (viewportSize.X - panelW) / 2f),
 			(viewportSize.Y - panelH) / 2f);
 
 		_panel = new Panel
@@ -393,8 +454,8 @@ public partial class InventoryUI : CanvasLayer
 			Name = "Title",
 			LayoutMode = 3, // Position
 			Text = "Inventory  (TAB to close)",
-			Position = new Vector2(12f, 8f),
-			Size = new Vector2(panelW - 24f, 20f),
+			Position = new Vector2(pad, 8f),
+			Size = new Vector2(panelW - pad * 2f, 20f),
 			HorizontalAlignment = HorizontalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
@@ -402,15 +463,17 @@ public partial class InventoryUI : CanvasLayer
 		_panel.AddChild(title);
 
 		// Slot grid: rows 0-1 = storage (9 cols each, slots 10-27),
-		// row 2 = hotbar (10 cols, slots 0-9).
-		// Storage rows are centered within the 10-column-wide panel.
+		// row 2 = hotbar (10 cols, slots 0-9). The grid is shifted right of the
+		// dev pane: it starts at x = pad + devW + devGap. Storage rows are
+		// centered within the grid's own width.
+		float gridX = pad + devW + devGap;
 		float gridY = 36f;
 		float storageRowW = storageCols * SlotSize + (storageCols - 1) * SlotGap;
 		float storageOffsetX = (gridW - storageRowW) / 2f;
 		for (int row = 0; row < 3; row++)
 		{
 			int cols = row < 2 ? storageCols : Inventory.HotbarSize;
-			float rowX = row < 2 ? 12f + storageOffsetX : 12f;
+			float rowX = row < 2 ? gridX + storageOffsetX : gridX;
 			for (int col = 0; col < cols; col++)
 			{
 				int slotIndex = row < 2
@@ -553,13 +616,16 @@ public partial class InventoryUI : CanvasLayer
 				Size = new Vector2(hbSlotSize, hbSlotSize),
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
-			var slotBg = new ColorRect
+			// Per-slot background. Tinted greenish when the slot is selected,
+			// dark base otherwise. Kept in _hotbarSlotBg so RefreshHotbar can
+			// recolor it as the selection moves.
+			_hotbarSlotBg[i] = new ColorRect
 			{
-				Color = new Color(0.1f, 0.1f, 0.12f, 0.7f),
+				Color = HotbarBgUnselected,
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
-			slotBg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-			slot.AddChild(slotBg);
+			_hotbarSlotBg[i].SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+			slot.AddChild(_hotbarSlotBg[i]);
 
 			_hotbarIcons[i] = new ColorRect
 			{
@@ -589,21 +655,37 @@ public partial class InventoryUI : CanvasLayer
 			_hotbar.AddChild(slot);
 		}
 
-		// Selection highlight: a ReferenceRect that moves to the selected slot.
-		_hotbarHighlight = new ReferenceRect
+		// Tooltip label just above the hotbar: names the item in the selected
+		// slot (the player's "held" item). Centered on the hotbar, a short
+		// distance above it. Always visible (independent of the inventory
+		// panel) so the player always knows what they're holding.
+		const float tipH = 20f;
+		const float tipGap = 8f;
+		// Centered directly above the hotbar: same left edge and width as the
+		// hotbar panel itself, with the text centered within it.
+		_hotbarTooltip = new Label
 		{
-			Name = "HotbarHighlight",
+			Name = "HotbarTooltip",
 			LayoutMode = 3, // Position
-			Size = new Vector2(hbSlotSize, hbSlotSize),
-			Position = new Vector2(hbPad, hbPad),
+			Position = new Vector2(hbPos.X, hbPos.Y - tipH - tipGap),
+			Size = new Vector2(hbW, tipH),
+			HorizontalAlignment = HorizontalAlignment.Center,
+			VerticalAlignment = VerticalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
+			Text = "",
 		};
-		_hotbarHighlight.AddThemeColorOverride("border_color", new Color(1f, 1f, 1f, 0.9f));
-		_hotbarHighlight.AddThemeConstantOverride("width", 2);
-		// No fill — just the border.
-		var highlightStyle = new StyleBoxEmpty();
-		_hotbarHighlight.AddThemeStyleboxOverride("panel", highlightStyle);
-		_hotbar.AddChild(_hotbarHighlight);
+		// A subtle dark backing so the name reads against any terrain.
+		var tipStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0f, 0f, 0f, 0.45f),
+			ContentMarginLeft = 8f,
+			ContentMarginRight = 8f,
+		};
+		_hotbarTooltip.AddThemeStyleboxOverride("normal", tipStyle);
+		_hotbarTooltip.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_hotbarTooltip.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
+		_hotbarTooltip.AddThemeConstantOverride("outline_size", 4);
+		_root.AddChild(_hotbarTooltip);
 	}
 
 	// ------------------------------------------------------------------
@@ -624,21 +706,23 @@ public partial class InventoryUI : CanvasLayer
 		const float craftW = 320f;   // wider crafting pane
 		const float gap = 16f;        // gap between the slot grid and the pane
 		const float pad = 12f;        // panel padding (matches BuildUi)
+		const float devW = 240f;      // dev pane width (must match BuildUi)
+		const float devGap = 16f;     // gap between the dev pane and the grid
 
-		// Panel width = left pad + grid + gap + craft pane + right pad.
-		float panelW = pad + gridW + gap + craftW + pad;
+		// Panel width = left pad + dev pane + gap + grid + gap + craft pane + right pad.
+		float panelW = pad + devW + devGap + gridW + gap + craftW + pad;
 		float panelH = Math.Max(gridH, 280f) + 56f;
 
-		// Center the whole panel (inventory + crafting) in the viewport.
+		// Center the whole panel (dev + inventory + crafting) in the viewport.
 		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
 		_panel.Position = new Vector2(
 			Math.Max(0f, (vpSize.X - panelW) / 2f),
 			Math.Max(0f, (vpSize.Y - panelH) / 2f));
 		_panel.Size = new Vector2(panelW, panelH);
 
-		// The slot grid starts at x = pad (set in BuildUi); the craft pane sits
-		// to its right after the gap.
-		float craftX = pad + gridW + gap;
+		// The slot grid starts at x = pad + devW + devGap (set in BuildUi); the
+		// craft pane sits to its right after the gap.
+		float craftX = pad + devW + devGap + gridW + gap;
 
 		_craftPanel = new Panel
 		{
@@ -767,6 +851,403 @@ public partial class InventoryUI : CanvasLayer
 		_queueProgressBg.AddChild(_queueProgressFill);
 
 		BuildRecipeTooltip();
+	}
+
+	/// <summary>
+	/// Builds the dev pane to the LEFT of the slot grid: a title, a short hint,
+	/// and a vertically scrollable list of every item in the game (all placeable
+	/// materials + all tools, from <see cref="FactorySim.Items.ItemRegistry"/>).
+	/// Each row is a button: clicking it grants one of that item into the
+	/// inventory (a full stack of the material, or a single tool). This is the
+	/// god-mode way to hand yourself any item to test placing / breaking / tool
+	/// affinities without having to craft or mine first.
+	/// </summary>
+	private void BuildDevPanel()
+	{
+		const float pad = 12f;
+		const float devW = 240f;
+		float panelH = _panel != null ? _panel.Size.Y : 300f;
+
+		_devPanel = new Panel
+		{
+			Name = "DevPanel",
+			LayoutMode = 3, // Position
+			Position = new Vector2(pad, pad),
+			Size = new Vector2(devW, panelH - pad * 2f),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		var devStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
+			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
+		_panel.AddChild(_devPanel);
+
+		const float innerPad = 8f;
+		float innerW = devW - innerPad * 2f;
+		const float titleH = 20f;
+		const float hintH = 16f;
+		const float listTop = 6f + titleH + 4f + hintH + 4f;
+		float listH = (panelH - pad * 2f) - listTop - innerPad;
+
+		var devTitle = new Label
+		{
+			Name = "DevTitle",
+			LayoutMode = 3, // Position
+			Text = "Dev Items",
+			Position = new Vector2(innerPad, 6f),
+			Size = new Vector2(innerW, titleH),
+			HorizontalAlignment = HorizontalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		devTitle.AddThemeColorOverride("font_color", new Color(0.95f, 0.85f, 0.4f));
+		_devPanel.AddChild(devTitle);
+
+		var devHint = new Label
+		{
+			Name = "DevHint",
+			LayoutMode = 3, // Position
+			Text = "click = give a stack",
+			Position = new Vector2(innerPad, 6f + titleH + 4f),
+			Size = new Vector2(innerW, hintH),
+			HorizontalAlignment = HorizontalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		devHint.AddThemeFontSizeOverride("font_size", 11);
+		devHint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+		_devPanel.AddChild(devHint);
+
+		// Vertically scrollable list of every item. FollowFocus stretches the
+		// single VBox child to the full scroll area (same trick as the recipe
+		// list), so the rows span the pane's width.
+		var devScroll = new ScrollContainer
+		{
+			Name = "DevScroll",
+			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, listTop),
+			Size = new Vector2(innerW, listH),
+			FollowFocus = true,
+			HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
+		};
+		_devPanel.AddChild(devScroll);
+
+		_devList = new VBoxContainer
+		{
+			Name = "DevList",
+			LayoutMode = 2,
+		};
+		_devList.AddThemeConstantOverride("separation", 3);
+		devScroll.AddChild(_devList);
+
+		// Populate the list from the registry: every placeable material (from the
+		// world's material config) + every tool. Future items appear here
+		// automatically as they're added to the config / tool table.
+		_devItems.Clear();
+		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig));
+		foreach (var item in _devItems)
+		{
+			_devList.AddChild(CreateDevRow(item));
+		}
+
+		BuildDevTooltip();
+	}
+
+	/// <summary>
+	/// Builds the dev-pane hover tooltip (name + description), mirroring the
+	/// recipe tooltip: an opaque Panel with a FullRect VBoxContainer content
+	/// child inset by a uniform pad so the left padding always equals the right.
+	/// The panel is sized to fit its content each time the hovered item changes.
+	/// </summary>
+	private void BuildDevTooltip()
+	{
+		_devTooltip = new Panel
+		{
+			Name = "DevTooltip",
+			LayoutMode = 3, // Position
+			Visible = false,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			ZIndex = 220,
+		};
+		var tipStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0f, 0f, 0f, 1f),
+			BorderColor = new Color(0.6f, 0.6f, 0.65f, 1f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_devTooltip.AddThemeStyleboxOverride("panel", tipStyle);
+
+		const float TipPad = 10f;
+		_devTipContent = new VBoxContainer
+		{
+			Name = "DevTipContent",
+			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_devTipContent.AddThemeConstantOverride("separation", 6);
+		_devTipContent.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		_devTipContent.Position = new Vector2(TipPad, TipPad);
+		_devTipContent.Size = new Vector2(-TipPad * 2f, -TipPad * 2f);
+		_devTooltip.AddChild(_devTipContent);
+
+		_devTipName = new Label
+		{
+			Name = "DevTipName",
+			LayoutMode = 2,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_devTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_devTipName.AddThemeFontSizeOverride("font_size", 15);
+		_devTipContent.AddChild(_devTipName);
+
+		_devTipDesc = new Label
+		{
+			Name = "DevTipDesc",
+			LayoutMode = 2,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_devTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+		_devTipContent.AddChild(_devTipDesc);
+
+		_root.AddChild(_devTooltip);
+	}
+
+	/// <summary>
+	/// The dev item whose row is under <paramref name="viewportPos"/>, or null.
+	/// Mirrors <see cref="RecipeAt"/>: walks each row's ancestor chain up to the
+	/// dev panel, accumulating positions, to compute the row's on-screen rect
+	/// (robust to the ScrollContainer / VBoxContainer nesting).
+	/// </summary>
+	private FactorySim.Items.ItemEntry? DevItemAt(Vector2 viewportPos)
+	{
+		if (_devPanel == null || _panel == null)
+		{
+			return null;
+		}
+
+		Vector2 panelOrigin = _panel.Position + _devPanel.Position;
+
+		foreach (var (item, row) in _devHoverRects)
+		{
+			if (row == null || !IsInstanceValid(row))
+			{
+				continue;
+			}
+
+			Vector2 offset = Vector2.Zero;
+			var node = row;
+			while (node != null && node != _devPanel)
+			{
+				offset += node.Position;
+				node = node.GetParent() as Control;
+			}
+
+			Vector2 rowTopLeft = panelOrigin + offset;
+			if (new Rect2(rowTopLeft, row.Size).HasPoint(viewportPos))
+			{
+				return item;
+			}
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Shows the dev-item tooltip when a dev row is hovered and the inventory is
+	/// open; hides it otherwise. Follows the mouse with a small offset, clamped
+	/// to the viewport (mirrors <see cref="UpdateRecipeTooltip"/>).
+	/// </summary>
+	private void UpdateDevTooltip()
+	{
+		if (_devTooltip == null)
+		{
+			return;
+		}
+
+		if (!IsOpen())
+		{
+			_devTooltip.Visible = false;
+			return;
+		}
+
+		var item = DevItemAt(GetViewport().GetMousePosition());
+		if (item == null)
+		{
+			_devTooltip.Visible = false;
+			_devTipItem = null;
+			return;
+		}
+
+		var hovered = item.Value;
+
+		// (Re)fill the content only when the hovered item actually changes.
+		if (_devTipItem != hovered)
+		{
+			_devTipItem = hovered;
+			_devTipName.Text = hovered.Name;
+
+			// Description: tools get a short blurb; materials use their config
+			// description (falling back to a generic line when there is none).
+			string desc = hovered.IsTool
+				? "Hold this in your hotbar to break blocks. Each tool is faster on some materials than others."
+				: MaterialDescription(hovered.MaterialId);
+			if (string.IsNullOrEmpty(desc))
+			{
+				desc = hovered.IsTool ? "A tool item." : "A placeable block.";
+			}
+			_devTipDesc.Text = desc;
+
+			// Size the tooltip to fit its content (uniform TipPad inset).
+			const float tipPad = 10f;
+			Vector2 contentMin = _devTipContent.GetCombinedMinimumSize();
+			_devTooltip.Size = new Vector2(
+				Mathf.Max(contentMin.X, 140f) + tipPad * 2f,
+				contentMin.Y + tipPad * 2f);
+		}
+
+		// Position: to the right of the mouse, clamped on-screen.
+		Vector2 mousePos = GetViewport().GetMousePosition();
+		Vector2 tipPos = mousePos + new Vector2(16f, 16f);
+		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
+		tipPos.X = Mathf.Min(tipPos.X, vpSize.X - _devTooltip.Size.X - 4f);
+		tipPos.Y = Mathf.Min(tipPos.Y, vpSize.Y - _devTooltip.Size.Y - 4f);
+		_devTooltip.Position = tipPos;
+		_devTooltip.Visible = true;
+	}
+
+	/// <summary>The material's description from the world config (empty fallback).</summary>
+	private string MaterialDescription(int materialId)
+	{
+		if (_world != null && _world.MaterialConfig != null)
+		{
+			return _world.MaterialConfig.GetDescription(materialId);
+		}
+		return "";
+	}
+
+	/// <summary>
+	/// Builds one dev-pane row: a small color swatch (the item's icon color),
+	/// the item's name, and (for tools) a tag showing the tool kind. The whole
+	/// row is a <see cref="Button"/> so a click anywhere on it grants the item.
+	/// </summary>
+	private Button CreateDevRow(FactorySim.Items.ItemEntry item)
+	{
+		// Mirror the working recipe-row pattern (see CreateRecipeRow) EXACTLY:
+		//   * LayoutMode = 2 makes the Button a proper child of the VBoxContainer
+		//     (the dev list), so the container actually lays it out. The old
+		//     LayoutMode = 3 (Position) left the button unmanaged — the VBox
+		//     ignored it, it collapsed, and it never received clicks.
+		//   * SizeFlagsHorizontal = ExpandFill makes it span the pane's full
+		//     width (an empty-text button's minimum width is ~0, so without
+		//     Expand it stays smushed to the left).
+		//   * MouseFilter = Stop so the button consumes the click (its Ignore
+		//     children pass through to it).
+		// The content's horizontal extent: icon (x 6..36) + name label (x 44..).
+		const float contentRight = 200f;
+
+		var button = new Button
+		{
+			Name = $"Dev_{item.Name.Replace(' ', '_')}",
+			LayoutMode = 2,
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+			CustomMinimumSize = new Vector2(contentRight, 30f),
+			FocusMode = Control.FocusModeEnum.None,
+			MouseFilter = Control.MouseFilterEnum.Stop,
+		};
+		button.Text = "";
+
+		// Icon swatch (the item's color) on the left.
+		var icon = new ColorRect
+		{
+			Name = "Icon",
+			LayoutMode = 3, // Position
+			Position = new Vector2(6f, 5f),
+			Size = new Vector2(20f, 20f),
+			Color = item.IconColor,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		button.AddChild(icon);
+
+		// Name label to the right of the icon. Tools get a "(tool)" tag so they
+		// are visually distinct from placeable materials.
+		string label = item.IsTool ? $"{item.Name} (tool)" : item.Name;
+		var labelCtl = new Label
+		{
+			Name = "Label",
+			LayoutMode = 3, // Position
+			Position = new Vector2(34f, 6f),
+			Size = new Vector2(contentRight - 40f, 18f),
+			Text = label,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		labelCtl.AddThemeFontSizeOverride("font_size", 13);
+		labelCtl.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		button.AddChild(labelCtl);
+
+		// Clicking grants the item (a full material stack, or a single tool).
+		button.Pressed += () => GrantDevItem(item);
+
+		// Register the row so the dev tooltip can hit-test hover (mirrors the
+		// recipe rows' _recipeHoverRects registration).
+		_devHoverRects[item] = button;
+		return button;
+	}
+
+	/// <summary>
+	/// Grants one of <paramref name="item"/> into the inventory: a full stack of
+	/// the material, or a single tool (placed into the first empty slot so its
+	/// <see cref="FactorySim.Items.ItemStack.ToolType"/> is preserved). Refreshes
+	/// the UI. This is the only entry point the dev pane uses to add items, so
+	/// it is the single place that knows how to hand out each item kind.
+	/// </summary>
+	private void GrantDevItem(FactorySim.Items.ItemEntry item)
+	{
+		if (_inventory == null)
+		{
+			return;
+		}
+
+		if (item.IsTool)
+		{
+			// Tools are single items and must keep their ToolType; place into the
+			// first empty slot (CollectItem would rebuild the stack and drop the
+			// tool type). If there's no room, find a slot to overwrite as a
+			// last resort is NOT done — a full inventory means the player must
+			// make room first.
+			var tool = FactorySim.Items.ItemStack.From(item.MaterialId, 1);
+			tool.ToolType = item.ToolType;
+			for (int i = 0; i < Inventory.TotalSlots; i++)
+			{
+				if (_inventory.Slots[i].IsEmpty)
+				{
+					_inventory.Slots[i] = tool;
+					_inventory.RaiseChangedPublic();
+					return;
+				}
+			}
+			// No empty slot: try to merge with an existing identical tool (rare;
+			// tools don't stack, so this is just a safety net).
+			for (int i = 0; i < Inventory.TotalSlots; i++)
+			{
+				var s = _inventory.Slots[i];
+				if (s.MaterialId == item.MaterialId && s.IsTool)
+				{
+					return; // already holding one; do nothing
+				}
+			}
+			return;
+		}
+
+		// Materials: grant a full stack (the dev pane's "give 1" is really "give
+		// a usable amount"; a single block is hard to work with). Use CollectItem
+		// so it fills existing stacks first, then empty slots.
+		_inventory.CollectItem(FactorySim.Items.ItemStack.From(item.MaterialId, FactorySim.Items.ItemStack.StackLimit));
 	}
 
 	/// <summary>Builds the recipe info tooltip (name + description + ingredient list).</summary>
@@ -961,6 +1442,16 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private Color LookUpColor(int materialId)
 	{
+		// Tools aren't palette materials; give them their own icon color.
+		if (FactorySim.Voxel.VoxelMaterialIds.IsToolId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.ToolType>(materialId.ToString(), out var tool))
+			{
+				return FactorySim.Items.ItemRegistry.ToolColor(tool);
+			}
+			return new Color(0.6f, 0.6f, 0.6f);
+		}
+
 		if (_world != null && _world.Palette != null
 			&& _world.Palette.Materials.Length > 0
 			&& materialId > 0 && materialId - 1 < _world.Palette.Materials.Length)
@@ -975,11 +1466,18 @@ public partial class InventoryUI : CanvasLayer
 	}
 
 	/// <summary>
-	/// The material's display name from the world's material config, or a
-	/// generic fallback for unconfigured ids.
+	/// The material's display name from the world's material config, a tool's
+	/// name for tool ids, or a generic fallback for unconfigured ids.
 	/// </summary>
 	private string LookUpMaterialName(int materialId)
 	{
+		if (FactorySim.Voxel.VoxelMaterialIds.IsToolId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.ToolType>(materialId.ToString(), out var tool))
+			{
+				return FactorySim.Items.ItemRegistry.ToolName(tool);
+			}
+		}
 		if (_world != null && _world.MaterialConfig != null)
 		{
 			var def = _world.MaterialConfig.GetDef(materialId);
@@ -1009,8 +1507,9 @@ public partial class InventoryUI : CanvasLayer
 	}
 
 	/// <summary>
-	/// Updates the persistent hotbar: item icons/counts for slots 0-9 and the
-	/// selection highlight position.
+	/// Updates the persistent hotbar: item icons/counts for slots 0-9, the
+	/// greenish selection tint on the selected slot's background, and the
+	/// held-item name label above the hotbar.
 	/// </summary>
 	private void RefreshHotbar()
 	{
@@ -1039,13 +1538,22 @@ public partial class InventoryUI : CanvasLayer
 			}
 		}
 
-		// Move the selection highlight to the selected slot.
-		if (_hotbarHighlight != null)
+		// Selection indicator: tint the selected slot's background greenish and
+		// reset the others to the dark base color.
+		for (int i = 0; i < Inventory.HotbarSize; i++)
 		{
-			float hbPad = 4f, hbSlotSize = 44f, hbGap = 4f;
-			_hotbarHighlight.Position = new Vector2(
-				hbPad + _selectedHotbarSlot * (hbSlotSize + hbGap),
-				hbPad);
+			if (_hotbarSlotBg[i] != null)
+			{
+				_hotbarSlotBg[i].Color = (i == _selectedHotbarSlot) ? HotbarBgSelected : HotbarBgUnselected;
+			}
+		}
+
+		// Update the tooltip above the hotbar with the name of the held item
+		// (the selected slot's contents). Empty slot => blank tooltip.
+		if (_hotbarTooltip != null)
+		{
+			var held = SelectedHotbarItem;
+			_hotbarTooltip.Text = held.IsEmpty ? "" : LookUpMaterialName(held.MaterialId);
 		}
 	}
 

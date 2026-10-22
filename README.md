@@ -15,11 +15,15 @@ save/load system and a world-slot picker.
 - **Two mesh modes** — classic hidden-face voxel meshing or per-material
   marching-cubes isosurfaces.
 - **First-person player** — WASD + mouse look, jump, sprint.
-- **Voxel edit tool** — add / remove blocks by raycast (instant, no
-  regeneration).
+- **Item-driven tools** — hold a tool (shovel / pickaxe / axe / sword) from the
+  hotbar to break blocks; each tool has a different affinity for different
+  materials (a shovel is fast on sand but slow on stone, a pickaxe the reverse).
+  Hold a placeable material to place it into the world.
+- **Crafting + dev items** — a crafting pane (recipes) and a dev pane (god-mode
+  list of every material + tool) in the inventory screen.
 - **Save / load** — multiple named world slots, each a small binary file
-  (only your edits + player state + inventory are persisted; terrain is
-  regenerated from the seed). Autosaves on quit.
+  (only your edits + player state + inventory — including held tools — are
+  persisted; terrain is regenerated from the seed). Autosaves on quit.
 
 ## Building
 
@@ -45,11 +49,17 @@ To play, open the project in the Godot 4.8 editor (mono build) and press
 | Mouse | Look |
 | Space | Jump |
 | Shift (left) | Sprint |
-| 1 | Add-block tool |
-| 2 | Remove-block tool |
-| Left mouse (while captured) | Edit the targeted voxel |
+| 1–9, 0 / wheel | Select hotbar slot (the held item) |
+| Left mouse (hold) | Mine the target — **when holding a tool** |
+| Left mouse (click) | Place the held material — **when holding a block** |
+| Tab | Open / close the inventory (crafting + dev panes) |
 | F | Regenerate loaded chunks (debug) |
 | Escape | Toggle mouse capture / close menus |
+
+The **held item** is whatever is in the selected hotbar slot. Tools (shovel,
+pickaxe, axe, sword) break blocks at an affinity-scaled rate (see
+`ToolAffinity`); placeable materials place a voxel on click. The dev pane in the
+inventory screen hands you any material or tool for testing.
 
 In the world-slot picker: **New World** (name + seed), **Load**, **Rename**,
 **Delete** per slot; **Back** to return to the main menu.
@@ -63,7 +73,15 @@ Scenes/                    Godot scenes (Main, MainMenu, Player, VoxelDrop, ...)
 Scripts/
   Player.cs                FPS controller
   UI/                      MainMenu, SlotPicker (save/load UI), PauseMenu
-  Items/Inventory.cs       Item inventory
+  Items/                   Item system (FactorySim.Items)
+    Inventory.cs           Item inventory (28 slots, save/load)
+    ItemStack.cs           A stack of items (material + optional tool type)
+    ItemRegistry.cs        Source of truth: all materials + tools
+    ToolType.cs            Shovel / Pickaxe / Axe / Sword
+    ToolAffinity.cs        Central tool-vs-material break-rate table
+    CraftingRecipe.cs      A recipe (ingredients -> product)
+    CraftingDatabase.cs    Recipe registry + "how many can I make"
+  UI/InventoryUI.cs        Inventory screen (slots, crafting pane, dev pane)
   Voxel/                   World + save system (FactorySim.Voxel)
     VoxelWorld.cs          Chunk manager / generation orchestration
     VoxelChunk.cs          Per-chunk data + mesh + collision
@@ -73,7 +91,7 @@ Scripts/
     TerrainGenerator.cs    Deterministic terrain (seed-driven)
     GenConfig.cs           Generation parameters
     VoxelMaterial*.cs      Material system + palette
-    VoxelTool.cs           Add/remove block tool
+    VoxelTool.cs           Item-driven tool (mine with tools, place blocks)
     WorldSave.cs           Slot manager (slot_N.world + index.json, autosave)
     WorldSaveFile.cs       Binary save format (magic + version + FNV-1a checksum)
     SaveSlotIndex.cs       index.json reader/writer

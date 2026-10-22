@@ -2,74 +2,72 @@ using Godot;
 using System;
 using System.Collections.Generic;
 using FactorySim.Items;
+using FactorySim.UI;
 
 namespace FactorySim.Voxel;
 
 /// <summary>
-/// Player voxel editing tool.
+/// Player voxel tool. Replaces the old temporary add/remove/pickaxe tools with
+/// a real item-driven system:
 ///
-/// Controls:
-/// - Key 1: select the ADD tool (fills a sphere of solid voxels)
-/// - Key 2: select the REMOVE tool (carves a sphere of voxels)
-/// - Key 3: select the PICKAXE tool (hold left mouse to damage the targeted
-///   voxel over time; when its health reaches 0 the voxel breaks)
-/// - Left mouse button: apply the selected tool at the highlighted voxel
+/// - The player's "held" item is whatever is in the SELECTED HOTBAR SLOT (the
+///   <see cref="InventoryUI.SelectedHotbarItem"/>). It is either:
+///     * a TOOL (shovel / pickaxe / axe / sword — see <see cref="ToolType"/>),
+///       or
+///     * a PLACEABLE MATERIAL (any solid voxel you can hold).
+///
+/// The held item decides what left mouse does:
+///
+/// - Holding a TOOL: HOLD left mouse (captured) to damage the targeted voxel
+///   over time. The break rate is <c>(ToolPower × affinity / BreakTime) × 100%
+///   per second</c>, where the affinity comes from <see cref="ToolAffinity"/>
+///   based on the tool's type and the target's material category. This is the
+///   classic "right tool for the job": a shovel is fast on sand but slow on
+///   stone, a pickaxe the reverse.
+///
+/// - Holding a PLACEABLE MATERIAL: CLICK left mouse (a single fresh press,
+///   while captured) to PLACE one voxel of it into the empty cell adjacent to
+///   the targeted face, consuming one item from the selected hotbar slot. This
+///   is the default place-ability. It fires only on a fresh press, so it never
+///   conflicts with mining (a material can't mine in the first place).
+///
+/// In short: tools break, materials place — no bare-hand mining, no
+/// place-while-mining ambiguity.
 ///
 /// The target voxel is found by raycasting through the voxel grid from the
-/// camera up to <see cref="MaxRaycastDistance"/> world units.
-///
-/// A small on-screen debug label (bottom-left) shows the active tool, the
-/// targeted voxel + material, and the target's health bar; it is re-shown
-/// (briefly) whenever the tool changes, so it is always visible while testing
-/// a tool switch.
+/// camera up to <see cref="MaxRaycastDistance"/> world units. The targeted voxel
+/// is highlighted with a translucent fill + wireframe (the machinery from the
+/// old tool, kept).
 /// </summary>
 [GlobalClass]
 public partial class VoxelTool : Node3D
 {
-	public enum Tool
-	{
-		Add = 1,
-		Remove = 2,
-		Pickaxe = 3,
-	}
-
 	/// <summary>Path to the camera to raycast from (relative to this node).</summary>
 	[Export] public NodePath CameraPath { get; set; } = new("../Camera3D");
 
 	/// <summary>Path to the <see cref="VoxelWorld"/> to edit (relative to this node).</summary>
 	[Export] public NodePath VoxelWorldPath { get; set; } = new("../../../Enviornment/VoxelWorld");
 
-	/// <summary>Radius of the add-tool sphere, in voxels.</summary>
-	public int AddRadius { get; set; } = 2;
-
-	/// <summary>Radius of the remove-tool sphere, in voxels.</summary>
-	public int RemoveRadius { get; set; } = 2;
-
 	/// <summary>Maximum raycast distance for tool targeting, in world units.</summary>
 	public float MaxRaycastDistance { get; set; } = 10f;
 
-	/// <summary>Highlight color when the add tool is active.</summary>
-	[Export] public Color AddHighlightColor { get; set; } = new(0.3f, 1.0f, 0.45f);
-
-	/// <summary>Highlight color when the remove tool is active.</summary>
-	[Export] public Color RemoveHighlightColor { get; set; } = new(1.0f, 0.35f, 0.2f);
-
-	/// <summary>Highlight color when the pickaxe tool is active.</summary>
-	[Export] public Color PickaxeHighlightColor { get; set; } = new(0.55f, 0.8f, 1.0f);
-
 	/// <summary>
-	/// The pickaxe's tool power (damage multiplier). The damage dealt to a
-	/// voxel is <c>(ToolPower / material BreakTime) * 100% per second</c>, so a
-	/// power of 1.0 breaks a material in exactly its BreakTime seconds.
+	/// Base tool power (damage multiplier). The damage dealt to a voxel is
+	/// <c>(ToolPower × affinity / material BreakTime) × 100% per second</c>, so
+	/// a power of 1.0 with a 1.0 affinity breaks a material in exactly its
+	/// BreakTime seconds. The affinity (from the held tool type) scales this.
 	/// </summary>
 	[Export(PropertyHint.Range, "0.1,32,0.05")] public float ToolPower { get; set; } = 1.0f;
 
-	/// <summary>How long (seconds) the tool-switch debug label stays pinned on screen.</summary>
-	[Export(PropertyHint.Range, "0,30,0.1")] public float DebugShowTime { get; set; } = 3f;
+	/// <summary>Highlight color for the targeted voxel.</summary>
+	[Export] public Color HighlightColor { get; set; } = new(0.6f, 0.9f, 1.0f);
 
-	private Tool _currentTool = Tool.Add;
 	private VoxelWorld _world;
 	private Camera3D _camera;
+	private InventoryUI _ui;
+	private Inventory _inventory;
+	private TargetInfoUI _targetInfo;
+
 	private Node3D _highlight;
 	private StandardMaterial3D _highlightMaterial;
 	private StandardMaterial3D _highlightFillMaterial;
@@ -77,17 +75,13 @@ public partial class VoxelTool : Node3D
 	private BoxMesh _highlightFillMesh;
 	private bool _hasTarget;
 	private Vector3I _targetVoxel;
-
-	// On-screen debug (tool + target + health)
-	private CanvasLayer _debugLayer;
-	private Label _debugLabel;
-	private float _debugTimer;
+	private Vector3 _targetNormal;
 
 	/// <summary>RNG for the small random offset applied to item drop spawns.</summary>
 	private readonly RandomNumberGenerator _dropRng = new();
 
 	/// <summary>
-	/// Pickaxe damage accumulated per targeted voxel, in percentage points.
+	/// Mining damage accumulated per targeted voxel, in percentage points.
 	/// Keyed by world voxel so the damage PERSISTS: it is stored immediately
 	/// each frame, so if the player stops, moves to another voxel, or re-aims
 	/// at the same voxel later, the damage carried so far is retained and the
@@ -96,7 +90,7 @@ public partial class VoxelTool : Node3D
 	/// edits (see VoxelWorld.SetVoxel), so it can't be read back to decide when
 	/// to break.
 	/// </summary>
-	private readonly System.Collections.Generic.Dictionary<Vector3I, float> _pickaxeDamage = new();
+	private readonly System.Collections.Generic.Dictionary<Vector3I, float> _mineDamage = new();
 
 	public override void _Ready()
 	{
@@ -118,6 +112,13 @@ public partial class VoxelTool : Node3D
 			GD.PushWarning($"[VoxelTool] No camera at '{CameraPath}' — tool targeting disabled.");
 		}
 
+		// The inventory UI owns the hotbar selection and the inventory holds the
+		// slots. Both are resolved LAZILY (see ResolveServices) because the
+		// InventoryUI joins its group in its own _Ready, which may run AFTER this
+		// tool's _Ready (the Player precedes the Inventory in the scene tree), so
+		// a lookup here would be too early.
+		ResolveServices();
+
 		// Target highlight: a translucent FILLED box (the classic, instantly
 		// readable Minecraft-style highlight) over the targeted voxel, with a
 		// glowing wireframe of the voxel's own exposed-face edges on top. The
@@ -126,9 +127,9 @@ public partial class VoxelTool : Node3D
 		// against any background.
 		_highlightMaterial = new StandardMaterial3D
 		{
-			AlbedoColor = AddHighlightColor,
+			AlbedoColor = HighlightColor,
 			EmissionEnabled = true,
-			Emission = AddHighlightColor,
+			Emission = HighlightColor,
 			EmissionEnergyMultiplier = 2.5f,
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 		};
@@ -136,12 +137,12 @@ public partial class VoxelTool : Node3D
 		// through, but bright enough to clearly mark the targeted block.
 		_highlightFillMaterial = new StandardMaterial3D
 		{
-			AlbedoColor = new Color(AddHighlightColor, 0.35f),
+			AlbedoColor = new Color(HighlightColor, 0.35f),
 			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 			EmissionEnabled = true,
-			Emission = AddHighlightColor,
+			Emission = HighlightColor,
 			EmissionEnergyMultiplier = 1.2f,
 			CullMode = BaseMaterial3D.CullModeEnum.Disabled, // double-sided so it reads from inside too
 		};
@@ -184,30 +185,10 @@ public partial class VoxelTool : Node3D
 		};
 		_highlight.AddChild(_highlightFill);
 
-		// On-screen debug: a CanvasLayer + Label that follows the camera (so it
-		// renders over the 3D world) and is re-shown on every tool switch.
-		_debugLayer = new CanvasLayer { Name = "ToolDebugLayer", Layer = 10 };
-		AddChild(_debugLayer);
-		_debugLabel = new Label
-		{
-			Name = "ToolDebug",
-			HorizontalAlignment = HorizontalAlignment.Left,
-			VerticalAlignment = VerticalAlignment.Top,
-			Visible = false,
-		};
-		_debugLabel.AddThemeColorOverride("font_color", new Color(1f, 1f, 1f, 0.95f));
-		_debugLabel.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
-		_debugLabel.AddThemeConstantOverride("outline_size", 6);
-		_debugLayer.AddChild(_debugLabel);
-
-		// Broken voxels become item drops (pickaxe breaks and remove-tool
-		// spheres both raise VoxelBroken).
+		// Broken voxels become item drops (mining breaks raise VoxelBroken).
 		_world.VoxelBroken += OnVoxelBroken;
 
 		_dropRng.Randomize();
-
-		SetTool(Tool.Add, announce: false);
-		GD.Print("[VoxelTool] Keys 1/2/3 = add/remove/pickaxe, Hold Left Mouse (pickaxe) = damage, F = regenerate terrain.");
 	}
 
 	public override void _ExitTree()
@@ -222,13 +203,13 @@ public partial class VoxelTool : Node3D
 
 	/// <summary>
 	/// Handles a <c>VoxelBroken</c> event. The event is raised TWICE per broken
-	/// voxel: first by the player edit itself (pickaxe break / remove sphere),
-	/// which QUEUES the drop with the world (see <see cref="_pendingEditStamp"/>);
-	/// then by the world's <c>FlushPendingDrops</c> once the chunk update for the
-	/// edited chunk has finished, which SPAWNS the drop. This two-pass design
-	/// keeps a drop from visibly resting in mid-air: the surface is not re-meshed
-	/// (and its collision not rebuilt) until the chunk update finishes, so the
-	/// drop can only land on solid, visible terrain once that has completed.
+	/// voxel: first by the player edit itself (the mining break), which QUEUES
+	/// the drop with the world (see <see cref="_pendingEditStamp"/>); then by the
+	/// world's <c>FlushPendingDrops</c> once the chunk update for the edited
+	/// chunk has finished, which SPAWNS the drop. This two-pass design keeps a
+	/// drop from visibly resting in mid-air: the surface is not re-meshed (and
+	/// its collision not rebuilt) until the chunk update finishes, so the drop
+	/// can only land on solid, visible terrain once that has completed.
 	/// </summary>
 	private void OnVoxelBroken(Vector3I pos, int materialId)
 	{
@@ -280,9 +261,8 @@ public partial class VoxelTool : Node3D
 
 	/// <summary>
 	/// Actually spawns the drop for a broken voxel: a small random horizontal
-	/// offset keeps simultaneous drops (e.g. a whole sphere) from spawning on top
-	/// of each other; the drops' own merge pass tidies up the rest within a
-	/// second.
+	/// offset keeps simultaneous drops from spawning on top of each other; the
+	/// drops' own merge pass tidies up the rest within a second.
 	/// </summary>
 	private void SpawnDropForBrokenVoxel(Vector3I pos, int materialId)
 	{
@@ -291,6 +271,60 @@ public partial class VoxelTool : Node3D
 		worldPos += new Vector3(_dropRng.RandfRange(-0.2f, 0.2f), 0f, _dropRng.RandfRange(-0.2f, 0.2f));
 		DropSpawner.SpawnDrop(GetTree().Root, worldPos, materialId, 1);
 	}
+
+	/// <summary>
+	/// Resolves the inventory UI and inventory nodes via their groups. Called
+	/// from <c>_Ready</c> and again lazily from <see cref="HeldItem"/> / the
+	/// place path when the cached references are still null (the UI's own
+	/// <c>_Ready</c> may run after this tool's, so the first lookup can be too
+	/// early). Once resolved, the references are stable for the rest of the
+	/// session.
+	/// </summary>
+	private void ResolveServices()
+	{
+		if (GetTree() == null)
+		{
+			return;
+		}
+		if (_ui == null)
+		{
+			_ui = GetTree().GetFirstNodeInGroup("inventory_ui") as InventoryUI;
+		}
+		if (_inventory == null)
+		{
+			_inventory = GetTree().GetFirstNodeInGroup("inventory") as Inventory;
+		}
+		if (_targetInfo == null)
+		{
+			_targetInfo = GetTree().GetFirstNodeInGroup("target_info_ui") as TargetInfoUI;
+		}
+	}
+
+	/// <summary>
+	/// The item currently in the player's selected hotbar slot (empty when the
+	/// UI isn't wired or the slot is empty). Resolves the UI lazily and reads
+	/// fresh each frame so hotbar switches and dev-panel grants take effect
+	/// immediately.
+	/// </summary>
+	private ItemStack HeldItem
+	{
+		get
+		{
+			ResolveServices();
+			if (_ui != null)
+			{
+				return _ui.SelectedHotbarItem;
+			}
+			if (_inventory != null)
+			{
+				return _inventory.Slots[0];
+			}
+			return ItemStack.From(0);
+		}
+	}
+
+	/// <summary>The tool kind the player is holding, or null when the held item is a material (or empty).</summary>
+	private ToolType? HeldTool => HeldItem.IsTool ? HeldItem.ToolType : null;
 
 	public override void _Process(double delta)
 	{
@@ -308,6 +342,7 @@ public partial class VoxelTool : Node3D
 		{
 			_hasTarget = true;
 			_targetVoxel = hitVoxel;
+			_targetNormal = hitNormal;
 
 			// The highlight is a Node3D whose pivot sits at the targeted voxel's
 			// CENTER; its child mesh holds the voxel's own edge geometry in local
@@ -353,86 +388,208 @@ public partial class VoxelTool : Node3D
 		else
 		{
 			_hasTarget = false;
-			// No target: stop damaging. Per-voxel damage stays in _pickaxeDamage
+			// No target: stop damaging. Per-voxel damage stays in _mineDamage
 			// so re-aiming at a partially-mined voxel resumes where it left off.
 			_highlight.Visible = false;
 			_highlightMeshInstance.Visible = false;
 			_highlightFill.Visible = false;
 		}
 
-		// Pickaxe: hold left mouse (captured) to damage the target over time.
-		if (_currentTool == Tool.Pickaxe
-			&& _hasTarget
+		// Push the targeted-voxel info to the top-right HUD readout each frame
+		// (the panel hides itself when there is no target).
+		ResolveServices();
+		_targetInfo?.Update(BuildTargetInfo(from));
+
+		// MINE: hold left mouse (captured) to damage the target over time, but
+		// only when the held item is a TOOL. A tool breaks blocks at an
+		// affinity-scaled rate; a placeable material does NOT mine (it places,
+		// see _Input), so there is no conflict between placing and breaking —
+		// the held item decides which.
+		if (HeldTool is { } && _hasTarget
 			&& Input.MouseMode == Input.MouseModeEnum.Captured
 			&& Input.IsMouseButtonPressed(MouseButton.Left))
 		{
-			ApplyPickaxeDamage(dt);
+			ApplyMiningDamage(dt);
 		}
-
-		UpdateDebugHud(dt);
 	}
 
 	public override void _Input(InputEvent @event)
 	{
-		if (@event is InputEventKey key && key.Pressed && !key.Echo)
+		// Place: a single fresh left-mouse press (while captured, on a target)
+		// places the held material into the empty cell adjacent to the targeted
+		// face. Using JustPressed (not the held state) means holding to mine
+		// never also triggers a place on the same press.
+		if (@event is InputEventMouseButton mouse
+			&& mouse.ButtonIndex == MouseButton.Left
+			&& mouse.Pressed
+			&& Input.MouseMode == Input.MouseModeEnum.Captured
+			&& _hasTarget)
 		{
-			if (key.Keycode == Key.Key1)
-			{
-				SetTool(Tool.Add);
-			}
-			else if (key.Keycode == Key.Key2)
-			{
-				SetTool(Tool.Remove);
-			}
-			else if (key.Keycode == Key.Key3)
-			{
-				SetTool(Tool.Pickaxe);
-			}
+			TryPlaceHeldMaterial();
 		}
-		else if (@event is InputEventMouseButton mouse && mouse.Pressed && mouse.ButtonIndex == MouseButton.Left)
+
+		// Hotbar selection (mouse wheel + number keys 1-9,0). This is a player
+		// action taken while the inventory is CLOSED (mouse captured, in the 3D
+		// world) — it is deliberately handled here, NOT in the inventory UI, so
+		// it is fully separate from the UI. It is ignored while the inventory is
+		// open (the player is rearranging items by clicking then; there is no
+		// hotbar selection to change). Drives the UI's highlight via the
+		// CycleHotbarFromWorld / SelectHotbarSlotFromWorld methods.
+		//
+		// The wheel is read directly off the event (ButtonIndex WheelUp/Down)
+		// rather than IsActionJustPressed, so each scroll tick cycles exactly
+		// once — IsActionJustPressed is frame-based and could fire for more than
+		// one input event in the same frame.
+		if (!InventoryOpen)
 		{
-			// Only act while the mouse is captured (i.e. not clicking the UI).
-			if (Input.MouseMode == Input.MouseModeEnum.Captured && _hasTarget)
+			if (@event is InputEventMouseButton wheel && wheel.Pressed)
 			{
-				ApplyTool();
+				if (wheel.ButtonIndex == MouseButton.WheelUp)
+				{
+					_ui?.CycleHotbarFromWorld(1);
+				}
+				else if (wheel.ButtonIndex == MouseButton.WheelDown)
+				{
+					_ui?.CycleHotbarFromWorld(-1);
+				}
+			}
+			else
+			{
+				int slot = HotbarSlotFromEvent(@event);
+				if (slot >= 0)
+				{
+					_ui?.SelectHotbarSlotFromWorld(slot);
+				}
 			}
 		}
 	}
 
 	/// <summary>
-	/// Damages the current target over time: damage rate =
-	/// <c>(ToolPower / material BreakTime) * 100% per second</c>. The rate is
-	/// looked up each frame from the target's material (air / missing material
-	/// falls back to BreakTime 1.0).
-	///
-	/// Damage is accumulated PER TARGETED VOXEL in <see cref="_pickaxeDamage"/>
-	/// and stored immediately each frame, so it persists across frames and
-	/// across re-aiming: the moment the targeted voxel's total damage reaches
-	/// its full health (100%) the voxel breaks (is removed) and its entry is
-	/// cleared. This is the source of truth for breaking — the voxel's stored
-	/// health is reset to full by <see cref="VoxelWorld.SetVoxel"/> on every
-	/// edit, so it can't be read back to decide when to break.
+	/// True while the inventory UI is open. Resolved via the inventory node's
+	/// group (the same node the place-ability consumes items from).
 	/// </summary>
-	private void ApplyPickaxeDamage(float dt)
+	private bool InventoryOpen
+	{
+		get
+		{
+			ResolveServices();
+			return _inventory != null && _inventory.IsOpen;
+		}
+	}
+
+	/// <summary>
+	/// Maps a freshly-pressed number-key input event (1-9, 0) to a hotbar slot
+	/// index (0-9), or -1 when the event is not a hotbar number key. Uses the
+	/// physical keycode so it works regardless of keyboard layout / IME.
+	/// </summary>
+	private static int HotbarSlotFromEvent(InputEvent @event)
+	{
+		if (!(@event is InputEventKey key && key.Pressed && !key.Echo))
+		{
+			return -1;
+		}
+
+		Key k = key.PhysicalKeycode != Key.None ? key.PhysicalKeycode : key.Keycode;
+		if (k >= Key.Key1 && k <= Key.Key9)
+		{
+			return (int)k - (int)Key.Key1; // 0-8
+		}
+		if (k == Key.Key0)
+		{
+			return 9;
+		}
+		return -1;
+	}
+
+	/// <summary>
+	/// The default place-ability: if the held item is a placeable material (not
+	/// a tool, not empty), place one voxel of it into the cell adjacent to the
+	/// targeted face (<c>_targetVoxel + _targetNormal</c>), consuming one item
+	/// from the selected hotbar slot. Does nothing when the held item is a tool
+	/// (tools mine, they don't place) or when there is no room / the cell is
+	/// occupied.
+	/// </summary>
+	private void TryPlaceHeldMaterial()
+	{
+		var held = HeldItem;
+		if (held.IsEmpty || held.IsTool)
+		{
+			return; // tools don't place; empty does nothing
+		}
+		if (!VoxelMaterialIds.IsPlaceableMaterialId(held.MaterialId))
+		{
+			return;
+		}
+
+		// The cell to place into: the empty cell on the far side of the targeted
+		// face, i.e. the hit voxel stepped along the face normal (the normal
+		// points back toward the camera, into the adjacent empty cell).
+		Vector3I place = _targetVoxel + new Vector3I(
+			Mathf.RoundToInt(_targetNormal.X),
+			Mathf.RoundToInt(_targetNormal.Y),
+			Mathf.RoundToInt(_targetNormal.Z));
+
+		if (!_world.PlaceVoxel(place, held.MaterialId))
+		{
+			return; // already solid, out of range, or an unloaded chunk
+		}
+
+		// Consume one item from the selected hotbar slot.
+		Inventory inv = _inventory;
+		if (inv == null || _ui == null)
+		{
+			return;
+		}
+		int slot = Mathf.Clamp(_ui.SelectedHotbarSlot, 0, Inventory.HotbarSize - 1);
+		var stack = inv.Slots[slot];
+		if (stack.IsEmpty || stack.MaterialId != held.MaterialId)
+		{
+			return;
+		}
+		stack.Count -= 1;
+		if (stack.Count <= 0)
+		{
+			inv.Slots[slot] = ItemStack.From(0);
+		}
+		// RaiseChanged so the hotbar UI + crafting counts refresh.
+		inv.RaiseChangedPublic();
+	}
+
+	/// <summary>
+	/// Damages the current target over time. The damage rate is
+	/// <c>(ToolPower × affinity / material BreakTime) × 100% per second</c>,
+	/// where the affinity comes from <see cref="ToolAffinity"/> for the held
+	/// tool type (or 1.0 when the held item is a plain material — bare-hand
+	/// mining at the base rate).
+	///
+	/// Damage is accumulated PER TARGETED VOXEL in <see cref="_mineDamage"/> and
+	/// stored immediately each frame, so it persists across frames and across
+	/// re-aiming: the moment the targeted voxel's total damage reaches its full
+	/// health (100%) the voxel breaks (is removed) and its entry is cleared.
+	/// This is the source of truth for breaking — the voxel's stored health is
+	/// reset to full by <see cref="VoxelWorld.SetVoxel"/> on every edit, so it
+	/// can't be read back to decide when to break.
+	/// </summary>
+	private void ApplyMiningDamage(float dt)
 	{
 		int material = _world.GetVoxel(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z);
 		if (material == VoxelMaterialIds.Air)
 		{
 			// Target turned to air (broke elsewhere / edited): drop its damage.
-			_pickaxeDamage.Remove(_targetVoxel);
+			_mineDamage.Remove(_targetVoxel);
 			return;
 		}
 
 		// Unbreakable materials (bedrock) take no damage and never break.
 		if (_world.IsUnbreakable(material))
 		{
-			_pickaxeDamage.Remove(_targetVoxel);
+			_mineDamage.Remove(_targetVoxel);
 			return;
 		}
 
 		// Refresh the target's damage from storage each frame (a fresh value
 		// when the player re-aimed at this voxel, its carried value otherwise).
-		float damage = _pickaxeDamage.TryGetValue(_targetVoxel, out float stored) ? stored : 0f;
+		float damage = _mineDamage.TryGetValue(_targetVoxel, out float stored) ? stored : 0f;
 
 		float breakTime = 1.0f;
 		if (_world.MaterialConfig != null && _world.MaterialConfig.GetDef(material) is { } def && def.Entry != null)
@@ -440,147 +597,119 @@ public partial class VoxelTool : Node3D
 			breakTime = Mathf.Max(0.05f, def.Entry.BreakTime);
 		}
 
-		damage += ToolPower / breakTime * VoxelHealth.MaxHealth * dt;
+		// Affinity: the held tool's type vs the target's material category. A
+		// held material (no tool) mines at the neutral 1.0 base rate.
+		float affinity = 1.0f;
+		if (HeldTool is { } tool)
+		{
+			affinity = ToolAffinity.GetMultiplier(tool, material);
+		}
+
+		damage += ToolPower * affinity / breakTime * VoxelHealth.MaxHealth * dt;
 
 		if (damage >= VoxelHealth.MaxHealth)
 		{
 			// The voxel broke: remove it (resets health + rebuilds the chunk).
 			// Capture the edit stamp around the break so the VoxelBroken event
 			// it raises queues a drop that waits for THIS chunk update.
-			GD.Print($"[VoxelTool] Broke voxel {(_world.GetVoxelName(material))} @ {_targetVoxel}");
 			CaptureEditStamp();
 			_world.BreakVoxel(_targetVoxel);
 			_pendingEditStamp = 0;
-			_pickaxeDamage.Remove(_targetVoxel);
+			_mineDamage.Remove(_targetVoxel);
 			return;
 		}
 
 		// Store immediately so the damage is persistent if the player stops or
 		// moves to another voxel this frame.
-		_pickaxeDamage[_targetVoxel] = damage;
+		_mineDamage[_targetVoxel] = damage;
 	}
 
-	private void UpdateDebugHud(float dt)
+	/// <summary>
+	/// Builds a <see cref="TargetInfoUI.TargetInfo"/> snapshot for the top-right
+	/// HUD readout from the current target state. Returns a no-target snapshot
+	/// (which hides the panel) when the raycast found nothing. The best tool is
+	/// the one with the highest break affinity for the target's material
+	/// category; the distance is the camera-to-voxel-center length in world
+	/// units.
+	/// </summary>
+	private TargetInfoUI.TargetInfo BuildTargetInfo(Vector3 cameraPos)
 	{
-		if (_debugLabel == null)
-		{
-			return;
-		}
-
-		// The label is pinned (always visible) for DebugShowTime seconds after a
-		// tool switch; afterwards it is only visible while the mouse is captured
-		// (so it never shows over the UI menu).
-		_debugTimer -= dt;
-		bool visible = (_debugTimer > 0f) || (Input.MouseMode == Input.MouseModeEnum.Captured);
-		_debugLabel.Visible = visible;
-		if (!visible)
-		{
-			return;
-		}
-
-		string toolName = _currentTool switch
-		{
-			Tool.Add => "ADD (key 1)",
-			Tool.Remove => "REMOVE (key 2)",
-			_ => "PICKAXE (key 3)",
-		};
-
+		var info = new TargetInfoUI.TargetInfo();
 		if (!_hasTarget)
 		{
-			_debugLabel.Text = $"Tool: {toolName}\n(no target)";
-			return;
+			return info; // HasTarget stays false → panel hides
 		}
 
 		int material = _world.GetVoxel(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z);
-		string matName = _world.GetVoxelName(material);
-		// Show the target's current health: full minus the damage this voxel
-		// has taken from the pickaxe (see ApplyPickaxeDamage). The stored value
-		// is reset by edits, so the live remaining health is derived from the
-		// per-voxel damage instead.
-		float targetDamage = _pickaxeDamage.TryGetValue(_targetVoxel, out float dmg) ? dmg : 0f;
-		float health = Mathf.Clamp(VoxelHealth.MaxHealth - targetDamage, 0f, VoxelHealth.MaxHealth);
-
-		// A simple 10-segment health bar.
-		int filled = Mathf.Clamp(Mathf.CeilToInt(health / 10f), 0, 10);
-		var bar = new System.Text.StringBuilder(14);
-		bar.Append("[");
-		for (int i = 0; i < 10; i++)
+		if (material == VoxelMaterialIds.Air)
 		{
-			bar.Append(i < filled ? '#' : '.');
+			return info; // turned to air mid-frame; treat as no target
 		}
-		bar.Append(']');
 
-		_debugLabel.Text =
-			$"Tool: {toolName}\n" +
-			$"Target: {matName} @ {_targetVoxel.X},{_targetVoxel.Y},{_targetVoxel.Z}\n" +
-			$"Health: {health:0.#}%  {bar.ToString()}";
+		bool unbreakable = _world.IsUnbreakable(material);
+		string name = "Unknown";
+		float breakTime = 1f;
+		if (_world.MaterialConfig != null && _world.MaterialConfig.GetDef(material) is { } def)
+		{
+			name = string.IsNullOrEmpty(def.Name) ? $"Material {def.Id}" : def.Name;
+			breakTime = def.Entry != null ? Mathf.Max(0.05f, def.Entry.BreakTime) : 1f;
+		}
+
+		// Current health: full minus the damage accumulated on this voxel (the
+		// same _mineDamage the miner writes to, so the readout tracks mining).
+		float damage = _mineDamage.TryGetValue(_targetVoxel, out float stored) ? stored : 0f;
+		float health = Mathf.Max(0f, VoxelHealth.MaxHealth - damage);
+
+		// Distance: camera to the target voxel's CENTER (voxel corner + half a
+		// voxel along each axis), in world units (VoxelSize per voxel).
+		Vector3 center = new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * _world.VoxelSize
+			+ new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
+		float distance = (center - cameraPos).Length();
+
+		info.HasTarget = true;
+		info.MaterialName = name;
+		info.HealthPercent = health;
+		info.BreakTime = breakTime;
+		info.Unbreakable = unbreakable;
+		info.Distance = distance;
+		info.Category = CategoryDisplayName(ToolAffinity.CategoryOf(material));
+		info.BestTool = unbreakable ? "" : BestToolName(material);
+		return info;
 	}
 
-	private void SetTool(Tool tool, bool announce = true)
+	/// <summary>
+	/// The display name of the single most efficient tool for the given material
+	/// (highest break affinity in its category). Ties resolve to the earlier
+	/// tool in the enum order, which is fine because affinity ties are rare and
+	/// any of the tied tools is equally "best".
+	/// </summary>
+	private static string BestToolName(int materialId)
 	{
-		_currentTool = tool;
-		Color color = tool switch
+		var category = ToolAffinity.CategoryOf(materialId);
+		ToolType best = ToolType.Shovel;
+		float bestAffinity = float.NegativeInfinity;
+		foreach (ToolType tool in new[] { ToolType.Shovel, ToolType.Pickaxe, ToolType.Axe, ToolType.Sword })
 		{
-			Tool.Add => AddHighlightColor,
-			Tool.Remove => RemoveHighlightColor,
-			_ => PickaxeHighlightColor,
-		};
-		// Recolor the highlight wireframe and the translucent fill (both albedo
-		// and emission) so the glow matches the active tool.
-		if (_highlightMaterial != null)
-		{
-			_highlightMaterial.AlbedoColor = color;
-			_highlightMaterial.Emission = color;
+			float a = ToolAffinity.GetMultiplier(tool, category);
+			if (a > bestAffinity)
+			{
+				bestAffinity = a;
+				best = tool;
+			}
 		}
-		if (_highlightFillMaterial != null)
-		{
-			_highlightFillMaterial.AlbedoColor = new Color(color, 0.35f);
-			_highlightFillMaterial.Emission = color;
-		}
-		// Switching tools drops any in-progress pickaxe mining; the per-voxel
-		// damage table is kept so a voxel mined with the pickaxe can be
-		// re-mined later with its carried damage (switch to add, back to
-		// pickaxe, same target = resumes).
-
-		// Pin the on-screen debug label so the switch is visible.
-		_debugTimer = DebugShowTime;
-		if (_debugLabel != null)
-		{
-			_debugLabel.Visible = true;
-		}
-
-		if (announce)
-		{
-			GD.Print($"[VoxelTool] Tool: {toolNameOf(tool)}");
-		}
+		return ItemRegistry.ToolName(best);
 	}
 
-	private static string toolNameOf(Tool tool) => tool switch
+	/// <summary>Human-readable name for a material category (lowercase).</summary>
+	private static string CategoryDisplayName(ToolAffinity.MaterialCategory category) => category switch
 	{
-		Tool.Add => "ADD (key 1)",
-		Tool.Remove => "REMOVE (key 2)",
-		_ => "PICKAXE (key 3)",
+		ToolAffinity.MaterialCategory.Soft => "Soft",
+		ToolAffinity.MaterialCategory.Stone => "Stone",
+		ToolAffinity.MaterialCategory.Wood => "Wood",
+		ToolAffinity.MaterialCategory.Metal => "Metal",
+		ToolAffinity.MaterialCategory.Generic => "Generic",
+		_ => "Unknown",
 	};
-
-	private void ApplyTool()
-	{
-		if (_currentTool == Tool.Add)
-		{
-			_world.AddSphere(_targetVoxel, AddRadius, VoxelMaterialIds.Placed);
-			GD.Print($"[VoxelTool] Added sphere r={AddRadius} @ {_targetVoxel}");
-		}
-		else if (_currentTool == Tool.Remove)
-		{
-			// Capture the edit stamp around the carve so the VoxelBroken events
-			// it raises queue drops that wait for THIS chunk update.
-			CaptureEditStamp();
-			_world.RemoveSphere(_targetVoxel, RemoveRadius);
-			_pendingEditStamp = 0;
-			GD.Print($"[VoxelTool] Removed sphere r={RemoveRadius} @ {_targetVoxel}");
-		}
-		// Pickaxe: no one-shot action — holding left mouse damages over time
-		// (see ApplyPickaxeDamage). A plain click does nothing.
-	}
 
 	/// <summary>
 	/// Builds (or reuses) the highlight mesh for the targeted voxel: the edges
@@ -741,9 +870,7 @@ public partial class VoxelTool : Node3D
 			int count = data.GetVertexCount();
 			for (int i = 0; i + 2 < count; i += 3)
 			{
-				AddEdge(lines, seen, data.GetVertex(i) - worldOffset, data.GetVertex(i + 1) - worldOffset);
-				AddEdge(lines, seen, data.GetVertex(i + 1) - worldOffset, data.GetVertex(i + 2) - worldOffset);
-				AddEdge(lines, seen, data.GetVertex(i + 2) - worldOffset, data.GetVertex(i) - worldOffset);
+				AddEdge(lines, seen, data.GetVertex(i) - worldOffset, data.GetVertex(i + 1) - worldOffset, data.GetVertex(i + 2) - worldOffset);
 			}
 		}
 
@@ -765,7 +892,14 @@ public partial class VoxelTool : Node3D
 		return tool.Commit();
 	}
 
-	private static void AddEdge(List<Vector3> lines, HashSet<long> seen, Vector3 a, Vector3 b)
+	private static void AddEdge(List<Vector3> lines, HashSet<long> seen, Vector3 a, Vector3 b, Vector3 c)
+	{
+		AddEdgePair(lines, seen, a, b);
+		AddEdgePair(lines, seen, b, c);
+		AddEdgePair(lines, seen, c, a);
+	}
+
+	private static void AddEdgePair(List<Vector3> lines, HashSet<long> seen, Vector3 a, Vector3 b)
 	{
 		long ka = QuantizeKey(a);
 		long kb = QuantizeKey(b);

@@ -1301,6 +1301,41 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Places a single <paramref name="material"/> voxel at <paramref name="v"/>
+	/// (world voxel coordinates), overwriting whatever was there. Returns true
+	/// when the voxel was actually written (the target cell was air and the
+	/// chunk was loaded), false when it was a no-op (already solid, out of range,
+	/// or an unloaded chunk). This is the world-side of the player's default
+	/// place-ability: the tool calls it with the held material and the cell
+	/// adjacent to the targeted face.
+	///
+	/// The edited chunk AND its 1-chunk ring are flagged for a rebuild (border
+	/// faces are culled against neighbour state, so bordering chunks re-cull),
+	/// matching the edit path. The write is captured by <see cref="SetVoxel"/>
+	/// into <c>_edits</c> for persistence.
+	/// </summary>
+	public bool PlaceVoxel(Vector3I v, int material)
+	{
+		if (material == VoxelMaterialIds.Air || IsUnbreakable(material))
+		{
+			return false;
+		}
+		if (v.Y < 0 || v.Y >= ChunkHeight)
+		{
+			return false;
+		}
+		// Only place into an empty cell (don't overwrite existing terrain).
+		if (GetVoxel(v.X, v.Y, v.Z) != VoxelMaterialIds.Air)
+		{
+			return false;
+		}
+
+		SetVoxel(v, material);
+		MarkChunkDirty(v, 0);
+		return true;
+	}
+
+	/// <summary>
 	/// Moves the player so its origin sits <see cref="SpawnOffset"/> above the
 	/// highest solid voxel in the column at the player's XZ.
 	/// Returns false if the column could not be resolved (retry next frame).
