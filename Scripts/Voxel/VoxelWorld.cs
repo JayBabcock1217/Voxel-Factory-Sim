@@ -1453,6 +1453,7 @@ public partial class VoxelWorld : Node3D
 			RestorePlayerFromSave(player);
 			RestoreInventoryFromSave(save.Snapshot);
 			save.ApplyDrops(save.Snapshot);
+			save.ApplyMachines(save.Snapshot);
 			return true;
 		}
 		return SpawnPlayerOnTerrain(player);

@@ -125,12 +125,17 @@ WorldSaveTest.tscn/.cs     Editor-run test: save format round-trip + versioning
 
 Each world slot is a small binary file (`slot_N.world`) with an `FSAV` magic,
 a version, fixed sections (voxel edits, damaged-voxel health, player
-transform, inventory, item drops), and a trailing FNV-1a checksum. Only the
-player's *deltas* are stored — the terrain itself is regenerated from the
-seed and the edits are re-applied on top. A slot registry (`index.json`) maps
-slot ids to names/timestamps. The format is versioned (`WorldSaveFile.CurrentVersion`)
-with a `Migrate` hook for forward compatibility, and corrupted files (bad
-magic or missing checksum) are auto-repaired on read.
+transform, inventory, item drops, placed machines), and a trailing FNV-1a
+checksum. Only the player's *deltas* are stored — the terrain itself is
+regenerated from the seed and the edits are re-applied on top. A slot registry
+(`index.json`) maps slot ids to names/timestamps. The format is versioned
+(`WorldSaveFile.CurrentVersion`, currently **v2**) with a `Migrate` hook for
+forward compatibility, and corrupted files (bad magic or missing checksum) are
+auto-repaired on read.
+
+**Machines persist** (v2): every placed machine is saved as a voxel + item id +
+placement rotation, and re-spawned on load. Old v1 saves (no machine section)
+still load fine — they simply restore with no machines.
 
 Run `WorldSaveTest.tscn` from the editor to verify the format end-to-end.
 

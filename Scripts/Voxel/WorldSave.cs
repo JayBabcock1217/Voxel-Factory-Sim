@@ -21,7 +21,8 @@ namespace FactorySim.Voxel;
 ///   - damaged-voxel health for voxels still solid,
 ///   - the inventory (all 28 slots),
 ///   - the player's position + yaw/pitch,
-///   - every live item drop.
+///   - every live item drop,
+///   - every placed machine (voxel + item id + placement rotation).
 ///
 /// Save triggers (in the gameplay scene, always targeting the ACTIVE slot):
 ///   - automatically on quit (this node's <see cref="TreeExiting"/>), so both
@@ -314,6 +315,22 @@ public partial class WorldSave : Node
 			}
 		}
 
+		// Placed machines (the shared "Machines" container under the root).
+		// Only real (non-preview) machines are persisted; a preview ghost is a
+		// transient placement aid, not a placed object.
+		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot != null)
+		{
+			for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+			{
+				if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
+				{
+					data.Machines.Add(new WorldSaveFile.MachineRecord(
+						m.VoxelPos, (int)m.Type, (int)m.PlacementRotation));
+				}
+			}
+		}
+
 		return data;
 	}
 
@@ -345,7 +362,8 @@ public partial class WorldSave : Node
 		UpsertIndexEntry(slotId, slotName, data.Seed);
 		GD.Print($"[WorldSave] World saved to slot '{slotId}' ({path}) " +
 			$"({data.Edits.Count} edits, {data.Health.Count} health, " +
-			$" {data.Inventory.Count} slots, {data.Drops.Count} drops).");
+			$" {data.Inventory.Count} slots, {data.Drops.Count} drops, " +
+			$"{data.Machines.Count} machines).");
 		return slotId;
 	}
 
@@ -383,7 +401,8 @@ public partial class WorldSave : Node
 		PendingEdits = loaded;
 		GD.Print($"[WorldSave] Loaded slot '{slotId}' from '{path}' " +
 			$"({loaded.Edits.Count} edits, {loaded.Health.Count} health, " +
-			$"{loaded.Inventory.Count} slots, {loaded.Drops.Count} drops).");
+			$"{loaded.Inventory.Count} slots, {loaded.Drops.Count} drops, " +
+			$"{loaded.Machines.Count} machines).");
 		return true;
 	}
 
@@ -866,6 +885,53 @@ public partial class WorldSave : Node
 		{
 			DropSpawner.SpawnDrop(this, d.Position, d.MaterialId, d.Count);
 		}
+	}
+
+	/// <summary>
+	/// Clears every live machine from the scene (the "Machines" container under
+	/// the root) and re-spawns the machines recorded in <paramref name="data"/>
+	/// at their saved voxel / item id / rotation via <see cref="MachineSpawner"/>.
+	/// Called by the world once, after the spawn chunk is solid, so the restored
+	/// machines land on real terrain. A machine whose cell is no longer placeable
+	/// (e.g. the voxel became solid, or another machine now occupies it) is
+	/// skipped — the spawner's occupancy check handles that.
+	/// </summary>
+	public void ApplyMachines(WorldSaveFile.Data data)
+	{
+		if (data == null)
+		{
+			return;
+		}
+
+		var world = GetWorld();
+		if (world == null)
+		{
+			return;
+		}
+
+		// Clear the existing machines (a fresh scene has none, but a re-load in
+		// the same session could). Free them all, then respawn the saved set.
+		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot != null)
+		{
+			foreach (var child in machinesRoot.GetChildren())
+			{
+				child.QueueFree();
+			}
+		}
+
+		int spawned = 0;
+		foreach (var m in data.Machines)
+		{
+			var machine = FactorySim.Machines.MachineSpawner.SpawnMachine(
+				world, m.ItemId, m.Position,
+				(FactorySim.Machines.MachineRotation)m.Rotation);
+			if (machine != null)
+			{
+				spawned++;
+			}
+		}
+		GD.Print($"[WorldSave] Restored {spawned}/{data.Machines.Count} placed machines.");
 	}
 
 	/// <summary>Clears the pending snapshot (e.g. after it has been fully applied).</summary>

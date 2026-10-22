@@ -85,6 +85,11 @@ public partial class WorldSaveTest : Node
 		data.Inventory.Add((VoxelMaterialIds.Air, 0)); // empty slot
 		data.Drops.Add(new WorldSaveFile.DropRecord(new Vector3(5f, 131f, 6f), VoxelMaterialIds.Dirt, 12));
 		data.Drops.Add(new WorldSaveFile.DropRecord(new Vector3(-2f, 129f, 20f), VoxelMaterialIds.Grass, 1));
+		// Placed machines (v2 section): a conveyor and a power source with
+		// distinct voxels / item ids / rotations.
+		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 5), 204, 0)); // Conveyor, Identity
+		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(9, 132, 5), 205, 4)); // PowerSource, Y90
+		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 6), 201, 7)); // Crafter, Z270
 
 		WorldSaveFile.Write(_tempPath, data);
 		var back = WorldSaveFile.Read(_tempPath);
@@ -138,6 +143,20 @@ public partial class WorldSaveTest : Node
 			&& back.Drops[0].MaterialId == VoxelMaterialIds.Dirt && back.Drops[0].Count == 12);
 		Check("roundtrip: drop[1] pos+material+count",
 			back.Drops[1].MaterialId == VoxelMaterialIds.Grass && back.Drops[1].Count == 1);
+
+		Check("roundtrip: machine count matches", back.Machines.Count == data.Machines.Count);
+		Check("roundtrip: machine[0] voxel+itemId+rotation",
+			back.Machines[0].Position == data.Machines[0].Position
+			&& back.Machines[0].ItemId == 204
+			&& back.Machines[0].Rotation == 0);
+		Check("roundtrip: machine[1] (power source, Y90) voxel+itemId+rotation",
+			back.Machines[1].Position == data.Machines[1].Position
+			&& back.Machines[1].ItemId == 205
+			&& back.Machines[1].Rotation == 4);
+		Check("roundtrip: machine[2] (crafter, Z270) voxel+itemId+rotation",
+			back.Machines[2].Position == data.Machines[2].Position
+			&& back.Machines[2].ItemId == 201
+			&& back.Machines[2].Rotation == 7);
 
 		// Checksum: the computed FNV-1a of the on-disk section bytes must equal
 		// the stored trailing checksum (Read validates this internally, but we
@@ -217,6 +236,51 @@ public partial class WorldSaveTest : Node
 			&& migrated.Seed == 777
 			&& migrated.Edits.Count == 1
 			&& migrated.Edits[0].MaterialId == VoxelMaterialIds.Stone);
+
+		// v1 is still a supported version (old saves keep loading).
+		Check("versioning: v1 is still supported (backward compat)",
+			WorldSaveFile.IsSupportedVersion(1));
+
+		// A hand-built v1 file (no machine section) reads back with an empty
+		// machine list: the reader skips the machine section for v1 bodies.
+		WriteV1FileWithoutMachines(_tempPath, seed: 555);
+		var v1 = WorldSaveFile.Read(_tempPath);
+		Check("versioning: v1 file reads back (not null)", v1 != null);
+		if (v1 != null)
+		{
+			Check("versioning: v1 file has empty machine list", v1.Machines.Count == 0);
+			Check("versioning: v1 file seed preserved", v1.Seed == 555);
+		}
+	}
+
+	/// <summary>
+	/// Writes a minimal v1 save file BY HAND (magic + version 1 + seed + empty
+	/// sections + a valid trailing checksum), with NO machine section — exactly
+	/// the layout an old save has. Used to confirm the v2 reader still loads v1
+	/// files (backward compatibility).
+	/// </summary>
+	private static void WriteV1FileWithoutMachines(string path, int seed)
+	{
+		using var stream = File.Create(path);
+		using var w = new BinaryWriter(stream);
+		w.Write(WorldSaveFile.Magic);
+		w.Write(1); // version 1
+		w.Write(seed);
+		w.Write(0); // editCount
+		w.Write(0); // healthCount
+		w.Write(0f); w.Write(0f); w.Write(0f); // player pos
+		w.Write(0f); w.Write(0f); // yaw, pitch
+		w.Write(0); // slotCount
+		w.Write(0); // dropCount
+		// NOTE: no machine section (v1 layout ends here).
+		w.Flush();
+		long sectionLength = stream.Position;
+		stream.Seek(0, SeekOrigin.Begin);
+		byte[] sectionBytes = new byte[sectionLength];
+		stream.Read(sectionBytes, 0, sectionBytes.Length);
+		stream.Seek(sectionLength, SeekOrigin.Begin);
+		w.Write(WorldSaveFile.Fnv1a(sectionBytes));
+		w.Flush();
 	}
 
 	// ------------------------------------------------------------------

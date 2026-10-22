@@ -12,10 +12,11 @@ namespace FactorySim.Voxel;
 /// voxel edits / damaged-voxel health / player transform / inventory / item
 /// drops, and a trailing FNV-1a checksum over everything above it.
 ///
-/// Layout (little-endian, all values the same size on every platform):
+/// Layout (little-endian, all values the same size on every platform). The
+/// machine section is present only in v2+ (v1 files end after the drops):
 /// <code>
 /// [4 bytes]  magic  'F','S','A','V'
-/// [4 bytes]  version (u32, start at 1)
+/// [4 bytes]  version (u32, start at 1; current = 2)
 /// [4 bytes]  seed (i32)
 /// [4 bytes]  editCount (u32)
 ///   editCount × [x,y,z (i32 each) + materialId (u8) + 1 pad byte]   (16 bytes each)
@@ -26,6 +27,8 @@ namespace FactorySim.Voxel;
 ///   slotCount × [materialId (i32) + count (i32)]                    (8 bytes each)
 /// [4 bytes]  dropCount (u32)
 ///   dropCount × [pos (f32 x3) + materialId (i32) + count (i32)]     (24 bytes each)
+/// [v2+] [4 bytes]  machineCount (u32)
+///   machineCount × [x,y,z (i32 each) + itemId (i32) + rotation (i32)] (20 bytes each)
 /// [4 bytes]  trailing checksum (u32, FNV-1a 32-bit over everything above)
 /// </code>
 ///
@@ -55,8 +58,12 @@ public static class WorldSaveFile
 	/// <summary>File magic: the four bytes 'F','S','A','V'.</summary>
 	public static readonly byte[] Magic = { (byte)'F', (byte)'S', (byte)'A', (byte)'V' };
 
-	/// <summary>Current save format version. Bump it when the layout changes.</summary>
-	public const int CurrentVersion = 1;
+	/// <summary>
+	/// Current save format version. Bump it when the layout changes.
+	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
+	///   v1 — the original layout (no machine section).
+	/// </summary>
+	public const int CurrentVersion = 2;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -67,7 +74,10 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1 };
+	public static readonly int[] SupportedVersions = { 1, 2 };
+
+	/// <summary>The first version that carries the machine section.</summary>
+	private const int VersionWithMachines = 2;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -97,10 +107,13 @@ public static class WorldSaveFile
 			return data; // nothing to do
 		}
 
+		// v1 -> v2: the only difference is the machine section, which v1 files
+		// do not have. The reader leaves data.Machines empty for v1 (it skips
+		// the section), so there is nothing to re-derive — a v1 world simply had
+		// no saved machines. Return as-is (already in the v2 shape).
+		//
 		// Future version migrations go here, e.g.:
-		//   if (fromVersion == 1) { /* v1 -> v2: add new field, re-derive ... */ }
-		// For now, any recognized-but-older version is treated as already in
-		// the current shape (the layout has not changed since v1).
+		//   if (fromVersion == 2) { /* v2 -> v3: add new field, re-derive ... */ }
 		return data;
 	}
 
@@ -174,6 +187,30 @@ public static class WorldSaveFile
 	}
 
 	/// <summary>
+	/// One placed machine: its world voxel, the machine item id (a
+	/// <see cref="FactorySim.Machines.MachineType"/> value), and its placement
+	/// rotation (a <see cref="FactorySim.Machines.MachineRotation"/> value).
+	/// </summary>
+	public readonly struct MachineRecord
+	{
+		/// <summary>World voxel the machine occupies.</summary>
+		public Vector3I Position { get; }
+
+		/// <summary>The machine item id (its <see cref="FactorySim.Machines.MachineType"/>).</summary>
+		public int ItemId { get; }
+
+		/// <summary>The placement rotation (its <see cref="FactorySim.Machines.MachineRotation"/>).</summary>
+		public int Rotation { get; }
+
+		public MachineRecord(Vector3I position, int itemId, int rotation)
+		{
+			Position = position;
+			ItemId = itemId;
+			Rotation = rotation;
+		}
+	}
+
+	/// <summary>
 	/// A decoded save file: every section, plus the FNV-1a checksum of the
 	/// section bytes (everything between the version field and the trailing
 	/// checksum). The caller compares <see cref="Checksum"/> against the
@@ -205,6 +242,9 @@ public static class WorldSaveFile
 
 		/// <summary>Live item drops.</summary>
 		public List<DropRecord> Drops { get; set; } = new();
+
+		/// <summary>Placed machines (voxel + item id + rotation). Empty for v1 saves.</summary>
+		public List<MachineRecord> Machines { get; set; } = new();
 
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
@@ -272,6 +312,18 @@ public static class WorldSaveFile
 			w.Write(d.Position.Z);
 			w.Write(d.MaterialId);
 			w.Write(d.Count);
+		}
+
+		// Placed machines (v2+). v2 writes the section unconditionally (even
+		// when empty), so the reader can tell the layout apart by version.
+		w.Write(data.Machines.Count);
+		foreach (var m in data.Machines)
+		{
+			w.Write(m.Position.X);
+			w.Write(m.Position.Y);
+			w.Write(m.Position.Z);
+			w.Write(m.ItemId);
+			w.Write(m.Rotation);
 		}
 
 		// Trailing FNV-1a over every byte written above the checksum. Flush the
@@ -403,6 +455,23 @@ public static class WorldSaveFile
 				int materialId = r.ReadInt32();
 				int count = r.ReadInt32();
 				data.Drops.Add(new DropRecord(pos, materialId, count));
+			}
+
+			// Placed machines (v2+). v1 files end right after the drops, so the
+			// machine section is read only for v2-and-later versions.
+			if (version >= VersionWithMachines)
+			{
+				int machineCount = ReadCount(r);
+				data.Machines = new List<MachineRecord>(machineCount);
+				for (int i = 0; i < machineCount; i++)
+				{
+					int x = r.ReadInt32();
+					int y = r.ReadInt32();
+					int z = r.ReadInt32();
+					int itemId = r.ReadInt32();
+					int rotation = r.ReadInt32();
+					data.Machines.Add(new MachineRecord(new Vector3I(x, y, z), itemId, rotation));
+				}
 			}
 
 			uint storedChecksum = r.ReadUInt32();
