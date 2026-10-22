@@ -42,6 +42,14 @@ public partial class Machine : Node3D
 	/// <summary>The world voxel this machine occupies (its logical anchor).</summary>
 	public Vector3I VoxelPos { get; private set; }
 
+	/// <summary>
+	/// The machine's placement orientation (the 4×90° rotation the player chose
+	/// with the R key before placing). Applied to the visual when built. Defaults
+	/// to <see cref="MachineRotation.Identity"/>. Named PlacementRotation (not
+	/// Rotation) to avoid hiding Node3D.Rotation (a Vector3 euler).
+	/// </summary>
+	public MachineRotation PlacementRotation { get; set; } = MachineRotation.Identity;
+
 	/// <summary>Current health (starts at the definition's <see cref="MachineDefinition.Health"/>).</summary>
 	public int Health { get; protected set; }
 
@@ -51,6 +59,41 @@ public partial class Machine : Node3D
 	private MeshInstance3D _meshInstance;
 	private Node _meshSceneRoot;
 	private CollisionShape3D _collision;
+
+	/// <summary>The shared transparent material applied to a preview ghost's meshes.</summary>
+	private static StandardMaterial3D _previewMaterial;
+
+	private static StandardMaterial3D PreviewMaterial
+	{
+		get
+		{
+			// A single shared, semi-transparent, unshaded material for every
+			// preview ghost. It is created once (lazily) and reused — a preview
+			// is just a visual cue, not a real machine, so it does not need its
+			// own lighting.
+			_previewMaterial ??= new StandardMaterial3D
+			{
+				AlbedoColor = new Color(0.55f, 0.85f, 1.0f, 0.45f),
+				Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+				DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
+				CullMode = BaseMaterial3D.CullModeEnum.Disabled, // double-sided
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				EmissionEnabled = true,
+				Emission = new Color(0.4f, 0.7f, 1.0f, 0.35f),
+				EmissionEnergyMultiplier = 0.6f,
+			};
+			return _previewMaterial;
+		}
+	}
+
+	/// <summary>
+	/// True while this machine is acting as a transparent placement PREVIEW
+	/// (a ghost shown at the target cell while the player holds a machine item).
+	/// A preview is never "real": it does not run, does not block the player,
+	/// and is not counted for occupancy. It is removed by the tool, not by the
+	/// normal removal path.
+	/// </summary>
+	public bool IsPreview { get; set; }
 
 	/// <summary>The placeholder cube shown when the definition has no mesh/scene.</summary>
 	private static Mesh _placeholderMesh;
@@ -72,11 +115,24 @@ public partial class Machine : Node3D
 		GlobalPosition = new Vector3(voxelPos.X, voxelPos.Y, voxelPos.Z) * voxelSize
 			+ new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
 
+		// Apply the placement rotation (the R-key orientation) to the visual:
+		// rotate the whole machine about its origin (the voxel center).
+		Basis = PlacementRotation.BasisFor();
+
 		BuildVisual(def);
-		BuildCollision(def);
+		// A preview ghost must NOT block the player or count as solid — only a
+		// real (placed) machine gets a collision shape.
+		if (!IsPreview)
+		{
+			BuildCollision(def);
+		}
 
 		// Let the concrete machine start its behavior (the base does nothing).
-		StartMachine();
+		// A preview does not "run" — it is just a visual ghost.
+		if (!IsPreview)
+		{
+			StartMachine();
+		}
 	}
 
 	/// <summary>
@@ -101,6 +157,10 @@ public partial class Machine : Node3D
 			// Scaling about the node origin (the voxel center) keeps the mesh
 			// centered on the voxel.
 			_meshInstance.Scale = def.Scale;
+			if (IsPreview)
+			{
+				_meshInstance.MaterialOverride = PreviewMaterial;
+			}
 			AddChild(_meshInstance);
 			return;
 		}
@@ -112,6 +172,13 @@ public partial class Machine : Node3D
 			if (_meshSceneRoot is Node3D sceneNode)
 			{
 				sceneNode.Scale = def.Scale;
+			}
+			// A preview ghost of a scene: apply the transparent override to every
+			// mesh instance in the instantiated scene so the whole thing reads as
+			// a translucent ghost.
+			if (IsPreview)
+			{
+				ApplyPreviewToScene(_meshSceneRoot);
 			}
 			AddChild(_meshSceneRoot);
 			return;
@@ -126,7 +193,61 @@ public partial class Machine : Node3D
 			Name = "MachinePlaceholder",
 			Mesh = _placeholderMesh,
 		};
+		if (IsPreview)
+		{
+			_meshInstance.MaterialOverride = PreviewMaterial;
+		}
 		AddChild(_meshInstance);
+	}
+
+	/// <summary>
+	/// Applies the shared transparent preview material to every <see
+	/// cref="MeshInstance3D"/> in an instantiated scene (recursively). Used for
+	/// preview ghosts of <c>MeshScene</c>-based machines so the whole imported
+	/// scene renders as a translucent ghost.
+	/// </summary>
+	private static void ApplyPreviewToScene(Node root)
+	{
+		if (root is MeshInstance3D mi)
+		{
+			mi.MaterialOverride = PreviewMaterial;
+		}
+		for (int i = 0; i < root.GetChildCount(); i++)
+		{
+			ApplyPreviewToScene(root.GetChild(i));
+		}
+	}
+
+	/// <summary>
+	/// Converts an already-built machine into a transparent PREVIEW ghost. The
+	/// <see cref="MachineSpawner"/> builds a machine as a real (opaque) machine;
+	/// the tool then flips <see cref="IsPreview"/> on and calls this to swap in
+	/// the transparent material override on every mesh and remove any collision
+	/// the spawner added (a ghost must not block the player). Idempotent: safe
+	/// to call when the machine is already a preview.
+	/// </summary>
+	public void ApplyPreviewVisual()
+	{
+		IsPreview = true;
+
+		// Swap in the transparent material on the primary mesh instance.
+		if (_meshInstance != null)
+		{
+			_meshInstance.MaterialOverride = PreviewMaterial;
+		}
+		// For a MeshScene-based machine, override every mesh in the scene.
+		if (_meshSceneRoot != null)
+		{
+			ApplyPreviewToScene(_meshSceneRoot);
+		}
+
+		// A ghost must not block the player or count as solid: remove any
+		// collision the spawner added for a real machine.
+		if (_collision != null)
+		{
+			_collision.QueueFree();
+			_collision = null;
+		}
 	}
 
 	private static Mesh MakePlaceholderMesh()

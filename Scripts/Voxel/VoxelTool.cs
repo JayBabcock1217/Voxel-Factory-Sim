@@ -2,6 +2,7 @@ using Godot;
 using System;
 using System.Collections.Generic;
 using FactorySim.Items;
+using FactorySim.Machines;
 using FactorySim.UI;
 
 namespace FactorySim.Voxel;
@@ -76,6 +77,28 @@ public partial class VoxelTool : Node3D
 	private bool _hasTarget;
 	private Vector3I _targetVoxel;
 	private Vector3 _targetNormal;
+
+	// -- Machine placement state (preview ghost + R-key rotation) -----------
+	//
+	// The transparent preview ghost: a Machine node (IsPreview = true) shown at
+	// the target cell while the player holds a machine item. It is (re)built on
+	// demand in _Process and torn down when the held item is no longer a
+	// placeable machine. _previewCell / _previewRotation / _previewItemId track
+	// the current ghost so it is only rebuilt when something actually changes.
+	private FactorySim.Machines.Machine _preview;
+	private Vector3I _previewCell;
+	private int _previewItemId;
+	private FactorySim.Machines.MachineRotation _previewRotation;
+
+	/// <summary>
+	/// The player's CURRENT machine placement orientation (the R-key state).
+	/// This is PERSISTENT: it is not reset when the player re-selects a machine
+	/// or opens the inventory — it is the orientation the player last chose, and
+	/// it is applied to the next machine they place. It is shared across all
+	/// machine types (the player rotates the "placement cursor", not a specific
+	/// machine).
+	/// </summary>
+	private FactorySim.Machines.MachineRotation _currentRotation = FactorySim.Machines.MachineRotation.Identity;
 
 	/// <summary>RNG for the small random offset applied to item drop spawns.</summary>
 	private readonly RandomNumberGenerator _dropRng = new();
@@ -199,6 +222,9 @@ public partial class VoxelTool : Node3D
 		{
 			_world.VoxelBroken -= OnVoxelBroken;
 		}
+
+		// Free any preview ghost so it doesn't linger in the tree.
+		DestroyPreview();
 	}
 
 	/// <summary>
@@ -400,6 +426,12 @@ public partial class VoxelTool : Node3D
 		ResolveServices();
 		_targetInfo?.Update(BuildTargetInfo(from));
 
+		// MACHINE PLACEMENT PREVIEW: while the player holds a placeable machine
+		// item (and has a target), show a transparent ghost of that machine at
+		// the target cell, reflecting the current R-key rotation. Rebuilt only
+		// when the cell / item / rotation changes (or shown/hidden).
+		UpdatePreview();
+
 		// MINE: hold left mouse (captured) to damage the target over time, but
 		// only when the held item is a TOOL. A tool breaks blocks at an
 		// affinity-scaled rate; a placeable material does NOT mine (it places,
@@ -455,12 +487,46 @@ public partial class VoxelTool : Node3D
 			}
 			else
 			{
-				int slot = HotbarSlotFromEvent(@event);
-				if (slot >= 0)
+				// R key: cycle the machine placement rotation through the 12
+				// supported orientations (4×90° about each axis, wrapping). This
+				// is only meaningful while holding a machine item, but it is
+				// harmless to allow it always (it just changes the persistent
+				// _currentRotation, which is applied to the next machine placed
+				// and shown in the preview). Using the physical keycode so it
+				// works regardless of keyboard layout / IME.
+				if (@event is InputEventKey rkey
+					&& rkey.Pressed && !rkey.Echo
+					&& (rkey.PhysicalKeycode == Key.R || rkey.Keycode == Key.R))
 				{
-					_ui?.SelectHotbarSlotFromWorld(slot);
+					CycleMachineRotation();
+				}
+				else
+				{
+					int slot = HotbarSlotFromEvent(@event);
+					if (slot >= 0)
+					{
+						_ui?.SelectHotbarSlotFromWorld(slot);
+					}
 				}
 			}
+		}
+	}
+
+	/// <summary>
+	/// Cycles the player's persistent machine placement rotation to the next of
+	/// the 12 supported orientations (4×90° about X/Y/Z, wrapping). The new
+	/// value is stored in <see cref="_currentRotation"/> and, if a preview ghost
+	/// is currently shown, the ghost is rebuilt to reflect it immediately.
+	/// </summary>
+	private void CycleMachineRotation()
+	{
+		_currentRotation = _currentRotation.Next();
+		// If a preview is up, reflect the new rotation now (the next _Process
+		// frame would also catch it, but doing it here makes the R press feel
+		// instant).
+		if (_preview != null)
+		{
+			UpdatePreview();
 		}
 	}
 
@@ -532,15 +598,14 @@ public partial class VoxelTool : Node3D
 		bool placed;
 		if (held.IsMachine)
 		{
-			// Machine: spawn a Machine node at the target cell. The spawner
-			// returns null when the machine isn't registered (no def) — in that
-			// case nothing is placed and nothing is consumed.
-			var machine = FactorySim.Machines.MachineSpawner.SpawnMachine(_world, held.MaterialId, place);
+			// Machine: spawn a Machine node at the target cell with the current
+			// R-key rotation. The spawner enforces the OCCUPANCY CHECK (one
+			// machine per cell, no placing into a solid voxel) and bounds, and
+			// returns null when placement isn't allowed — in that case nothing
+			// is placed and nothing is consumed.
+			var machine = FactorySim.Machines.MachineSpawner.SpawnMachine(
+				_world, held.MaterialId, place, _currentRotation);
 			placed = machine != null;
-			// A machine occupies its cell visually/collision-wise but does NOT
-			// stamp a voxel, so the voxel cell may already be solid under an
-			// existing block; we still allow the machine to sit there (the user
-			// placed it intentionally). No voxel write is needed.
 		}
 		else
 		{
@@ -577,6 +642,127 @@ public partial class VoxelTool : Node3D
 		// RaiseChanged so the hotbar UI + crafting counts refresh.
 		inv.RaiseChangedPublic();
 	}
+
+	// ------------------------------------------------------------------
+	// Machine placement preview (transparent ghost at the target cell)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The cell the preview ghost would be placed into: the empty cell on the
+	/// far side of the targeted face (the same cell <see cref="TryPlaceHeldMaterial"/>
+	/// uses). Only valid when <see cref="_hasTarget"/> is true.
+	/// </summary>
+	private Vector3I PreviewCell
+	{
+		get
+		{
+			if (!_hasTarget)
+			{
+				return default;
+			}
+			return _targetVoxel + new Vector3I(
+				Mathf.RoundToInt(_targetNormal.X),
+				Mathf.RoundToInt(_targetNormal.Y),
+				Mathf.RoundToInt(_targetNormal.Z));
+		}
+	}
+
+	/// <summary>
+	/// Shows / updates / hides the transparent machine placement preview. Called
+	/// every frame from <c>_Process</c> (cheap: it early-returns when nothing
+	/// changed) and from <see cref="CycleMachineRotation"/> for an instant R-key
+	/// response.
+	///
+	/// The preview is shown only when ALL of: the held item is a placeable
+	/// machine (not a tool, not empty, not a plain material), there is a target,
+	/// and the target cell is placeable (in bounds and not occupied — see
+	/// <see cref="MachineSpawner.CanPlaceAt"/>). Otherwise the ghost is hidden
+	/// (a red-tinted ghost would be a nice "can't place here" cue, but hiding is
+	/// the simplest correct behavior for now).
+	/// </summary>
+	private void UpdatePreview()
+	{
+		var held = HeldItem;
+
+		// Only show a preview for a placeable MACHINE item.
+		bool shouldShow = !held.IsEmpty
+			&& !held.IsTool
+			&& held.IsMachine
+			&& _hasTarget;
+
+		if (!shouldShow)
+		{
+			HidePreview();
+			return;
+		}
+
+		Vector3I cell = PreviewCell;
+		int itemId = held.MaterialId;
+		var rotation = _currentRotation;
+
+		// The cell must be placeable (in bounds + not occupied) for the ghost to
+		// be meaningful; if it isn't, hide the ghost (the placement would fail
+		// anyway).
+		if (!FactorySim.Machines.MachineSpawner.CanPlaceAt(_world, cell))
+		{
+			HidePreview();
+			return;
+		}
+
+		// Nothing changed since the last frame AND the ghost is currently shown:
+		// it is already in the right place with the right rotation. (If the ghost
+		// was hidden this frame — e.g. the player briefly lost the target — we
+		// still need to re-show it, so require Visible too.)
+		if (_preview != null && _preview.Visible
+			&& _previewCell == cell && _previewItemId == itemId && _previewRotation == rotation)
+		{
+			return;
+		}
+
+		// Something changed (cell moved, different machine, rotation cycled, or
+		// the ghost is hidden): tear down the old ghost and build a fresh one at
+		// the new cell.
+		DestroyPreview();
+
+		var ghost = FactorySim.Machines.MachineSpawner.SpawnMachine(_world, itemId, cell, rotation);
+		if (ghost == null)
+		{
+			return; // CanPlaceAt said OK but spawn failed (shouldn't happen); no ghost.
+		}
+		ghost.IsPreview = true;
+		// Re-apply the preview visual now that IsPreview is set (the spawner
+		// built the visual as a real machine). This swaps in the transparent
+		// material override and removes any collision the spawner added.
+		ghost.ApplyPreviewVisual();
+
+		_preview = ghost;
+		_previewCell = cell;
+		_previewItemId = itemId;
+		_previewRotation = rotation;
+	}
+
+	/// <summary>Hides the preview ghost without destroying it (keeps it for reuse).</summary>
+	private void HidePreview()
+	{
+		if (_preview != null)
+		{
+			_preview.Visible = false;
+		}
+	}
+
+	/// <summary>Destroys the preview ghost node (frees it from the tree).</summary>
+	private void DestroyPreview()
+	{
+		if (_preview != null)
+		{
+			_preview.QueueFree();
+			_preview = null;
+		}
+		_previewCell = default;
+		_previewItemId = 0;
+		_previewRotation = default;
+	}
+
 
 	/// <summary>
 	/// Damages the current target over time. The damage rate is

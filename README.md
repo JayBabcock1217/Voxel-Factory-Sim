@@ -55,6 +55,7 @@ To play, open the project in the Godot 4.8 editor (mono build) and press
 | Space | Jump |
 | Shift (left) | Sprint |
 | 1–9, 0 / wheel | Select hotbar slot (the held item) |
+| R | Cycle the machine placement rotation (12 orientations: 4×90° about X/Y/Z) — shown in the preview |
 | Left mouse (hold) | Mine the target — **when holding a tool** |
 | Left mouse (click) | Place the held item — a block voxel, or a **machine** (spawns its mesh) |
 | Tab | Open / close the inventory (crafting + dev panes) |
@@ -92,7 +93,8 @@ Scripts/
     MachineDefConfig.cs    Registry of machine definitions (a .tres you edit)
     Machine.cs             Base Node3D for a placed machine (mesh + behavior hooks)
     MachineRegistry.cs     item id -> definition -> Machine node factory
-    MachineSpawner.cs      Spawns Machine nodes into the shared "Machines" container
+    MachineSpawner.cs      Spawns Machine nodes (occupancy check) into "Machines"
+    MachineRotation.cs     12 placement orientations (4x90 about X/Y/Z) + Basis helper
   UI/InventoryUI.cs        Inventory screen (slots, crafting pane, dev pane)
   Voxel/                   World + save system (FactorySim.Voxel)
     VoxelWorld.cs          Chunk manager / generation orchestration
@@ -172,6 +174,24 @@ and stats you register a `MachineDefinition` for it.
 
 Now the machine items appear in the dev pane (with your custom names), and
 placing one spawns a `Machine` node with your Blender mesh.
+
+### Placing machines: preview, rotation, occupancy
+
+While you hold a machine item (and are looking at a voxel face), a **transparent
+preview ghost** of that machine appears at the target cell, showing exactly where
+and how it will be placed. The ghost uses the machine's real mesh (rendered
+translucent) and reflects your current rotation live.
+
+- **R key** cycles the placement rotation through the 12 supported orientations
+  (four 90° rotations about each of the X, Y, and Z axes, wrapping). The rotation
+  is **persistent** — it is your current placement orientation and is applied to
+  the next machine you place, regardless of which machine type you're holding.
+  The preview updates instantly when you press R.
+- **Occupancy**: a cell can hold at most one machine, and you cannot place a
+  machine into a cell that already has a solid voxel. When the target cell is
+  occupied (or out of bounds), the preview hides and the placement is rejected
+  (no item is consumed). This prevents stacking machines in one cell or burying
+  a machine inside terrain.
 
 ### Adding a new machine type
 
