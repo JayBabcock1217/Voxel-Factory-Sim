@@ -28,7 +28,7 @@ project/assembly_name="Factory Sim"
 
 [editor_plugins]
 
-enabled=PackedStringArray("res://Scripts/Editor/VoxelWorldPlugin.tscn")
+enabled=PackedStringArray("res://addons/voxel_world_machine_debug/plugin.cfg")
 
 [file_customization]
 

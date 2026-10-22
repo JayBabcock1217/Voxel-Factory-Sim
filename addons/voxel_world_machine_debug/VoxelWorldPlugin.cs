@@ -10,20 +10,24 @@ namespace FactorySim.Editor;
 ///   - **Rebuild Machine Collisions** — re-runs the auto-generated box
 ///     collision on every machine currently in the scene. Use this after
 ///     re-importing or re-scaling a Blender mesh so the collider matches
-///     the new visuals.
+///     the new visuals. Works in the editor (finds Machine nodes placed in
+///     a test scene) and in play mode (finds machines in the "Machines"
+///     container).
 ///   - **Open Machine Config** — opens the in-game machine-config panel
-///     (the list of all registered machine definitions).
+///     (the list of all registered machine definitions). Only works in
+///     play mode (the panel is an in-game CanvasLayer); in the editor it
+///     shows a hint.
 ///
-/// The buttons call into the <see cref="FactorySim.Voxel.VoxelWorld"/> in the
-/// running scene tree. They work in play mode (the game is running); in the
-/// editor viewport (not playing) the world may not be initialized, so the
-/// buttons are effectively no-ops.
-///
-/// Setup:
-///   1. The plugin is enabled in <c>project.godot</c> under
-///      <c>[editor_plugins]</c> by referencing this <c>.cs</c> file directly
-///      (Godot instantiates the <c>EditorPlugin</c> class from the script).
-///   2. Select any <see cref="FactorySim.Voxel.VoxelWorld"/> node — the
+/// Setup (standard Godot editor-plugin layout):
+///   1. <c>addons/voxel_world_machine_debug/plugin.cfg</c> — plugin metadata,
+///      points at this script.
+///   2. <c>project.godot</c> <c>[editor_plugins]</c> enabled list references
+///      the <c>plugin.cfg</c> path.
+///   3. Build the C# project (the plugin script must be compiled before the
+///      editor can load it).
+///   4. In the editor: Project → Project Settings → Plugins → enable this
+///      plugin.
+///   5. Select any <see cref="FactorySim.Voxel.VoxelWorld"/> node — the
 ///      "Machine Debug" buttons appear at the bottom of its inspector.
 /// </summary>
 [Tool]
@@ -77,8 +81,8 @@ public partial class VoxelWorldInspectorPlugin : EditorInspectorPlugin
 /// A <see cref="Control"/> that renders the two action buttons for
 /// <see cref="FactorySim.Voxel.VoxelWorld"/>. Added to the inspector via
 /// <see cref="VoxelWorldInspectorPlugin._ParseEnd"/>. The buttons find the
-/// <see cref="FactorySim.Voxel.VoxelWorld"/> in the running scene tree and
-/// call the corresponding method.
+/// relevant nodes in the running scene tree and call the corresponding
+/// methods.
 /// </summary>
 [Tool]
 public partial class VoxelWorldDebugControl : Control
@@ -110,7 +114,7 @@ public partial class VoxelWorldDebugControl : Control
 		_configBtn = new Button
 		{
 			Text = "Open Machine Config",
-			TooltipText = "Open the machine-config panel listing all registered machine definitions.",
+			TooltipText = "Open the machine-config panel listing all registered machine definitions. Works in play mode (press C in-game).",
 		};
 		_rebuildBtn.Pressed += OnRebuildPressed;
 		_configBtn.Pressed += OnConfigPressed;
