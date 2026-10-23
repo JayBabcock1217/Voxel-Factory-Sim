@@ -41,6 +41,7 @@ public sealed class SettingsStore
 	public float FogDensity { get; set; } = 0.004f;
 	public float AmbientLightEnergy { get; set; } = 0.3f;
 	public float SunIntensity { get; set; } = 1.0f;
+	public int AntiAliasing { get; set; } = 0; // 0 = Off, 1 = 2x, 2 = 4x, 3 = 8x (Viewport.Msaa)
 
 	// --- World ---
 	public int ChunkRenderDistance { get; set; } = 16;
@@ -81,6 +82,7 @@ public sealed class SettingsStore
 					FogDensity = JsonParser.GetFloat(root, "FogDensity", FogDensity);
 					AmbientLightEnergy = JsonParser.GetFloat(root, "AmbientLightEnergy", AmbientLightEnergy);
 					SunIntensity = JsonParser.GetFloat(root, "SunIntensity", SunIntensity);
+					AntiAliasing = JsonParser.GetInt(root, "AntiAliasing", AntiAliasing);
 					ChunkRenderDistance = JsonParser.GetInt(root, "ChunkRenderDistance", ChunkRenderDistance);
 					LodRenderDistance = JsonParser.GetInt(root, "LodRenderDistance", LodRenderDistance);
 					LodEnabled = JsonParser.GetBool(root, "LodEnabled", LodEnabled);
@@ -109,6 +111,7 @@ public sealed class SettingsStore
 		FogDensity = Mathf.Clamp(FogDensity, 0f, 0.1f);
 		AmbientLightEnergy = Mathf.Clamp(AmbientLightEnergy, 0f, 2f);
 		SunIntensity = Mathf.Clamp(SunIntensity, 0f, 5f);
+		AntiAliasing = Mathf.Clamp(AntiAliasing, 0, 3);
 		ChunkRenderDistance = Mathf.Clamp(ChunkRenderDistance, 1, 32);
 		LodRenderDistance = Mathf.Clamp(LodRenderDistance, 1, 256);
 		if (LodRenderDistance < ChunkRenderDistance)
@@ -137,6 +140,7 @@ public sealed class SettingsStore
 				$"\t\"FogDensity\": {FogDensity},\n" +
 				$"\t\"AmbientLightEnergy\": {AmbientLightEnergy},\n" +
 				$"\t\"SunIntensity\": {SunIntensity},\n" +
+				$"\t\"AntiAliasing\": {AntiAliasing},\n" +
 				$"\t\"ChunkRenderDistance\": {ChunkRenderDistance},\n" +
 				$"\t\"LodRenderDistance\": {LodRenderDistance},\n" +
 				$"\t\"LodEnabled\": {(LodEnabled ? "true" : "false")}\n" +
@@ -191,6 +195,15 @@ public sealed class SettingsStore
 		if (tree == null)
 		{
 			return;
+		}
+
+		// Anti-aliasing (MSAA): a window-level viewport setting, applied regardless
+		// of whether a voxel world is loaded. Msaa3D is the multi-sampling mode for
+		// 3D geometry (this is a 3D voxel game); Msaa2D would only smooth 2D/UI.
+		var window = tree.Root.GetWindow();
+		if (window != null)
+		{
+			window.Msaa3D = (Viewport.Msaa)AntiAliasing;
 		}
 
 		var world = tree.GetFirstNodeInGroup("voxel_world") as FactorySim.Voxel.VoxelWorld;

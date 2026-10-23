@@ -34,6 +34,7 @@ public partial class SettingsPanel : Control
 	private CheckButton _fullscreenButton;
 	private CheckButton _vSyncButton;
 	private OptionButton _meshModeButton;
+	private OptionButton _antiAliasingButton;
 	private CheckButton _shadowsButton;
 	private CheckButton _fogButton;
 	private HSlider _fpsCap;
@@ -91,6 +92,7 @@ public partial class SettingsPanel : Control
 		_fpsCapValue.Text = _store.FpsCap == 0 ? "∞" : $"{_store.FpsCap}";
 
 		_meshModeButton.Selected = _store.MeshMode;
+		_antiAliasingButton.Selected = _store.AntiAliasing;
 		_shadowsButton.ButtonPressed = _store.ShadowsEnabled;
 		_shadowsButton.Text = _OnOffText(_store.ShadowsEnabled);
 		_fogButton.ButtonPressed = _store.FogEnabled;
@@ -203,6 +205,7 @@ public partial class SettingsPanel : Control
 		_root.AddChild(MakeSpacer(8f));
 		_root.AddChild(MakeSectionLabel("Rendering"));
 		_root.AddChild(MakeRow("Mesh mode", MakeMeshModeDropdown()));
+		_root.AddChild(MakeRow("Anti-aliasing", MakeAntiAliasingDropdown()));
 		_root.AddChild(MakeRow("Shadows", MakeShadowsToggle()));
 		_root.AddChild(MakeRow("Fog", MakeFogToggle()));
 		_root.AddChild(MakeSliderRow("Fog density", 0f, 0.1f,
@@ -393,6 +396,27 @@ public partial class SettingsPanel : Control
 			_store.Apply();
 		};
 		_meshModeButton = button;
+		return button;
+	}
+
+	private OptionButton MakeAntiAliasingDropdown()
+	{
+		var button = new OptionButton
+		{
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(0, 36),
+		};
+		button.AddItem("Off");
+		button.AddItem("2x");
+		button.AddItem("4x");
+		button.AddItem("8x");
+		button.ItemSelected += i =>
+		{
+			_store.AntiAliasing = (int)i;
+			_store.Save();
+			_store.Apply();
+		};
+		_antiAliasingButton = button;
 		return button;
 	}
 
