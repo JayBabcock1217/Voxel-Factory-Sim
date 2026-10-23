@@ -276,7 +276,10 @@ public partial class MachineUI : CanvasLayer
 		}
 		_statusLabel.Text = status;
 
-		// Recipe picker: only for a crafter.
+		// Recipe picker: for a crafter (craft recipes) or a smelter (smelt
+		// recipes from the definition's paired input/output lists). Both use the
+		// same OptionButton + progress bar; only the label and progress source
+		// differ.
 		if (_machine is CrafterMachine crafter)
 		{
 			_recipePicker.Visible = true;
@@ -300,6 +303,31 @@ public partial class MachineUI : CanvasLayer
 			_recipePicker.Selected = currentIdx;
 
 			bool showProgress = crafter.Recipe != null;
+			_progressBg.Visible = showProgress;
+			_progressLabel.Visible = showProgress;
+		}
+		else if (_machine is SmelterMachine smelter)
+		{
+			_recipePicker.Visible = true;
+			_recipePicker.Clear();
+			_recipePicker.AddItem("(No recipe — idle)", 0);
+			var smeltRecipes = smelter.SmeltableRecipes;
+			for (int i = 0; i < smeltRecipes.Count; i++)
+			{
+				var (input, output) = smeltRecipes[i];
+				string inName = ItemName(input);
+				string outName = ItemName(output);
+				_recipePicker.AddItem($"Smelt {inName} → {outName}", i + 1);
+			}
+			// The smelter auto-selects its first recipe on start, so the current
+			// index is smelter.RecipeIndex (0-based) + 1 (the picker's 1-based
+			// index); fall back to 0 (idle) when it is -1 or out of range.
+			int currentIdx = (smelter.RecipeIndex >= 0 && smelter.RecipeIndex < smeltRecipes.Count)
+				? smelter.RecipeIndex + 1
+				: 0;
+			_recipePicker.Selected = currentIdx;
+
+			bool showProgress = smelter.RecipeIndex >= 0;
 			_progressBg.Visible = showProgress;
 			_progressLabel.Visible = showProgress;
 		}
@@ -504,22 +532,27 @@ public partial class MachineUI : CanvasLayer
 		BuildContent();
 	}
 
-	/// <summary>A recipe was selected (index 0 = none, 1..N = the Nth recipe).</summary>
+	/// <summary>A recipe was selected (index 0 = none, 1..N = the Nth recipe). Handles both the crafter (craft recipes) and the smelter (smelt recipes from the definition's paired lists).</summary>
 	private void OnRecipeSelected(long index)
 	{
-		if (_machine is not CrafterMachine crafter)
+		if (_machine is CrafterMachine crafter)
 		{
-			return;
+			if (index == 0)
+			{
+				crafter.Recipe = null;
+			}
+			else
+			{
+				var recipes = crafter.AvailableRecipes;
+				int i = (int)index - 1;
+				crafter.Recipe = i >= 0 && i < recipes.Count ? recipes[i] : null;
+			}
 		}
-		if (index == 0)
+		else if (_machine is SmelterMachine smelter)
 		{
-			crafter.Recipe = null;
-		}
-		else
-		{
-			var recipes = crafter.AvailableRecipes;
-			int i = (int)index - 1;
-			crafter.Recipe = i >= 0 && i < recipes.Count ? recipes[i] : null;
+			// The smelter's recipe index is 0-based (into SmeltableRecipes); the
+			// picker is 1-based, so index 0 = idle (-1), index N = recipe N-1.
+			smelter.RecipeIndex = index == 0 ? -1 : (int)index - 1;
 		}
 		BuildContent();
 	}
@@ -561,6 +594,16 @@ public partial class MachineUI : CanvasLayer
 			if (crafter.Recipe != null)
 			{
 				_progressLabel.Text = $"Crafting: {Mathf.RoundToInt(crafter.CraftProgress * 100f)}%";
+			}
+		}
+		else if (_machine is SmelterMachine smelter)
+		{
+			_progressFill.Size = new Vector2(
+				_progressBg.Size.X * Mathf.Clamp(smelter.SmeltProgress, 0f, 1f),
+				_progressBg.Size.Y);
+			if (smelter.RecipeIndex >= 0)
+			{
+				_progressLabel.Text = $"Smelting: {Mathf.RoundToInt(smelter.SmeltProgress * 100f)}%";
 			}
 		}
 

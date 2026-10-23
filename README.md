@@ -98,9 +98,11 @@ Scripts/
     MachineRotation.cs     12 placement orientations (4x90 about X/Y/Z) + Basis helper
     MachineBuffer.cs       A machine's item buffer (input/output slots)
     MachineBehaviorRegistry.cs  Maps MachineType -> behavior subclass
-    ConveyorMachine.cs     Conveyor behavior: 1-slot pull/push, any side
+    SmelterMachine.cs    Smelter behavior: gather -> smelt -> output (powered, data-driven recipes)
+    ConveyorMachine.cs     Conveyor behavior: directional 1-slot pull (back) / push (front) along local +Z
     CrafterMachine.cs      Crafter behavior: gather -> craft -> output (powered)
     PowerSourceMachine.cs  Power source behavior (passive producer)
+    MachineSnapshot.cs     Serializable machine runtime state (buffers + recipe), the save/restore contract
     PowerNetwork.cs        Range-based power (production - consumption in radius)
   UI/InventoryUI.cs        Inventory screen (slots, crafting pane, dev pane)
   UI/MachineUI.cs          Machine interaction UI (right-click: recipe, buffers, progress)
@@ -129,13 +131,17 @@ transform, inventory, item drops, placed machines), and a trailing FNV-1a
 checksum. Only the player's *deltas* are stored — the terrain itself is
 regenerated from the seed and the edits are re-applied on top. A slot registry
 (`index.json`) maps slot ids to names/timestamps. The format is versioned
-(`WorldSaveFile.CurrentVersion`, currently **v2**) with a `Migrate` hook for
+(`WorldSaveFile.CurrentVersion`, currently **v3**) with a `Migrate` hook for
 forward compatibility, and corrupted files (bad magic or missing checksum) are
 auto-repaired on read.
 
-**Machines persist** (v2): every placed machine is saved as a voxel + item id +
-placement rotation, and re-spawned on load. Old v1 saves (no machine section)
-still load fine — they simply restore with no machines.
+**Machines persist** (v2+): every placed machine is saved as a voxel + item id +
+placement rotation, and re-spawned on load. **Machine state persists** (v3+): the
+machine record also carries its runtime state — the input/output buffer stacks
+and (for a smelter/crafter) the selected recipe index — so a smelter comes back
+with its ore and product intact. Old v1 saves (no machine section) and v2 saves
+(machine section, no state) still load fine — they simply restore with no
+machines (v1) or machines with no saved state (v2).
 
 Run `WorldSaveTest.tscn` from the editor to verify the format end-to-end.
 
@@ -149,12 +155,14 @@ base of the factory design system. Machines are first-class inventory items
 The starter machine kinds are `Smelter`, `Crafter`, `Turret`, `DefenseWall`,
 `Conveyor`, and `PowerSource` (`MachineType`). They are all placeable out of the
 box (rendering a small placeholder cube); to give a machine its real look and
-stats you register a `MachineDefinition` for it. The `Conveyor`, `Crafter`, and
-`PowerSource` have built-in behaviors (item transport, automated crafting, and
-power generation respectively — see [Item flow](#item-flow-conveyors--processors),
+stats you register a `MachineDefinition` for it. The `Smelter`, `Crafter`,
+`Conveyor`, and `PowerSource` have built-in behaviors (ore→ingot smelting,
+automated crafting, directional item transport, and power generation
+respectively — see [Item flow](#item-flow-conveyors--processors),
 [Machine UI](#machine-ui-right-click-a-machine), and
-[Power](#power-range-based)). The `Smelter`, `Turret`, and `DefenseWall` are
-currently placeable placeholders (static meshes) whose behaviors come next.
+[Power](#power-range-based)). The `Turret` and `DefenseWall` are currently
+placeable placeholders (static meshes) whose behaviors come next (along with
+enemies, which they will defend against).
 
 ### How it fits together
 
@@ -243,37 +251,57 @@ computation required.
 ### Item flow (conveyors + processors)
 
 Machines move items between each other. There are no inserters — **conveyors**
-are the only transport. A placed `Conveyor` has a single item slot and, on a
-throttled tick (~4 ops/sec, tunable via the conveyor behavior's
+are the only transport. A conveyor is **directional**: it flows along its local
++Z axis, rotated by the placement rotation (the R-key orientation) — the same
+axis the mesh is modeled along. A placed `Conveyor` has a single item slot and,
+on a throttled tick (~4 ops/sec, tunable via the conveyor behavior's
 `TransferInterval` export), it:
 
-1. **PULLs** — if its slot is empty, it takes one item from an adjacent
-   machine's **output** buffer.
-2. **PUSH**es — if its slot has an item, it moves it into an adjacent machine's
-   **input** buffer.
+1. **PULLs** — if its slot is empty, it takes one item from the machine on its
+   **back face** (the neighbor at `-flow`). This is how an item enters the belt
+   and how items chain along a run of conveyors.
+2. **PUSH**es — if its slot has an item, it moves it into the machine on its
+   **front face** (the neighbor at `+flow`) — a processor's input or the next
+   conveyor's slot. When the front face is empty or full, the item stays (the
+   belt stalls).
 
-"Adjacent" is any of the six face-neighbors (±X, ±Y, ±Z), so items enter and
-leave a machine from **any side**. A conveyor prefers to push into a **processor**
-(a machine with a real input buffer, e.g. a crafter) over another conveyor, so
-items flow toward machines; it falls back to a free neighbor conveyor slot to
-chain along a belt.
+Because items only ever flow front-to-back (never sideways or backward), there
+is **no ping-pong**: a straight run feeds the machine at its end, and a ring of
+conveyors carries items around the loop in one direction. Orient each belt by
+rotating it (R key) before placing so its front face points where you want items
+to go.
 
-A **Crafter** is the first real processor: it gathers recipe ingredients from
-adjacent conveyors into its input buffer, runs the recipe it is set to (over the
-recipe's craft time), and puts the product in its output buffer — which adjacent
-conveyors then pull. A crafter **consumes power** (its definition's
+A **Smelter** is the factory's heat-based processor: it smelts raw ores into
+their refined form. Its recipes are **data-driven** — the `MachineDefinition`'s
+`SmeltInputs` / `SmeltOutputs` arrays (paired by index, e.g. Coal Ore→Coal,
+Iron Ore→Iron Plate) define what it can smelt. The player picks the active
+recipe via the machine UI (right-click → dropdown). The smelter pulls the
+selected recipe's input from a conveyor on its back, smelts one unit over its
+`ProcessTime`, and puts `OutputCount` of the product into its output buffer —
+which adjacent conveyors pull. A smelter **consumes power** (its definition's
 `PowerConsumption`); with no power it idles but **keeps its buffers** (no items
-lost).
+lost). A freshly-added smelter is seeded with the default ore→ingot recipes
+(Coal Ore→Coal, Iron Ore→Iron Plate).
+
+A **Crafter** is the other processor: it gathers recipe ingredients from
+conveyors into its input buffer, runs the recipe it is set to (over the recipe's
+craft time), and puts the product in its output buffer — which adjacent conveyors
+then pull. A crafter **consumes power** (its definition's `PowerConsumption`);
+with no power it idles but **keeps its buffers** (no items lost).
 
 ### Machine UI (right-click a machine)
 
 **Right-click** a targeted machine to open its UI (the top-right target HUD also
 shows the machine's name + a short status). The panel shows:
 
-- The machine's name and a status line (power state / output / craft progress).
+- The machine's name and a status line (power state / output / progress).
 - For a **crafter**: a recipe picker (a dropdown of every recipe in the shared
   crafting database) and a live craft-progress bar. Picking a recipe sets what
   the crafter produces; "(No recipe — idle)" stops it.
+- For a **smelter**: a recipe picker (a dropdown of the definition's smeltable
+  recipes, shown as `Smelt <input> → <output>`) and a live smelt-progress bar.
+  Picking a recipe sets what the smelter smelts; "(No recipe — idle)" stops it.
+  A newly-spawned smelter defaults to its first recipe so it works out of the box.
 - The machine's **input** and **output** buffer slots. **Left-click** a slot to
   move one item between it and your selected hotbar slot; **right-click** to move
   a whole stack (direction is decided by which side has the item).

@@ -25,6 +25,7 @@ public static class MachineBehaviorRegistry
 	// types not listed (static machines).
 	private static readonly Dictionary<MachineType, Func<Machine>> _behaviors = new()
 	{
+		{ MachineType.Smelter,     () => new SmelterMachine() },
 		{ MachineType.Conveyor,    () => new ConveyorMachine() },
 		{ MachineType.Crafter,     () => new CrafterMachine() },
 		{ MachineType.PowerSource, () => new PowerSourceMachine() },

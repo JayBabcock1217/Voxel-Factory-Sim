@@ -45,6 +45,32 @@ public partial class MachineDefConfig : Resource
 			Name = type.ToString(),
 			ItemId = 0, // default: (int)type
 		};
+		// A smelter needs smeltable recipes to do anything; seed the default
+		// ore→ingot set so a freshly-added Smelter works out of the box (the
+		// user can edit SmeltInputs/SmeltOutputs in the inspector or .tres).
+		// Only materials that have a distinct smelted product are included
+		// (Coal Ore→Coal, Iron Ore→Iron Plate); the user adds the rest (e.g.
+		// Copper Ore→Copper Ingots) once those product ids exist.
+		if (type == MachineType.Smelter)
+		{
+			// (input ore, output product) — see VoxelMaterialIds for the ids.
+			def.SmeltInputs = new[]
+			{
+				FactorySim.Voxel.VoxelMaterialIds.CoalOre, // 13
+				FactorySim.Voxel.VoxelMaterialIds.IronOre, // 14
+			};
+			def.SmeltOutputs = new[]
+			{
+				FactorySim.Voxel.VoxelMaterialIds.Coal,      // 20
+				FactorySim.Voxel.VoxelMaterialIds.IronPlate, // 19
+			};
+			// A smelter consumes power and takes a few seconds per smelt by
+			// default (the user can tune these in the inspector).
+			def.PowerConsumption = 2f;
+			def.ProcessTime = 1.5f;
+			def.OutputCount = 1;
+			def.BufferSize = 4;
+		}
 		AppendMachine(def);
 		return def;
 	}

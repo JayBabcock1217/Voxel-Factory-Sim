@@ -317,7 +317,9 @@ public partial class WorldSave : Node
 
 		// Placed machines (the shared "Machines" container under the root).
 		// Only real (non-preview) machines are persisted; a preview ghost is a
-		// transient placement aid, not a placed object.
+		// transient placement aid, not a placed object. Each machine's full
+		// runtime state (buffers + selected recipe) is captured via
+		// TakeSnapshot so it survives a restart.
 		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
 		if (machinesRoot != null)
 		{
@@ -325,8 +327,10 @@ public partial class WorldSave : Node
 			{
 				if (machinesRoot.GetChild(i) is FactorySim.Machines.Machine m && !m.IsPreview)
 				{
+					var snap = m.TakeSnapshot();
 					data.Machines.Add(new WorldSaveFile.MachineRecord(
-						m.VoxelPos, (int)m.Type, (int)m.PlacementRotation));
+						m.VoxelPos, (int)m.Type, (int)m.PlacementRotation,
+						snap.InputSlots, snap.OutputSlots, snap.RecipeIndex));
 				}
 			}
 		}
@@ -929,6 +933,15 @@ public partial class WorldSave : Node
 			if (machine != null)
 			{
 				spawned++;
+				// Restore the machine's runtime state (buffer contents + selected
+				// recipe) so a smelter/crafter comes back with its work intact.
+				var snap = new FactorySim.Machines.MachineSnapshot
+				{
+					InputSlots = m.InputSlots,
+					OutputSlots = m.OutputSlots,
+					RecipeIndex = m.RecipeIndex,
+				};
+				machine.RestoreSnapshot(snap);
 			}
 		}
 		GD.Print($"[WorldSave] Restored {spawned}/{data.Machines.Count} placed machines.");

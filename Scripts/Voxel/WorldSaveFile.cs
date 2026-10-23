@@ -28,9 +28,15 @@ namespace FactorySim.Voxel;
 /// [4 bytes]  dropCount (u32)
 ///   dropCount × [pos (f32 x3) + materialId (i32) + count (i32)]     (24 bytes each)
 /// [v2+] [4 bytes]  machineCount (u32)
-///   machineCount × [x,y,z (i32 each) + itemId (i32) + rotation (i32)] (20 bytes each)
+///   machineCount × machine-record (see below; v2 = 20 bytes flat, v3+ = variable)
 /// [4 bytes]  trailing checksum (u32, FNV-1a 32-bit over everything above)
 /// </code>
+/// Machine-record layout:
+///   v2:  [x,y,z (i32 each) + itemId (i32) + rotation (i32)]                (20 bytes)
+///   v3+: [x,y,z (i32 each) + itemId (i32) + rotation (i32)]                (20 bytes)
+///         + inputCount (u32) + inputCount × [materialId (i32) + count (i32)]
+///         + outputCount (u32) + outputCount × [materialId (i32) + count (i32)]
+///         + recipeIndex (i32, -1 = no recipe selected)
 ///
 /// Edits are stored as (world voxel, material id) pairs; material id 0 (air)
 /// means the voxel was removed. Only the player's deltas are persisted — the
@@ -60,10 +66,13 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
+	///   v3 — the machine record now also carries the machine's runtime state
+	///        (input/output buffer stacks + selected recipe index), so a smelter's
+	///        or crafter's in-progress contents and recipe survive a restart.
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 2;
+	public const int CurrentVersion = 3;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -74,10 +83,17 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
+
+	/// <summary>
+	/// The first version whose machine record carries runtime state (buffer
+	/// stacks + recipe index). v2 machine records are the flat 20-byte form;
+	/// v3+ records append the state fields after the 20-byte header.
+	/// </summary>
+	private const int VersionWithMachineState = 3;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -110,10 +126,16 @@ public static class WorldSaveFile
 		// v1 -> v2: the only difference is the machine section, which v1 files
 		// do not have. The reader leaves data.Machines empty for v1 (it skips
 		// the section), so there is nothing to re-derive — a v1 world simply had
-		// no saved machines. Return as-is (already in the v2 shape).
+		// no saved machines. Return as-is (already in the current shape).
+		//
+		// v2 -> v3: the reader already normalizes a v2 machine record into the
+		// v3 shape (empty buffer stacks, RecipeIndex = -1), because the v2
+		// layout simply has no state fields. So a v2 save loads as a set of
+		// machines with no saved runtime state — exactly what it was. No
+		// re-derivation needed; return as-is.
 		//
 		// Future version migrations go here, e.g.:
-		//   if (fromVersion == 2) { /* v2 -> v3: add new field, re-derive ... */ }
+		//   if (fromVersion == 3) { /* v3 -> v4: add new field, re-derive ... */ }
 		return data;
 	}
 
@@ -188,8 +210,11 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// One placed machine: its world voxel, the machine item id (a
-	/// <see cref="FactorySim.Machines.MachineType"/> value), and its placement
-	/// rotation (a <see cref="FactorySim.Machines.MachineRotation"/> value).
+	/// <see cref="FactorySim.Machines.MachineType"/> value), its placement
+	/// rotation (a <see cref="FactorySim.Machines.MachineRotation"/> value), and
+	/// (v3+) its runtime state — the input/output buffer stacks and the selected
+	/// recipe index (for smelters/crafters). The state fields are empty/-1 for
+	/// v2 records (migrated as a plain machine with no saved state).
 	/// </summary>
 	public readonly struct MachineRecord
 	{
@@ -202,11 +227,26 @@ public static class WorldSaveFile
 		/// <summary>The placement rotation (its <see cref="FactorySim.Machines.MachineRotation"/>).</summary>
 		public int Rotation { get; }
 
-		public MachineRecord(Vector3I position, int itemId, int rotation)
+		/// <summary>The machine's input buffer stacks (materialId, count), in slot order (v3+; empty for v2).</summary>
+		public List<(int MaterialId, int Count)> InputSlots { get; }
+
+		/// <summary>The machine's output buffer stacks (materialId, count), in slot order (v3+; empty for v2).</summary>
+		public List<(int MaterialId, int Count)> OutputSlots { get; }
+
+		/// <summary>The machine's selected recipe index (-1 = none) (v3+; always -1 for v2).</summary>
+		public int RecipeIndex { get; }
+
+		public MachineRecord(Vector3I position, int itemId, int rotation,
+			List<(int MaterialId, int Count)> inputSlots = null,
+			List<(int MaterialId, int Count)> outputSlots = null,
+			int recipeIndex = -1)
 		{
 			Position = position;
 			ItemId = itemId;
 			Rotation = rotation;
+			InputSlots = inputSlots ?? new List<(int, int)>();
+			OutputSlots = outputSlots ?? new List<(int, int)>();
+			RecipeIndex = recipeIndex;
 		}
 	}
 
@@ -314,8 +354,10 @@ public static class WorldSaveFile
 			w.Write(d.Count);
 		}
 
-		// Placed machines (v2+). v2 writes the section unconditionally (even
-		// when empty), so the reader can tell the layout apart by version.
+		// Placed machines (v2+). The section is written unconditionally (even
+		// when empty) so the reader can tell the layout apart by version. The
+		// per-record layout depends on the version: v2 is the flat 20-byte form;
+		// v3+ appends the machine's runtime state (buffer stacks + recipe index).
 		w.Write(data.Machines.Count);
 		foreach (var m in data.Machines)
 		{
@@ -324,6 +366,24 @@ public static class WorldSaveFile
 			w.Write(m.Position.Z);
 			w.Write(m.ItemId);
 			w.Write(m.Rotation);
+			// v3+ : the machine's runtime state (input/output buffer stacks and
+			// the selected recipe index). Written only when the file is v3+.
+			if (CurrentVersion >= VersionWithMachineState)
+			{
+				w.Write(m.InputSlots.Count);
+				foreach (var (materialId, count) in m.InputSlots)
+				{
+					w.Write(materialId);
+					w.Write(count);
+				}
+				w.Write(m.OutputSlots.Count);
+				foreach (var (materialId, count) in m.OutputSlots)
+				{
+					w.Write(materialId);
+					w.Write(count);
+				}
+				w.Write(m.RecipeIndex);
+			}
 		}
 
 		// Trailing FNV-1a over every byte written above the checksum. Flush the
@@ -458,11 +518,15 @@ public static class WorldSaveFile
 			}
 
 			// Placed machines (v2+). v1 files end right after the drops, so the
-			// machine section is read only for v2-and-later versions.
+			// machine section is read only for v2-and-later versions. The
+			// per-record layout depends on the file's version: v2 is the flat
+			// 20-byte form (no state); v3+ appends the machine's runtime state
+			// (buffer stacks + recipe index).
 			if (version >= VersionWithMachines)
 			{
 				int machineCount = ReadCount(r);
 				data.Machines = new List<MachineRecord>(machineCount);
+				bool withState = version >= VersionWithMachineState;
 				for (int i = 0; i < machineCount; i++)
 				{
 					int x = r.ReadInt32();
@@ -470,7 +534,33 @@ public static class WorldSaveFile
 					int z = r.ReadInt32();
 					int itemId = r.ReadInt32();
 					int rotation = r.ReadInt32();
-					data.Machines.Add(new MachineRecord(new Vector3I(x, y, z), itemId, rotation));
+
+					List<(int, int)> inputSlots = null;
+					List<(int, int)> outputSlots = null;
+					int recipeIndex = -1;
+					if (withState)
+					{
+						int inCount = ReadCount(r);
+						inputSlots = new List<(int, int)>(inCount);
+						for (int s = 0; s < inCount; s++)
+						{
+							int mid = r.ReadInt32();
+							int cnt = r.ReadInt32();
+							inputSlots.Add((mid, cnt));
+						}
+						int outCount = ReadCount(r);
+						outputSlots = new List<(int, int)>(outCount);
+						for (int s = 0; s < outCount; s++)
+						{
+							int mid = r.ReadInt32();
+							int cnt = r.ReadInt32();
+							outputSlots.Add((mid, cnt));
+						}
+						recipeIndex = r.ReadInt32();
+					}
+
+					data.Machines.Add(new MachineRecord(new Vector3I(x, y, z), itemId, rotation,
+						inputSlots, outputSlots, recipeIndex));
 				}
 			}
 

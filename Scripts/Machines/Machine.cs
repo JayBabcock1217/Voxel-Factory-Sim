@@ -1,5 +1,7 @@
 using Godot;
 using System;
+using System.Collections.Generic;
+using FactorySim.Items;
 
 namespace FactorySim.Machines;
 
@@ -715,6 +717,87 @@ public partial class Machine : StaticBody3D
 	protected virtual void ShutdownMachine()
 	{
 		IsRunning = false;
+	}
+
+	/// <summary>
+	/// Captures this machine's runtime state into a <see cref="MachineSnapshot"/>
+	/// for saving. The base captures the input/output buffer contents (as flat
+	/// (materialId, count) pairs) and leaves <see cref="MachineSnapshot.RecipeIndex"/>
+	/// at -1. Processors (smelter/crafter) override to also record their selected
+	/// recipe. Called by the save system (<c>WorldSave.CollectSnapshot</c>) when
+	/// the world is being persisted.
+	/// </summary>
+	public virtual MachineSnapshot TakeSnapshot()
+	{
+		var snap = new MachineSnapshot();
+		snap.InputSlots = CaptureBuffer(InputBuffer);
+		snap.OutputSlots = CaptureBuffer(OutputBuffer);
+		return snap;
+	}
+
+	/// <summary>
+	/// Restores this machine's runtime state from a <see cref="MachineSnapshot"/>
+	/// (the inverse of <see cref="TakeSnapshot"/>). The base restores the
+	/// input/output buffer contents and leaves recipe selection to the processor
+	/// subclass. Called by the save system (<c>WorldSave.ApplyMachines</c>) right
+	/// after the machine is spawned.
+	/// </summary>
+	public virtual void RestoreSnapshot(MachineSnapshot snap)
+	{
+		if (snap == null)
+		{
+			return;
+		}
+		RestoreBuffer(InputBuffer, snap.InputSlots);
+		RestoreBuffer(OutputBuffer, snap.OutputSlots);
+	}
+
+	/// <summary>
+	/// Captures a buffer's stacks into a flat (materialId, count) list (one entry
+	/// per NON-EMPTY slot, in slot order). Null/empty buffers produce an empty list.
+	/// </summary>
+	protected static List<(int MaterialId, int Count)> CaptureBuffer(MachineBuffer buffer)
+	{
+		var list = new List<(int, int)>();
+		if (buffer == null)
+		{
+			return list;
+		}
+		for (int i = 0; i < buffer.Capacity; i++)
+		{
+			var s = buffer[i];
+			if (!s.IsEmpty)
+			{
+				list.Add((s.MaterialId, s.Count));
+			}
+		}
+		return list;
+	}
+
+	/// <summary>
+	/// Restores a buffer's stacks from a flat (materialId, count) list. Clears the
+	/// buffer first, then re-inserts each stack (in order) so the result matches
+	/// the captured state. A null buffer is a no-op (the machine has no such buffer).
+	/// </summary>
+	protected static void RestoreBuffer(MachineBuffer buffer, List<(int MaterialId, int Count)> stacks)
+	{
+		if (buffer == null)
+		{
+			return;
+		}
+		buffer.Clear();
+		if (stacks == null)
+		{
+			return;
+		}
+		foreach (var (materialId, count) in stacks)
+		{
+			if (materialId == 0 || count <= 0)
+			{
+				continue;
+			}
+			buffer.TryInsert(ItemStack.From(materialId, count));
+		}
 	}
 
 	/// <summary>

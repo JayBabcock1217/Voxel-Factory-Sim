@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 
 namespace FactorySim.Machines;
 
@@ -162,6 +163,53 @@ public partial class MachineDefinition : Resource
 	/// </summary>
 	[Export(PropertyHint.File, "*.tscn")] public string MachineSceneOverride { get; set; } = "";
 
+	[ExportGroup("Smelter recipes")]
+	/// <summary>
+	/// The smelter's INPUT material ids (one per recipe), in recipe order. Pairs
+	/// with <see cref="SmeltOutputs"/> by index: recipe <c>i</c> smelts
+	/// <c>SmeltInputs[i]</c> into <c>SmeltOutputs[i]</c>. Only used by
+	/// <see cref="SmelterMachine"/>; ignored by other machine types. A
+	/// freshly-spawned smelter defaults to recipe 0 (the first pair) so it works
+	/// out of the box; the player can pick a different recipe (or clear it) via
+	/// the machine UI.
+	///
+	/// Seed it in the editor with the ore→ingot pairs, e.g.
+	/// [Coal Ore, Iron Ore, Copper Ore, Gold Ore]. The arrays must be the same
+	/// length; any trailing unmatched entries are ignored.
+	/// </summary>
+	[Export] public int[] SmeltInputs { get; set; } = Array.Empty<int>();
+
+	/// <summary>
+	/// The smelter's OUTPUT material ids (one per recipe), in recipe order.
+	/// Pairs with <see cref="SmeltInputs"/> by index (see
+	/// <see cref="SmeltInputs"/> for the convention).
+	/// </summary>
+	[Export] public int[] SmeltOutputs { get; set; } = Array.Empty<int>();
+
+	/// <summary>
+	/// The smelter's available recipes as (input, output) pairs, derived from
+	/// <see cref="SmeltInputs"/> and <see cref="SmeltOutputs"/> (paired by index,
+	/// truncated to the shorter array). An empty list means the smelter has no
+	/// recipes configured (it idles until the user adds some). This is what
+	/// <see cref="SmelterMachine.SmeltableRecipes"/> and the machine UI read.
+	/// </summary>
+	public IReadOnlyList<(int Input, int Output)> SmeltableRecipes
+	{
+		get
+		{
+			var list = new List<(int, int)>(System.Math.Min(SmeltInputs.Length, SmeltOutputs.Length));
+			int n = System.Math.Min(SmeltInputs.Length, SmeltOutputs.Length);
+			for (int i = 0; i < n; i++)
+			{
+				if (SmeltInputs[i] > 0 && SmeltOutputs[i] > 0)
+				{
+					list.Add((SmeltInputs[i], SmeltOutputs[i]));
+				}
+			}
+			return list;
+		}
+	}
+
 	// -- Inspector wiring (mirrors VoxelMaterialDef's event pattern) --------
 	//
 	// Note: the Set* helpers are named to avoid colliding with Resource's own
@@ -187,4 +235,6 @@ public partial class MachineDefinition : Resource
 	public void SetHealth(int value) { if (Health != value) { Health = value; Raise(); } }
 	public void SetPowerOutput(float value) { if (PowerOutput != value) { PowerOutput = value; Raise(); } }
 	public void SetMachineSceneOverride(string value) { if (MachineSceneOverride != value) { MachineSceneOverride = value ?? ""; Raise(); } }
+	public void SetSmeltInputs(int[] value) { if (!ReferenceEquals(SmeltInputs, value)) { SmeltInputs = value ?? Array.Empty<int>(); Raise(); } }
+	public void SetSmeltOutputs(int[] value) { if (!ReferenceEquals(SmeltOutputs, value)) { SmeltOutputs = value ?? Array.Empty<int>(); Raise(); } }
 }

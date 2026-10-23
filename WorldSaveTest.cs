@@ -85,11 +85,18 @@ public partial class WorldSaveTest : Node
 		data.Inventory.Add((VoxelMaterialIds.Air, 0)); // empty slot
 		data.Drops.Add(new WorldSaveFile.DropRecord(new Vector3(5f, 131f, 6f), VoxelMaterialIds.Dirt, 12));
 		data.Drops.Add(new WorldSaveFile.DropRecord(new Vector3(-2f, 129f, 20f), VoxelMaterialIds.Grass, 1));
-		// Placed machines (v2 section): a conveyor and a power source with
-		// distinct voxels / item ids / rotations.
-		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 5), 204, 0)); // Conveyor, Identity
+		// Placed machines (v2 section header; v3+ records carry runtime state).
+		// A smelter with buffer contents + a selected recipe, a power source, and
+		// a crafter — distinct voxels / item ids / rotations / state.
+		var smelterInput = new List<(int, int)> { (VoxelMaterialIds.CoalOre, 12), (VoxelMaterialIds.IronOre, 3) };
+		var smelterOutput = new List<(int, int)> { (VoxelMaterialIds.Coal, 5) };
+		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 5), 200, 0, // Smelter, Identity
+			smelterInput, smelterOutput, recipeIndex: 1));
 		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(9, 132, 5), 205, 4)); // PowerSource, Y90
-		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 6), 201, 7)); // Crafter, Z270
+		data.Machines.Add(new WorldSaveFile.MachineRecord(new Vector3I(4, 132, 6), 201, 7, // Crafter, Z270
+			inputSlots: new List<(int, int)> { (VoxelMaterialIds.IronOre, 8) },
+			outputSlots: new List<(int, int)>(),
+			recipeIndex: 2));
 
 		WorldSaveFile.Write(_tempPath, data);
 		var back = WorldSaveFile.Read(_tempPath);
@@ -145,18 +152,40 @@ public partial class WorldSaveTest : Node
 			back.Drops[1].MaterialId == VoxelMaterialIds.Grass && back.Drops[1].Count == 1);
 
 		Check("roundtrip: machine count matches", back.Machines.Count == data.Machines.Count);
-		Check("roundtrip: machine[0] voxel+itemId+rotation",
+		Check("roundtrip: machine[0] (smelter, Identity) voxel+itemId+rotation",
 			back.Machines[0].Position == data.Machines[0].Position
-			&& back.Machines[0].ItemId == 204
+			&& back.Machines[0].ItemId == 200
 			&& back.Machines[0].Rotation == 0);
+		// The smelter's runtime state (v3+): buffer stacks + selected recipe.
+		Check("roundtrip: smelter input slot count matches", back.Machines[0].InputSlots.Count == 2);
+		Check("roundtrip: smelter input[0] (coal ore x12)",
+			back.Machines[0].InputSlots[0].MaterialId == VoxelMaterialIds.CoalOre
+			&& back.Machines[0].InputSlots[0].Count == 12);
+		Check("roundtrip: smelter input[1] (iron ore x3)",
+			back.Machines[0].InputSlots[1].MaterialId == VoxelMaterialIds.IronOre
+			&& back.Machines[0].InputSlots[1].Count == 3);
+		Check("roundtrip: smelter output slot count matches", back.Machines[0].OutputSlots.Count == 1);
+		Check("roundtrip: smelter output[0] (coal x5)",
+			back.Machines[0].OutputSlots[0].MaterialId == VoxelMaterialIds.Coal
+			&& back.Machines[0].OutputSlots[0].Count == 5);
+		Check("roundtrip: smelter recipe index matches", back.Machines[0].RecipeIndex == 1);
 		Check("roundtrip: machine[1] (power source, Y90) voxel+itemId+rotation",
 			back.Machines[1].Position == data.Machines[1].Position
 			&& back.Machines[1].ItemId == 205
 			&& back.Machines[1].Rotation == 4);
+		Check("roundtrip: power source has no saved state (empty buffers, no recipe)",
+			back.Machines[1].InputSlots.Count == 0
+			&& back.Machines[1].OutputSlots.Count == 0
+			&& back.Machines[1].RecipeIndex == -1);
 		Check("roundtrip: machine[2] (crafter, Z270) voxel+itemId+rotation",
 			back.Machines[2].Position == data.Machines[2].Position
 			&& back.Machines[2].ItemId == 201
 			&& back.Machines[2].Rotation == 7);
+		Check("roundtrip: crafter input slot count matches", back.Machines[2].InputSlots.Count == 1);
+		Check("roundtrip: crafter input[0] (iron ore x8)",
+			back.Machines[2].InputSlots[0].MaterialId == VoxelMaterialIds.IronOre
+			&& back.Machines[2].InputSlots[0].Count == 8);
+		Check("roundtrip: crafter recipe index matches", back.Machines[2].RecipeIndex == 2);
 
 		// Checksum: the computed FNV-1a of the on-disk section bytes must equal
 		// the stored trailing checksum (Read validates this internally, but we
@@ -237,9 +266,11 @@ public partial class WorldSaveTest : Node
 			&& migrated.Edits.Count == 1
 			&& migrated.Edits[0].MaterialId == VoxelMaterialIds.Stone);
 
-		// v1 is still a supported version (old saves keep loading).
+		// v1 and v2 are still supported versions (old saves keep loading).
 		Check("versioning: v1 is still supported (backward compat)",
 			WorldSaveFile.IsSupportedVersion(1));
+		Check("versioning: v2 is still supported (backward compat)",
+			WorldSaveFile.IsSupportedVersion(2));
 
 		// A hand-built v1 file (no machine section) reads back with an empty
 		// machine list: the reader skips the machine section for v1 bodies.
