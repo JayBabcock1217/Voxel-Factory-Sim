@@ -60,6 +60,14 @@ public static class MeshBuilder
 			uvs[i] = new List<Vector2>();
 		}
 
+		// Blended faces (a voxel face whose outward neighbour is a DIFFERENT
+		// solid material) are crossfaded per-pixel by a blend shader instead of
+		// snapping to one material. Buckets are keyed by the blend
+		// ShaderMaterial, so each distinct material pair gets one surface. The
+		// per-vertex albedo tint (COLOR) is the face's own material; UV2.x is
+		// the constant 0.5 equal-blend (see AddBlendedFace).
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<Color> color)>();
+
 		ForEachExposedFace(chunk, wx0, wz0, solidQuery, (wx, y, wz, m, face) =>
 		{
 			// Skip faces whose material id has no palette slot (out-of-range
@@ -69,7 +77,28 @@ public static class MeshBuilder
 				return;
 			}
 			Vector3 origin = new Vector3(wx, y, wz) * voxelSize;
-			AddFace(positions[m - 1], normals[m - 1], uvs[m - 1], origin, face, voxelSize, palette.TextureScales[m - 1]);
+
+			// Is this face at a MATERIAL interface? The outward neighbour (in the
+			// face's direction) is a different, solid, configured material. Only
+			// those faces need a crossfade; every other face keeps the cheap
+			// single-material StandardMaterial path.
+			Vector3I o = FaceOffsets[face];
+			byte neighbor = GetNeighborVoxel(chunk, wx0, wz0, o, wx, y, wz);
+			if (neighbor != 0 && neighbor != m && neighbor >= 1 && neighbor <= lastMaterial)
+			{
+				ShaderMaterial bm = palette.GetBlendShaderMaterial(m, neighbor);
+				if (!blended.TryGetValue(bm, out var bucket))
+				{
+					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<Color>());
+					blended[bm] = bucket;
+				}
+				AddBlendedFace(bucket, origin, face, voxelSize, palette.Materials[m - 1].AlbedoColor, palette.TextureScales[m - 1]);
+			}
+			else
+			{
+				AddFace(positions[m - 1], normals[m - 1], uvs[m - 1], origin, face, voxelSize, palette.TextureScales[m - 1]);
+			}
+
 			// Collision is the exact visual surface: emit the same quad.
 			if (collisionOut != null)
 			{
@@ -98,6 +127,30 @@ public static class MeshBuilder
 				tool.AddVertex(positions[m - 1][i]);
 			}
 
+			tool.Commit(mesh);
+		}
+
+		// Emit one surface per blended material pair — the faces that crossfade
+		// between two materials. Each vertex carries its own material's albedo
+		// (COLOR) and the constant 0.5 blend factor (UV2).
+		foreach (var entry in blended)
+		{
+			var b = entry.Value;
+			if (b.pos.Count == 0)
+			{
+				continue;
+			}
+			var tool = new SurfaceTool();
+			tool.Begin(Mesh.PrimitiveType.Triangles);
+			tool.SetMaterial(entry.Key);
+			for (int i = 0; i < b.pos.Count; i++)
+			{
+				tool.SetNormal(b.norm[i]);
+				tool.SetUV(b.uv[i]);
+				tool.SetUV2(b.uv2[i]);
+				tool.SetColor(b.color[i]);
+				tool.AddVertex(b.pos[i]);
+			}
 			tool.Commit(mesh);
 		}
 
@@ -230,10 +283,12 @@ public static class MeshBuilder
 		}
 
 		// Mixed-material triangles (straddling a material boundary) are emitted
-		// with a 50/50 blended material instead of snapping to the majority.
-		// Buckets are keyed by the blended StandardMaterial3D itself, so each
+		// with a blend SHADER instead of snapping to the majority: a per-pixel
+		// crossfade between the two materials' textures, tinted per-vertex by
+		// each vertex's own material albedo (COLOR) and a constant 0.5 blend
+		// factor (UV2.x). Buckets are keyed by the blend ShaderMaterial, so each
 		// distinct material pair gets exactly one surface.
-		var blended = new Dictionary<StandardMaterial3D, (List<Vector3> verts, List<Vector2> uvs)>();
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Color> colors)>();
 
 		foreach (var tri in tris)
 		{
@@ -286,7 +341,7 @@ public static class MeshBuilder
 			}
 
 			int m; // resolved single material (1 distinct, or 3-distinct fallback)
-			StandardMaterial3D blendMat = null; // non-null only for the 2-distinct case
+			ShaderMaterial blendMat = null; // non-null only for the 2-distinct case
 			float uvScale;
 
 			if (distinct == 2)
@@ -322,7 +377,7 @@ public static class MeshBuilder
 					continue;
 				}
 
-				blendMat = palette.GetBlendMaterial(idA, idB);
+				blendMat = palette.GetBlendShaderMaterial(idA, idB);
 				uvScale = palette.TextureScales[m - 1]; // dominant material's tiling
 			}
 			else
@@ -340,32 +395,40 @@ public static class MeshBuilder
 				uvScale = palette.TextureScales[m - 1];
 			}
 
-			List<Vector3> verts;
-			List<Vector2> uvs;
 			if (blendMat != null)
 			{
+				// Mixed-material triangle: emit each vertex with its own
+				// material's albedo (COLOR), the shared face normal, a planar UV,
+				// and the constant 0.5 equal-blend factor (UV2.x). The shader
+				// crossfades the two textures per-pixel by that factor.
 				if (!blended.TryGetValue(blendMat, out var bucket))
 				{
-					bucket = (new List<Vector3>(), new List<Vector2>());
+					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Color>());
 					blended[blendMat] = bucket;
 				}
-				verts = bucket.verts;
-				uvs = bucket.uvs;
+				var bverts = bucket.verts;
+				var bnorms = bucket.norms;
+				var buvs = bucket.uvs;
+				var bcolors = bucket.colors;
+				Vector2 blendHalf = new Vector2(0.5f, 0f);
+				bverts.Add(pa); bnorms.Add(n); buvs.Add(PlanarUv(pa, n, uvScale)); bcolors.Add(palette.Materials[ma - 1].AlbedoColor);
+				bverts.Add(pb); bnorms.Add(n); buvs.Add(PlanarUv(pb, n, uvScale)); bcolors.Add(palette.Materials[mb - 1].AlbedoColor);
+				bverts.Add(pc); bnorms.Add(n); buvs.Add(PlanarUv(pc, n, uvScale)); bcolors.Add(palette.Materials[mc - 1].AlbedoColor);
 			}
 			else
 			{
-				verts = perMaterial[m - 1];
-				uvs = perUv[m - 1];
+				var verts = perMaterial[m - 1];
+				var uvs = perUv[m - 1];
+				verts.Add(pa);
+				verts.Add(n);
+				uvs.Add(PlanarUv(pa, n, uvScale));
+				verts.Add(pb);
+				verts.Add(n);
+				uvs.Add(PlanarUv(pb, n, uvScale));
+				verts.Add(pc);
+				verts.Add(n);
+				uvs.Add(PlanarUv(pc, n, uvScale));
 			}
-			verts.Add(pa);
-			verts.Add(n);
-			uvs.Add(PlanarUv(pa, n, uvScale));
-			verts.Add(pb);
-			verts.Add(n);
-			uvs.Add(PlanarUv(pb, n, uvScale));
-			verts.Add(pc);
-			verts.Add(n);
-			uvs.Add(PlanarUv(pc, n, uvScale));
 
 			if (collisionOut != null)
 			{
@@ -398,26 +461,32 @@ public static class MeshBuilder
 			tool.Commit(mesh);
 		}
 
-		// Also emit one surface per blended (50/50) material — the mixed-
-		// material boundary triangles. Same [pos, normal] pair layout as the
-		// per-material buckets above.
+		// Also emit one surface per blended material pair — the mixed-material
+		// boundary triangles. Each vertex carries its own material's albedo
+		// (COLOR) and the constant 0.5 blend factor (UV2), which the shader
+		// crossfades per-pixel between the two textures.
 		foreach (var entry in blended)
 		{
-			var verts = entry.Value.verts;
-			if (verts.Count == 0)
+			var bverts = entry.Value.verts;
+			if (bverts.Count == 0)
 			{
 				continue;
 			}
 
-			var uvs = entry.Value.uvs;
+			var bnorms = entry.Value.norms;
+			var buvs = entry.Value.uvs;
+			var bcolors = entry.Value.colors;
 			var tool = new SurfaceTool();
 			tool.Begin(Mesh.PrimitiveType.Triangles);
 			tool.SetMaterial(entry.Key);
-			for (int i = 0; i + 1 < verts.Count; i += 2)
+			Vector2 blendHalf = new Vector2(0.5f, 0f);
+			for (int i = 0; i < bverts.Count; i++)
 			{
-				tool.SetNormal(verts[i + 1]);
-				tool.SetUV(uvs[i / 2]);
-				tool.AddVertex(verts[i]);
+				tool.SetNormal(bnorms[i]);
+				tool.SetUV(buvs[i]);
+				tool.SetUV2(blendHalf);
+				tool.SetColor(bcolors[i]);
+				tool.AddVertex(bverts[i]);
 			}
 			tool.Commit(mesh);
 		}
@@ -697,6 +766,72 @@ public static class MeshBuilder
 		}
 
 		return uv * scale;
+	}
+
+	/// <summary>
+	/// Reads the material id of the voxel one step from (wx, y, wz) in the
+	/// direction <paramref name="offset"/>. Out-of-chunk coordinates return air
+	/// (0) — the chunk's boundary shell, matching the "unloaded neighbour is
+	/// solid" rule only where the mesher actually samples; here a missing voxel
+	/// simply means "no different-material neighbour" (no blend).
+	/// </summary>
+	private static byte GetNeighborVoxel(ChunkData chunk, int wx0, int wz0, Vector3I o, int wx, int y, int wz)
+	{
+		int lx = wx - wx0 + o.X;
+		int ly = y + o.Y;
+		int lz = wz - wz0 + o.Z;
+		if (lx < 0 || lx >= chunk.SizeX || ly < 0 || ly >= chunk.SizeY || lz < 0 || lz >= chunk.SizeZ)
+		{
+			return 0;
+		}
+		return chunk.Get(lx, ly, lz);
+	}
+
+	// Emits one flat-shaded quad (6 vertices) for a face of a unit cube that
+	// borders a DIFFERENT solid material. Every vertex carries the face's own
+	// material albedo (COLOR), a planar UV, and the constant 0.5 equal-blend
+	// factor (UV2.x); the blend shader crossfades the two materials' textures
+	// per-pixel by that factor. The outward face normal is stored for lighting.
+	private static void AddBlendedFace(
+		(List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<Color> color) bucket,
+		Vector3 origin, int face, float voxelSize, Color albedo, float uvScale)
+	{
+		Vector3[] c = FaceCorners[face];
+		Vector3 n = FaceNormals[face];
+
+		Vector3 a = origin + c[0] * voxelSize;
+		Vector3 b = origin + c[1] * voxelSize;
+		Vector3 d = origin + c[2] * voxelSize;
+		Vector3 e = origin + c[3] * voxelSize;
+
+		Vector2 blend = new Vector2(0.5f, 0f);
+
+		bucket.pos.Add(a);
+		bucket.pos.Add(b);
+		bucket.pos.Add(d);
+		bucket.pos.Add(a);
+		bucket.pos.Add(d);
+		bucket.pos.Add(e);
+
+		for (int i = 0; i < 6; i++)
+		{
+			bucket.norm.Add(n);
+		}
+
+		// Same UV table as AddFace: one full texture tile per voxel face,
+		// tiled uvScale times.
+		bucket.uv.Add(QuadUv[0] * uvScale);
+		bucket.uv.Add(QuadUv[1] * uvScale);
+		bucket.uv.Add(QuadUv[2] * uvScale);
+		bucket.uv.Add(QuadUv[0] * uvScale);
+		bucket.uv.Add(QuadUv[2] * uvScale);
+		bucket.uv.Add(QuadUv[3] * uvScale);
+
+		for (int i = 0; i < 6; i++)
+		{
+			bucket.uv2.Add(blend);
+			bucket.color.Add(albedo);
+		}
 	}
 
 	// Emits the same quad as a bare triangle soup for the collision shape

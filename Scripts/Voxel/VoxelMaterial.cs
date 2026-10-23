@@ -130,14 +130,22 @@ public sealed class VoxelMaterialPalette
 		=> id > 0 && id < Textures.Length ? Textures[id - 1] : null;
 
 	/// <summary>
-	/// A StandardMaterial3D that blends the two given materials EQUALLY (50/50).
-	/// Cached per (idA, idB) pair so a chunk build allocates at most one material per
-	/// distinct pair. The blended material copies both materials' shading/specular/
-	/// transparency settings and averages their AlbedoColor; if BOTH have a texture it
-	/// uses material A's texture (a true per-pixel crossfade would need a shader —
-	/// out of scope), otherwise it falls back to the flat averaged color.
+	/// The shared blend shader (one <see cref="Shader"/> instance per palette)
+	/// whose two samplers crossfade two material textures per-pixel. The
+	/// per-vertex albedo tint (COLOR) and blend factor (UV2.x) are supplied by
+	/// the mesh builder, so a single shader serves every material pair.
 	/// </summary>
-	public StandardMaterial3D GetBlendMaterial(int idA, int idB)
+	private Shader _blendShader;
+
+	/// <summary>
+	/// A <see cref="ShaderMaterial"/> that crossfades the two given materials'
+	/// textures per-pixel. Cached per unordered (idA, idB) pair so a chunk build
+	/// allocates at most one material per distinct pair. The shader samples both
+	/// materials' albedo textures (a 1×1 white fallback when a material has none)
+	/// and mixes them by the per-vertex blend factor (UV2.x); the per-vertex
+	/// albedo tint (COLOR) is applied per-material by the mesh builder.
+	/// </summary>
+	public ShaderMaterial GetBlendShaderMaterial(int idA, int idB)
 	{
 		if (idA > idB)
 		{
@@ -146,43 +154,69 @@ public sealed class VoxelMaterialPalette
 			idB = t;
 		}
 		int key = idA * 256 + idB;
-		if (_blendCache.TryGetValue(key, out var cached))
+		if (_blendShaderCache.TryGetValue(key, out var cached))
 		{
 			return cached;
 		}
 
 		var matA = Materials[idA - 1];
 		var matB = Materials[idB - 1];
-		var mat = new StandardMaterial3D
+
+		if (_blendShader == null)
 		{
-			ShadingMode = matA.ShadingMode,
-			Transparency = matA.Transparency,
-			SpecularMode = matA.SpecularMode,
-			Metallic = (matA.Metallic + matB.Metallic) * 0.5f,
-			Roughness = (matA.Roughness + matB.Roughness) * 0.5f,
-			EmissionEnabled = matA.EmissionEnabled,
-			Emission = matA.Emission,
-			EmissionEnergyMultiplier = matA.EmissionEnergyMultiplier,
-			MetallicSpecular = (matA.MetallicSpecular + matB.MetallicSpecular) * 0.5f,
-			AlbedoColor = (matA.AlbedoColor + matB.AlbedoColor) * 0.5f,
-		};
-		// Use a texture only when BOTH materials have one (a 50/50 texture crossfade
-		// needs a shader); otherwise the flat averaged color is the honest blend.
-		if (matA.AlbedoTexture != null && matB.AlbedoTexture != null)
-		{
-			mat.AlbedoTexture = matA.AlbedoTexture;
-			mat.TextureRepeat = true;
+			_blendShader = new Shader { Code = BlendShaderCode };
 		}
-		_blendCache[key] = mat;
-		return mat;
+
+		var sm = new ShaderMaterial();
+		sm.SetShader(_blendShader);
+		sm.SetShaderParameter(new StringName("TextureA"), matA.AlbedoTexture ?? FallbackTexture);
+		sm.SetShaderParameter(new StringName("TextureB"), matB.AlbedoTexture ?? FallbackTexture);
+		_blendShaderCache[key] = sm;
+		return sm;
 	}
+
+	/// <summary>
+	/// The spatial-shader source backing <see cref="GetBlendShaderMaterial"/>.
+	/// Kept verbatim in C# (and mirrored in MaterialBlendShader.gdshader) so the
+	/// blend works without a compiled shader resource.
+	/// </summary>
+	private const string BlendShaderCode = @"shader_type spatial;
+
+uniform sampler2D TextureA : filter_linear_mip_mipmap;
+uniform sampler2D TextureB : filter_linear_mip_mipmap;
+
+varying vec2 blendVarying;
+
+void vertex() {
+	// UV2.x carries the per-vertex blend factor (0 = pure A, 1 = pure B).
+	blendVarying = UV2;
+}
+
+void fragment() {
+	vec4 ta = texture(TextureA, UV);
+	vec4 tb = texture(TextureB, UV);
+	float f = clamp(blendVarying.x, 0.0, 1.0);
+	vec3 blended = mix(ta.rgb, tb.rgb, f);
+	ALBEDO = blended * COLOR.rgb;
+	ROUGHNESS = 0.9;
+	METALLIC = 0.0;
+}
+";
+
+	/// <summary>
+	/// A 1×1 white texture used as the sampler fallback for a material that has
+	/// no albedo texture, so the blend shader always samples something.
+	/// </summary>
+	private static Texture2D FallbackTexture { get; } = ImageTexture.CreateFromImage(
+		Image.CreateEmpty(1, 1, false, Image.Format.Rgb8));
 
 	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
 	public int MaterialCount { get; private set; }
 
-	// Blended 50/50 materials cached per (idA, idB) pair by GetBlendMaterial.
-	// Cleared in Resize(), where the Materials array is rebuilt.
-	private readonly System.Collections.Generic.Dictionary<int, StandardMaterial3D> _blendCache = new();
+	// Blended shader materials cached per (idA, idB) pair by
+	// GetBlendShaderMaterial. Cleared in Resize(), where the Materials array
+	// is rebuilt (cached materials would then reference stale textures).
+	private readonly System.Collections.Generic.Dictionary<int, ShaderMaterial> _blendShaderCache = new();
 
 	public VoxelMaterialPalette()
 	{
@@ -230,9 +264,9 @@ public sealed class VoxelMaterialPalette
 			count = 0;
 		}
 
-		// The Materials array is rebuilt below, so any cached blended materials
-		// would reference stale instances.
-		_blendCache.Clear();
+		// The Materials array is rebuilt below, so any cached blended shader
+		// materials would reference stale textures.
+		_blendShaderCache.Clear();
 
 		var old = Materials;
 		var oldScales = TextureScales;
