@@ -282,6 +282,15 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public VoxelMaterialConfig MaterialConfig { get; set; } = new();
 
+	/// <summary>
+	/// The .tres the <see cref="MaterialConfig"/> is serialized to/from. Edit the
+	/// materials in the inspector (or call <see cref="SaveMaterialConfig"/>) to
+	/// (re)write this file, then re-run: the scene loads your values instead of
+	/// the code defaults. This is what makes material/texture edits persist.
+	/// </summary>
+	[Export]
+	public string MaterialConfigPath { get; set; } = "res://Resources/MaterialConfig.tres";
+
 	[ExportGroup("Machines")]
 	/// <summary>
 	/// The registry of machine definitions for this world — the factory design
@@ -508,6 +517,18 @@ public partial class VoxelWorld : Node3D
 			SaveBiomeConfig();
 		}
 
+		// A "New World" session or a directly-run scene may still be on the in-memory
+		// default MaterialConfig (no textures). Seed MaterialConfigPath with it so the
+		// next run loads a real file the user can edit (textures, colors, ...). Only
+		// seed when the export is the empty in-memory default (Materials has no entries)
+		// — the SAME rule as BiomeConfig above. If the export already points at a saved
+		// .tres (the user's edits, possibly with textures), it is NOT touched: re-writing
+		// it from the in-memory default here would silently wipe the user's textures.
+		if (MaterialConfig != null && (MaterialConfig.Materials == null || MaterialConfig.Materials.Length == 0))
+		{
+			SaveMaterialConfig();
+		}
+
 		// A "New World" session carries a user-chosen seed (published by the
 		// main menu's slot picker and read by this scene's WorldSave node in its
 		// own _Ready, which runs first — WorldSave is an earlier sibling).
@@ -714,6 +735,19 @@ public partial class VoxelWorld : Node3D
 	public void SaveBiomeConfig()
 	{
 		BiomeConfig?.SaveTo(BiomeConfigPath);
+	}
+
+	/// <summary>
+	/// Writes the current <see cref="MaterialConfig"/> to <see cref="MaterialConfigPath"/>
+	/// (creating the folder if needed). Call this after editing the materials in the
+	/// inspector so the values PERSIST: the next scene run (and <c>Load</c> on
+	/// demand) reads the saved file instead of the code defaults. Also invoked
+	/// automatically at startup so a fresh project seeds a usable file on first
+	/// run (the in-memory default has no textures).
+	/// </summary>
+	public void SaveMaterialConfig()
+	{
+		MaterialConfig?.SaveTo(MaterialConfigPath);
 	}
 
 	public void SetOreConfig(OreConfig value)

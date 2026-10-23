@@ -11,6 +11,7 @@
 [ext_resource type="Script" uid="uid://bbv1r43h3vyi3" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
 [ext_resource type="Script" uid="uid://deaijk5gbbwkh" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
 [ext_resource type="Script" uid="uid://wbdkby8q2ljs" path="res://Scripts/UI/MachineUI.cs" id="10_machineui"]
+[ext_resource type="Resource" path="res://Resources/MaterialConfig.tres" id="11_materialconfig"]
 
 [sub_resource type="ProceduralSkyMaterial" id="SkyMaterial_world"]
 sky_top_color = Color(0.25, 0.45, 0.75, 1)
@@ -52,6 +53,7 @@ CavePersistence = 1.0
 CaveThreshold = 0.12
 CaveCeiling = 0
 BiomeConfig = ExtResource("3_biomeconfig")
+MaterialConfig = ExtResource("11_materialconfig")
 BiomeNoiseFrequency = 0.001
 FoliageDensity = 0.1
 EnableRocks = false

@@ -75,6 +75,45 @@ public partial class VoxelMaterialConfig : Resource
 	}
 
 	/// <summary>
+	/// Serializes this config (and its materials) to a .tres file at <paramref
+	/// name="path"/>. Because the <see cref="Materials"/> array and each
+	/// <see cref="VoxelMaterialDef"/> / <see cref="VoxelMaterialEntry"/> are
+	/// <c>[Export]</c>, ResourceSaver writes them as sub-resources — so a saved
+	/// file fully captures every per-material field (color, texture,
+	/// transparency, ...). This is how editor edits PERSIST: the VoxelWorld's
+	/// MaterialConfig export points at the saved file, so re-running the scene
+	/// loads the user's values instead of the code defaults. Call this (from the
+	/// editor, or once at runtime) to (re)write the file after editing the
+	/// materials in the inspector.
+	/// </summary>
+	/// <returns>True on success; false if the file could not be written.</returns>
+	public bool SaveTo(string path)
+	{
+		if (path == null)
+		{
+			return false;
+		}
+		// Make sure the parent directory exists (e.g. res://Resources/).
+		int lastSlash = path.LastIndexOf('/');
+		if (lastSlash > 0)
+		{
+			string dir = path.Substring(0, lastSlash);
+			if (!DirAccess.DirExistsAbsolute(dir))
+			{
+				DirAccess.MakeDirRecursiveAbsolute(dir);
+			}
+		}
+		Error err = ResourceSaver.Save(this, path);
+		if (err != Error.Ok)
+		{
+			GD.PushError($"[VoxelMaterialConfig] Failed to save to {path}: {err}");
+			return false;
+		}
+		GD.Print($"[VoxelMaterialConfig] Saved {Materials?.Length ?? 0} material(s) to {path}");
+		return true;
+	}
+
+	/// <summary>
 	/// The optional description text for a material id (empty when the material
 	/// has none or the id is unknown). Used by item / recipe tooltips.
 	/// </summary>
