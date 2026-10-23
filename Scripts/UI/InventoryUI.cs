@@ -38,6 +38,10 @@ public partial class InventoryUI : CanvasLayer
 
 	private Control _root;
 	private Panel _panel;
+	// Horizontal layout for the three main sections: [dev pane | slot grid |
+	// craft pane]. The container positions and sizes them automatically so they
+	// never overlap, regardless of the inventory's row/column counts.
+	private HBoxContainer _hbox;
 	private readonly Control[] _slotControls = new Control[Inventory.TotalSlots];
 	private readonly TextureRect[] _slotIcons = new TextureRect[Inventory.TotalSlots];
 	private readonly Label[] _slotCounts = new Label[Inventory.TotalSlots];
@@ -405,15 +409,27 @@ public partial class InventoryUI : CanvasLayer
 		AddChild(_root);
 		_root.GuiInput += OnRootGuiInput;
 
-		// Panel width is driven by the widest row (the 24-slot hotbar) PLUS the
-		// dev pane on the left. Layout: [pad | dev pane | gap | slot grid | pad].
-		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
+		// The panel is a fixed-size box centered in the viewport. Inside it, an
+		// HBoxContainer lays out the three sections horizontally:
+		//   [dev pane] [slot grid] [craft pane]
+		// The container owns all horizontal positioning (separation = the gaps),
+		// so the sections can never overlap. Each section is a Panel with an
+		// explicit CustomMinimumSize, so the container sizes it correctly.
+		const float pad = 12f;          // panel padding (StyleBoxFlat content margin)
+		const float gap = 16f;          // HBoxContainer separation between sections
+		const float devW = 240f;        // dev pane width
+		const float craftW = 320f;      // craft pane width
+		float gridW = Math.Max(
+			Inventory.StorageCols, Inventory.HotbarSize) * SlotSize
+			+ (Math.Max(Inventory.StorageCols, Inventory.HotbarSize) - 1) * SlotGap;
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
-		const float devW = 240f;
-		const float devGap = 16f;
-		const float pad = 12f;
-		float panelW = pad + devW + devGap + gridW + pad;
-		float panelH = gridH + 56f;
+		float titleH = 24f;
+		// The dev/craft panes are inset below the title by pad (content margin);
+		// the grid starts at gridY. The section height is measured from the top
+		// of the panel to the bottom of the grid.
+		float sectionH = 36f + gridH;   // gridY(36) + grid height
+		float panelW = pad * 2f + devW + gap + gridW + gap + craftW;
+		float panelH = pad + titleH + pad + gridH + pad; // top pad + title + gap + grid + bottom pad
 		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
 		Vector2 panelPos = new Vector2(
 			Math.Max(0f, (viewportSize.X - panelW) / 2f),
@@ -439,10 +455,10 @@ public partial class InventoryUI : CanvasLayer
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
 			BorderWidthBottom = 1,
-			ContentMarginLeft = 12f,
-			ContentMarginTop = 12f,
-			ContentMarginRight = 12f,
-			ContentMarginBottom = 12f,
+			ContentMarginLeft = pad,
+			ContentMarginTop = pad,
+			ContentMarginRight = pad,
+			ContentMarginBottom = pad,
 		};
 		_panel.AddThemeStyleboxOverride("panel", panelStyle);
 		_root.AddChild(_panel);
@@ -460,25 +476,52 @@ public partial class InventoryUI : CanvasLayer
 		title.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
 		_panel.AddChild(title);
 
+		// The horizontal container that lays out the three sections. It is
+		// explicitly positioned to fill the panel's content area (inset by
+		// `pad` on every side, leaving room for the title at the top), with
+		// `gap` separation between the sections.
+		float hboxY = 36f; // below the title (title is at y 8..28)
+		float hboxH = panelH - hboxY - pad;
+		_hbox = new HBoxContainer
+		{
+			Name = "Sections",
+			LayoutMode = 3, // Position
+			Position = new Vector2(pad, hboxY),
+			Size = new Vector2(panelW - pad * 2f, hboxH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_hbox.AddThemeConstantOverride("separation", (int)gap);
+		_panel.AddChild(_hbox);
+
+		// Slot grid section: a Control that holds the slot cells at their local
+		// (row, col) offsets. It is a child of the HBoxContainer, so the
+		// container positions it between the dev and craft panes.
+		var gridSection = new Control
+		{
+			Name = "GridSection",
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(gridW, gridH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_hbox.AddChild(gridSection);
+
 		// Slot grid: rows 0..5 = storage (12 cols each, slots 10-81),
-		// row 6 = hotbar (10 cols, slots 0-9). The grid is shifted right of the
-		// dev pane: it starts at x = pad + devW + devGap. Storage rows are
-		// centered within the grid's own width (the hotbar row is narrower — 10).
-		float gridX = pad + devW + devGap;
-		float gridY = 36f;
+		// row 6 = hotbar (10 cols, slots 0-9). Both rows are centered within
+		// the section's width (the hotbar row is narrower than the storage).
 		float storageRowW = Inventory.StorageCols * SlotSize + (Inventory.StorageCols - 1) * SlotGap;
-		float storageOffsetX = (gridW - storageRowW) / 2f;
+		float hotbarRowW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
 		for (int row = 0; row < Inventory.StorageRows + 1; row++)
 		{
 			bool isHotbarRow = row == Inventory.StorageRows;
 			int cols = isHotbarRow ? Inventory.HotbarSize : Inventory.StorageCols;
-			float rowX = isHotbarRow ? gridX : gridX + storageOffsetX;
+			float rowW = isHotbarRow ? hotbarRowW : storageRowW;
+			float rowX = (gridW - rowW) / 2f; // center the row in the section
 			for (int col = 0; col < cols; col++)
 			{
 				int slotIndex = isHotbarRow
 					? col
 					: Inventory.HotbarSize + row * Inventory.StorageCols + col;
-				CreateSlot(slotIndex, new Vector2(rowX + col * (SlotSize + SlotGap), gridY + row * (SlotSize + SlotGap)));
+				CreateSlot(slotIndex, new Vector2(rowX + col * (SlotSize + SlotGap), row * (SlotSize + SlotGap)), gridSection);
 			}
 		}
 
@@ -703,35 +746,22 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private void BuildCrafting()
 	{
-		float gridW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		const float craftW = 320f;   // wider crafting pane
-		const float gap = 16f;        // gap between the slot grid and the pane
-		const float pad = 12f;        // panel padding (matches BuildUi)
-		const float devW = 240f;      // dev pane width (must match BuildUi)
-		const float devGap = 16f;     // gap between the dev pane and the grid
+		// The craft pane's height matches the grid section (the HBox aligns all
+		// three sections to the same height). We size it explicitly so the inner
+		// layout math is exact.
+		float paneH = gridH + 12f;   // a little taller than the grid to look balanced
 
-		// Panel width = left pad + dev pane + gap + grid + gap + craft pane + right pad.
-		float panelW = pad + devW + devGap + gridW + gap + craftW + pad;
-		float panelH = Math.Max(gridH, 280f) + 56f;
-
-		// Center the whole panel (dev + inventory + crafting) in the viewport.
-		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
-		_panel.Position = new Vector2(
-			Math.Max(0f, (vpSize.X - panelW) / 2f),
-			Math.Max(0f, (vpSize.Y - panelH) / 2f));
-		_panel.Size = new Vector2(panelW, panelH);
-
-		// The slot grid starts at x = pad + devW + devGap (set in BuildUi); the
-		// craft pane sits to its right after the gap.
-		float craftX = pad + devW + devGap + gridW + gap;
-
+		// The craft pane is a child of the HBoxContainer (added AFTER the grid
+		// section in BuildUi), so the container positions it to the right of the
+		// grid automatically — no absolute x needed.
 		_craftPanel = new Panel
 		{
 			Name = "CraftPanel",
-			LayoutMode = 3, // Position
-			Position = new Vector2(craftX, pad),
-			Size = new Vector2(craftW, panelH - pad * 2f),
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(craftW, paneH),
+			Size = new Vector2(craftW, paneH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		var craftStyle = new StyleBoxFlat
@@ -744,7 +774,7 @@ public partial class InventoryUI : CanvasLayer
 			BorderWidthBottom = 1,
 		};
 		_craftPanel.AddThemeStyleboxOverride("panel", craftStyle);
-		_panel.AddChild(_craftPanel);
+		_hbox.AddChild(_craftPanel);
 
 		// Inner layout of the craft pane (all relative to the pane's top-left):
 		//   title (y 6..26) / tab strip (y 30..54) / scrollable list / queue bar.
@@ -753,7 +783,7 @@ public partial class InventoryUI : CanvasLayer
 		const float tabH = 24f;
 		const float queueH = 34f; // label (16) + gap + bar (6) + padding
 		float innerW = craftW - innerPad * 2f;
-		float paneInnerH = panelH - pad * 2f;
+		float paneInnerH = paneH;
 		float tabsTop = 6f + titleH + 4f;          // 30
 		float listTop = tabsTop + tabH + 4f;       // 58
 		float listH = paneInnerH - listTop - queueH - innerPad;
@@ -866,16 +896,19 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private void BuildDevPanel()
 	{
-		const float pad = 12f;
 		const float devW = 240f;
-		float panelH = _panel != null ? _panel.Size.Y : 300f;
+		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
+		float paneH = gridH + 12f;   // match the craft pane height (see BuildCrafting)
 
+		// The dev pane is a child of the HBoxContainer, added LAST so it ends up
+		// on the LEFT (before the grid section and the craft pane). The HBox
+		// positions it automatically — no absolute x needed.
 		_devPanel = new Panel
 		{
 			Name = "DevPanel",
-			LayoutMode = 3, // Position
-			Position = new Vector2(pad, pad),
-			Size = new Vector2(devW, panelH - pad * 2f),
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(devW, paneH),
+			Size = new Vector2(devW, paneH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		var devStyle = new StyleBoxFlat
@@ -888,14 +921,16 @@ public partial class InventoryUI : CanvasLayer
 			BorderWidthBottom = 1,
 		};
 		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
-		_panel.AddChild(_devPanel);
+		// Add LAST so it sits on the left of the HBox (before grid + craft).
+		_hbox.AddChild(_devPanel);
+		_hbox.MoveChild(_devPanel, 0);
 
 		const float innerPad = 8f;
 		float innerW = devW - innerPad * 2f;
 		const float titleH = 20f;
 		const float hintH = 16f;
 		const float listTop = 6f + titleH + 4f + hintH + 4f;
-		float listH = (panelH - pad * 2f) - listTop - innerPad;
+		float listH = paneH - listTop - innerPad;
 
 		var devTitle = new Label
 		{
@@ -1349,7 +1384,7 @@ public partial class InventoryUI : CanvasLayer
 		_root.AddChild(_recipeTooltip);
 	}
 
-	private void CreateSlot(int slotIndex, Vector2 position)
+	private void CreateSlot(int slotIndex, Vector2 position, Control parent)
 	{
 		var slot = new Control
 		{
@@ -1411,7 +1446,7 @@ public partial class InventoryUI : CanvasLayer
 		slot.AddChild(_slotCounts[slotIndex]);
 
 		_slotControls[slotIndex] = slot;
-		_panel.AddChild(slot);
+		parent.AddChild(slot);
 	}
 
 	// ------------------------------------------------------------------
@@ -2176,8 +2211,12 @@ public partial class InventoryUI : CanvasLayer
 			return -1;
 		}
 
-		// Slots are positioned in the panel's space; the panel is a child of
-		// the root, so subtract the panel's root-space offset.
+		// Slots are positioned in their PARENT's space (the grid section, which
+		// is a child of the HBoxContainer, which is a child of the panel). Walk
+		// up from the slot to the panel, accumulating each ancestor's local
+		// position, to get the slot's top-left in panel space. The panel is a
+		// child of the root, so subtract the panel's root-space offset from the
+		// mouse position to compare in panel space.
 		Vector2 local = position - _panel.Position;
 		for (int i = 0; i < Inventory.TotalSlots; i++)
 		{
@@ -2186,9 +2225,12 @@ public partial class InventoryUI : CanvasLayer
 			{
 				continue;
 			}
-			// Use the slot's position + size directly rather than GetRect()
-			// (which can be affected by layout timing).
-			var rect = new Rect2(slot.Position, slot.Size);
+			Vector2 offset = slot.Position;
+			for (Node n = slot.GetParent(); n != null && n != _panel; n = n.GetParent())
+			{
+				offset += (n as Control)?.Position ?? Vector2.Zero;
+			}
+			var rect = new Rect2(offset, slot.Size);
 			if (rect.HasPoint(local))
 			{
 				return i;
