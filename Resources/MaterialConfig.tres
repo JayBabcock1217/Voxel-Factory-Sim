@@ -1,7 +1,241 @@
-[gd_resource type="Resource" script_class="VoxelMaterialConfig" load_steps=2 format=3]
+[gd_resource type="Resource" script_class="VoxelMaterialConfig" format=3 uid="uid://bnmqi2watluht"]
 
-[ext_resource type="Script" path="res://Scripts/Voxel/VoxelMaterialConfig.cs" id="1_cfg"]
+[ext_resource type="Script" uid="uid://mb6etibithmm" path="res://Scripts/Voxel/VoxelMaterialConfig.cs" id="1_cfg"]
+[ext_resource type="Script" uid="uid://b8hcjeljed3uf" path="res://Scripts/Voxel/VoxelMaterialDef.cs" id="2_def"]
+[ext_resource type="Script" uid="uid://c72oygqcv8vd0" path="res://Scripts/Voxel/VoxelMaterialEntry.cs" id="3_entry"]
+
+[sub_resource type="Resource" id="def1"]
+script = ExtResource("2_def")
+Id = 1
+Name = "Grass"
+Entry = SubResource("entry1")
+
+[sub_resource type="Resource" id="entry1"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.45, 0.68, 0.35, 1)
+
+[sub_resource type="Resource" id="def2"]
+script = ExtResource("2_def")
+Id = 2
+Name = "Dirt"
+Entry = SubResource("entry2")
+
+[sub_resource type="Resource" id="entry2"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.48, 0.35, 0.23, 1)
+
+[sub_resource type="Resource" id="def3"]
+script = ExtResource("2_def")
+Id = 3
+Name = "Stone"
+Entry = SubResource("entry3")
+
+[sub_resource type="Resource" id="entry3"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.55, 0.57, 0.6, 1)
+
+[sub_resource type="Resource" id="def4"]
+script = ExtResource("2_def")
+Id = 4
+Name = "CaveStone"
+Entry = SubResource("entry4")
+
+[sub_resource type="Resource" id="entry4"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.34, 0.31, 0.29, 1)
+
+[sub_resource type="Resource" id="def5"]
+script = ExtResource("2_def")
+Id = 5
+Name = "Trunk"
+Entry = SubResource("entry5")
+
+[sub_resource type="Resource" id="entry5"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.4, 0.28, 0.16, 1)
+
+[sub_resource type="Resource" id="def6"]
+script = ExtResource("2_def")
+Id = 6
+Name = "Leaves"
+Entry = SubResource("entry6")
+
+[sub_resource type="Resource" id="entry6"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.16, 0.45, 0.22, 1)
+
+[sub_resource type="Resource" id="def7"]
+script = ExtResource("2_def")
+Id = 7
+Name = "Rock"
+Entry = SubResource("entry7")
+
+[sub_resource type="Resource" id="entry7"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.62, 0.58, 0.52, 1)
+
+[sub_resource type="Resource" id="def8"]
+script = ExtResource("2_def")
+Id = 8
+Name = "Placed"
+Entry = SubResource("entry8")
+
+[sub_resource type="Resource" id="entry8"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(1, 0.45, 0.15, 1)
+
+[sub_resource type="Resource" id="def9"]
+script = ExtResource("2_def")
+Id = 9
+Name = "Sand"
+Entry = SubResource("entry9")
+
+[sub_resource type="Resource" id="entry9"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.85, 0.78, 0.55, 1)
+
+[sub_resource type="Resource" id="def10"]
+script = ExtResource("2_def")
+Id = 10
+Name = "Snow"
+Entry = SubResource("entry10")
+
+[sub_resource type="Resource" id="entry10"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.92, 0.93, 0.95, 1)
+
+[sub_resource type="Resource" id="def11"]
+script = ExtResource("2_def")
+Id = 11
+Name = "Ice"
+Entry = SubResource("entry11")
+
+[sub_resource type="Resource" id="entry11"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.75, 0.85, 0.95, 1)
+
+[sub_resource type="Resource" id="def12"]
+script = ExtResource("2_def")
+Id = 12
+Name = "Cactus"
+Entry = SubResource("entry12")
+
+[sub_resource type="Resource" id="entry12"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.25, 0.55, 0.3, 1)
+
+[sub_resource type="Resource" id="def13"]
+script = ExtResource("2_def")
+Id = 13
+Name = "CoalOre"
+Entry = SubResource("entry13")
+
+[sub_resource type="Resource" id="entry13"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.3, 0.3, 0.33, 1)
+BreakTime = 1.5
+
+[sub_resource type="Resource" id="def14"]
+script = ExtResource("2_def")
+Id = 14
+Name = "IronOre"
+Entry = SubResource("entry14")
+
+[sub_resource type="Resource" id="entry14"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.75, 0.68, 0.6, 1)
+BreakTime = 3
+
+[sub_resource type="Resource" id="def15"]
+script = ExtResource("2_def")
+Id = 15
+Name = "CopperOre"
+Entry = SubResource("entry15")
+
+[sub_resource type="Resource" id="entry15"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.72, 0.47, 0.33, 1)
+BreakTime = 2
+
+[sub_resource type="Resource" id="def16"]
+script = ExtResource("2_def")
+Id = 16
+Name = "GoldOre"
+Entry = SubResource("entry16")
+
+[sub_resource type="Resource" id="entry16"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.83, 0.71, 0.33, 1)
+BreakTime = 4
+
+[sub_resource type="Resource" id="def17"]
+script = ExtResource("2_def")
+Id = 17
+Name = "Bedrock"
+Entry = SubResource("entry17")
+
+[sub_resource type="Resource" id="entry17"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.12, 0.12, 0.14, 1)
+Unbreakable = true
+BreakTime = 60
+Description = "The unbreakable floor of the world."
+
+[sub_resource type="Resource" id="def18"]
+script = ExtResource("2_def")
+Id = 18
+Name = "Plank"
+Entry = SubResource("entry18")
+
+[sub_resource type="Resource" id="entry18"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.72, 0.55, 0.32, 1)
+Description = "Wooden planks. A basic building material."
+
+[sub_resource type="Resource" id="def19"]
+script = ExtResource("2_def")
+Id = 19
+Name = "Iron Plate"
+Entry = SubResource("entry19")
+
+[sub_resource type="Resource" id="entry19"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.78, 0.78, 0.82, 1)
+Description = "A pressed plate of iron. Used in machines and tools."
+
+[sub_resource type="Resource" id="def20"]
+script = ExtResource("2_def")
+Id = 20
+Name = "Coal"
+Entry = SubResource("entry20")
+
+[sub_resource type="Resource" id="entry20"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.2, 0.2, 0.22, 1)
+Description = "Burnable fuel, smelted from coal ore."
+
+[sub_resource type="Resource" id="def21"]
+script = ExtResource("2_def")
+Id = 21
+Name = "Stone Brick"
+Entry = SubResource("entry21")
+
+[sub_resource type="Resource" id="entry21"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.5, 0.52, 0.56, 1)
+Description = "Cut stone bricks. A sturdier building block."
+
+[sub_resource type="Resource" id="def22"]
+script = ExtResource("2_def")
+Id = 22
+Name = "Machine Frame"
+Entry = SubResource("entry22")
+
+[sub_resource type="Resource" id="entry22"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(0.45, 0.48, 0.55, 1)
+Description = "A rigid frame for mounting machines. A preview of the coming machine system."
 
 [resource]
 script = ExtResource("1_cfg")
-Materials = []
+Materials = Array[Resource]([SubResource("def1"), SubResource("def2"), SubResource("def3"), SubResource("def4"), SubResource("def5"), SubResource("def6"), SubResource("def7"), SubResource("def8"), SubResource("def9"), SubResource("def10"), SubResource("def11"), SubResource("def12"), SubResource("def13"), SubResource("def14"), SubResource("def15"), SubResource("def16"), SubResource("def17"), SubResource("def18"), SubResource("def19"), SubResource("def20"), SubResource("def21"), SubResource("def22")])
