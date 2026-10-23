@@ -237,9 +237,13 @@ void fragment() {
 	vec4 ta = texture(TextureA, tuv);
 	vec4 tb = texture(TextureB, tuv);
 	float f = clamp(blendVarying.x, 0.0, 1.0);
-	// BlendStrength scales how much of the second texture is mixed in, and
-	// tints the result by the per-vertex albedo (COLOR).
-	ALBEDO = mix(ta.rgb, tb.rgb, clamp(f * BlendStrength, 0.0, 1.0)) * COLOR.rgb;
+	// BlendStrength scales how much of the second texture is mixed in.
+	// NOTE: we deliberately do NOT multiply by the per-vertex albedo tint
+	// (COLOR.rgb) here. The textures already carry each material's color, so
+	// mixing them directly is a pure crossfade that can never be brighter than
+	// either source. Multiplying by COLOR (the material's albedo color) on top
+	// of the texture was pushing the blend whiter than both materials alone.
+	ALBEDO = mix(ta.rgb, tb.rgb, clamp(f * BlendStrength, 0.0, 1.0));
 	ROUGHNESS = Roughness;
 	METALLIC = Metallic;
 }
