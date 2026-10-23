@@ -11,9 +11,9 @@ namespace FactorySim.UI;
 /// The Minecraft-style inventory screen: a full-screen <see cref="CanvasLayer"/>
 /// built entirely in code (no .tscn), shown/hidden with TAB.
 ///
-/// Layout: a centered panel with 144 slots — a 6×20 grid of storage
-/// (inventory slots 24-143) above a 24-slot hotbar row (slots 0-23) — plus a
-/// cursor stack that follows the mouse while dragging. A persistent 24-slot
+/// Layout: a centered panel with 82 slots — a 6×12 grid of storage
+/// (inventory slots 10-81) above a 10-slot hotbar row (slots 0-9) — plus a
+/// cursor stack that follows the mouse while dragging. A persistent 10-slot
 /// hotbar is also rendered at the bottom of the screen (always visible) with a
 /// selection highlight; number keys and the mouse wheel change the selected slot.
 ///
@@ -460,10 +460,10 @@ public partial class InventoryUI : CanvasLayer
 		title.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
 		_panel.AddChild(title);
 
-		// Slot grid: rows 0..5 = storage (20 cols each, slots 24-143),
-		// row 6 = hotbar (24 cols, slots 0-23). The grid is shifted right of the
+		// Slot grid: rows 0..5 = storage (12 cols each, slots 10-81),
+		// row 6 = hotbar (10 cols, slots 0-9). The grid is shifted right of the
 		// dev pane: it starts at x = pad + devW + devGap. Storage rows are
-		// centered within the grid's own width (the hotbar row is wider — 24).
+		// centered within the grid's own width (the hotbar row is narrower — 10).
 		float gridX = pad + devW + devGap;
 		float gridY = 36f;
 		float storageRowW = Inventory.StorageCols * SlotSize + (Inventory.StorageCols - 1) * SlotGap;

@@ -5,33 +5,33 @@ using FactorySim.Machines;
 namespace FactorySim.Items;
 
 /// <summary>
-/// The player's inventory: 144 slots (24 hotbar + 120 storage), holding
+/// The player's inventory: 82 slots (10 hotbar + 72 storage), holding
 /// <see cref="ItemStack"/>s. Pure data/logic — no input handling; the
 /// <c>InventoryUI</c> owns the TAB key, mouse, and rendering. Systems that
 /// hand items to the player (item drops) find this node via the
 /// "inventory" group and call <see cref="CollectItem"/>.
 ///
-/// Slot layout: slots 0..23 are the hotbar (rendered as the bottom row),
-/// slots 24..143 are the storage (the 6 rows above it, 20 wide).
+/// Slot layout: slots 0..9 are the hotbar (rendered as the bottom row),
+/// slots 10..81 are the storage (the 6 rows above it, 12 wide).
 /// </summary>
 public partial class Inventory : Node
 {
 	/// <summary>Number of hotbar slots (the persistent bottom row).</summary>
-	public const int HotbarSize = 24;
+	public const int HotbarSize = 10;
 
-	/// <summary>Number of storage slots (the 6×20 grid above the hotbar).</summary>
-	public const int StorageSize = 120;
+	/// <summary>Number of storage slots (the 6×12 grid above the hotbar).</summary>
+	public const int StorageSize = 72;
 
 	/// <summary>Total inventory slots (hotbar + storage).</summary>
 	public const int TotalSlots = HotbarSize + StorageSize;
 
-	/// <summary>Columns in the storage grid (the hotbar row is wider — 24).</summary>
-	public const int StorageCols = 20;
+	/// <summary>Columns in the storage grid (12).</summary>
+	public const int StorageCols = 12;
 
 	/// <summary>Rows in the storage grid (6).</summary>
 	public const int StorageRows = 6;
 
-	/// <summary>All 144 slots, hotbar (0-23) first, then storage (24-143).</summary>
+	/// <summary>All 82 slots, hotbar (0-9) first, then storage (10-81).</summary>
 	public ItemStack[] Slots { get; }
 
 	/// <summary>True while the inventory UI is open (set by the UI, read by the player).</summary>
@@ -267,8 +267,8 @@ public partial class Inventory : Node
 	// ------------------------------------------------------------------
 
 	/// <summary>
-	/// Serializes the 144 slots into parallel (materialId, count) arrays, one
-	/// entry per slot in order (hotbar 0..23 then storage 24..143). Pure data —
+	/// Serializes the 82 slots into parallel (materialId, count) arrays, one
+	/// entry per slot in order (hotbar 0..9 then storage 10..81). Pure data —
 	/// the <c>WorldSave</c> service writes these straight into the save file.
 	/// </summary>
 	public (int[] MaterialIds, int[] Counts) SaveState()
@@ -284,7 +284,7 @@ public partial class Inventory : Node
 	}
 
 	/// <summary>
-	/// Restores the 144 slots from parallel (materialId, count) arrays (the
+	/// Restores the 82 slots from parallel (materialId, count) arrays (the
 	/// inverse of <see cref="SaveState"/>). Slots whose arrays are shorter are
 	/// left empty; a trailing <c>InventoryChanged</c> fires so the UI refreshes.
 	/// </summary>

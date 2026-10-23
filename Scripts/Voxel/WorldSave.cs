@@ -19,7 +19,7 @@ namespace FactorySim.Voxel;
 /// What is persisted (the "delta" model — terrain is regenerated from the seed):
 ///   - every voxel the player edited (add / break / pickaxe),
 ///   - damaged-voxel health for voxels still solid,
-///   - the inventory (all 144 slots),
+///   - the inventory (all 82 slots),
 ///   - the player's position + yaw/pitch,
 ///   - every live item drop,
 ///   - every placed machine (voxel + item id + placement rotation).

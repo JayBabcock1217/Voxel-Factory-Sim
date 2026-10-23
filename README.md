@@ -81,7 +81,7 @@ Scripts/
   Player.cs                FPS controller
   UI/                      MainMenu, SlotPicker (save/load UI), PauseMenu
   Items/                   Item system (FactorySim.Items)
-    Inventory.cs           Item inventory (144 slots, save/load)
+    Inventory.cs           Item inventory (82 slots, save/load)
     ItemStack.cs           A stack of items (material + optional tool type)
     ItemRegistry.cs        Source of truth: all materials + tools
     ToolType.cs            Shovel / Pickaxe / Axe / Sword
