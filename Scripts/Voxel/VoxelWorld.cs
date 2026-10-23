@@ -272,10 +272,15 @@ public partial class VoxelWorld : Node3D
 	[ExportGroup("Materials")]
 	/// <summary>
 	/// Per-material appearance (color, texture, transparency, metallic, roughness,
-	/// emission) — editable live in the inspector. Save it as a .tres to reuse.
+	/// emission). Assign a <see cref="VoxelMaterialConfig"/> resource here (create
+	/// one in the FileSystem dock, right-click it to Save as a .tres, then edit
+	/// each material's Entry — including its Texture — in the inspector). When a
+	/// material's Entry has a Texture set, that same texture is used both on the
+	/// terrain AND as the item icon in the inventory / hotbar / crafting UI.
+	/// Leaving it unset falls back to a freshly built default config.
 	/// </summary>
 	[Export]
-	public VoxelMaterialConfig MaterialConfig { get; private set; } = new();
+	public VoxelMaterialConfig MaterialConfig { get; set; } = new();
 
 	[ExportGroup("Machines")]
 	/// <summary>
