@@ -229,6 +229,12 @@ public static class MeshBuilder
 			perUv[i] = new List<Vector2>();
 		}
 
+		// Mixed-material triangles (straddling a material boundary) are emitted
+		// with a 50/50 blended material instead of snapping to the majority.
+		// Buckets are keyed by the blended StandardMaterial3D itself, so each
+		// distinct material pair gets exactly one surface.
+		var blended = new Dictionary<StandardMaterial3D, (List<Vector3> verts, List<Vector2> uvs)>();
+
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
@@ -257,21 +263,100 @@ public static class MeshBuilder
 
 			n = -n.Normalized();
 
-			// Triangle material: majority vote of the vertex materials
-			// (mixed triangles occur where a face straddles a material
-			// boundary — assign it to the dominant material).
-			int m = ma == mb || ma == mc ? ma : (mb == mc ? mb : mc);
-			if (m < 1 || m > lastMaterial)
+			// Triangle material. Count how many DISTINCT material ids this
+			// triangle has (ignoring 0/air) and branch:
+			//  * 1 distinct  -> the normal per-material path (unchanged).
+			//  * 2 distinct  -> the common boundary case (bevel straddling a
+			//    material interface, e.g. grass|dirt): emit with the palette's
+			//    50/50 blended material so the edge fades between the two.
+			//  * 3 distinct  -> rare triple junction: fall back to the majority
+			//    vote, no blending (documented edge case).
+			int distinct;
+			if (ma == mb || ma == mc)
 			{
-				// Air (impossible: every crossing has a solid endpoint) or a
-				// material id with no palette slot — skip instead of indexing
-				// the per-material lists out of bounds.
-				continue;
+				distinct = (mb == mc) ? 1 : 2;
+			}
+			else if (mb == mc)
+			{
+				distinct = 2;
+			}
+			else
+			{
+				distinct = 3;
 			}
 
-			var verts = perMaterial[m - 1];
-			var uvs = perUv[m - 1];
-			float uvScale = palette.TextureScales[m - 1];
+			int m; // resolved single material (1 distinct, or 3-distinct fallback)
+			StandardMaterial3D blendMat = null; // non-null only for the 2-distinct case
+			float uvScale;
+
+			if (distinct == 2)
+			{
+				// Identify the two distinct ids and their majority (the
+				// id appearing twice, or the first one on a tie).
+				int idA, idB;
+				if (ma == mb)
+				{
+					m = ma;
+					idA = ma;
+					idB = mc;
+				}
+				else if (ma == mc)
+				{
+					m = ma;
+					idA = ma;
+					idB = mb;
+				}
+				else // mb == mc
+				{
+					m = mb;
+					idA = mb;
+					idB = mc;
+				}
+				// Sanity: a boundary vertex against air would yield an
+				// unresolvable id — skip the triangle entirely (visual AND
+				// collision), matching the original out-of-range `continue`
+				// which ran BEFORE the collision add. Keeping collision in lock
+				// step with the visual surface avoids invisible colliders.
+				if (idA < 1 || idA > lastMaterial || idB < 1 || idB > lastMaterial)
+				{
+					continue;
+				}
+
+				blendMat = palette.GetBlendMaterial(idA, idB);
+				uvScale = palette.TextureScales[m - 1]; // dominant material's tiling
+			}
+			else
+			{
+				// Majority vote of the vertex materials (1 distinct: the shared
+				// id; 3 distinct: rare triple-junction fallback, no blending).
+				m = ma == mb || ma == mc ? ma : (mb == mc ? mb : mc);
+				if (m < 1 || m > lastMaterial)
+				{
+					// Air (impossible: every crossing has a solid endpoint) or a
+					// material id with no palette slot — skip instead of indexing
+					// the per-material lists out of bounds.
+					continue;
+				}
+				uvScale = palette.TextureScales[m - 1];
+			}
+
+			List<Vector3> verts;
+			List<Vector2> uvs;
+			if (blendMat != null)
+			{
+				if (!blended.TryGetValue(blendMat, out var bucket))
+				{
+					bucket = (new List<Vector3>(), new List<Vector2>());
+					blended[blendMat] = bucket;
+				}
+				verts = bucket.verts;
+				uvs = bucket.uvs;
+			}
+			else
+			{
+				verts = perMaterial[m - 1];
+				uvs = perUv[m - 1];
+			}
 			verts.Add(pa);
 			verts.Add(n);
 			uvs.Add(PlanarUv(pa, n, uvScale));
@@ -304,6 +389,30 @@ public static class MeshBuilder
 			var tool = new SurfaceTool();
 			tool.Begin(Mesh.PrimitiveType.Triangles);
 			tool.SetMaterial(palette.Materials[m - 1]);
+			for (int i = 0; i + 1 < verts.Count; i += 2)
+			{
+				tool.SetNormal(verts[i + 1]);
+				tool.SetUV(uvs[i / 2]);
+				tool.AddVertex(verts[i]);
+			}
+			tool.Commit(mesh);
+		}
+
+		// Also emit one surface per blended (50/50) material — the mixed-
+		// material boundary triangles. Same [pos, normal] pair layout as the
+		// per-material buckets above.
+		foreach (var entry in blended)
+		{
+			var verts = entry.Value.verts;
+			if (verts.Count == 0)
+			{
+				continue;
+			}
+
+			var uvs = entry.Value.uvs;
+			var tool = new SurfaceTool();
+			tool.Begin(Mesh.PrimitiveType.Triangles);
+			tool.SetMaterial(entry.Key);
 			for (int i = 0; i + 1 < verts.Count; i += 2)
 			{
 				tool.SetNormal(verts[i + 1]);

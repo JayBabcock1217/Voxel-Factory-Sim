@@ -129,8 +129,60 @@ public sealed class VoxelMaterialPalette
 	public Texture2D GetTexture(int id)
 		=> id > 0 && id < Textures.Length ? Textures[id - 1] : null;
 
+	/// <summary>
+	/// A StandardMaterial3D that blends the two given materials EQUALLY (50/50).
+	/// Cached per (idA, idB) pair so a chunk build allocates at most one material per
+	/// distinct pair. The blended material copies both materials' shading/specular/
+	/// transparency settings and averages their AlbedoColor; if BOTH have a texture it
+	/// uses material A's texture (a true per-pixel crossfade would need a shader —
+	/// out of scope), otherwise it falls back to the flat averaged color.
+	/// </summary>
+	public StandardMaterial3D GetBlendMaterial(int idA, int idB)
+	{
+		if (idA > idB)
+		{
+			int t = idA;
+			idA = idB;
+			idB = t;
+		}
+		int key = idA * 256 + idB;
+		if (_blendCache.TryGetValue(key, out var cached))
+		{
+			return cached;
+		}
+
+		var matA = Materials[idA - 1];
+		var matB = Materials[idB - 1];
+		var mat = new StandardMaterial3D
+		{
+			ShadingMode = matA.ShadingMode,
+			Transparency = matA.Transparency,
+			SpecularMode = matA.SpecularMode,
+			Metallic = (matA.Metallic + matB.Metallic) * 0.5f,
+			Roughness = (matA.Roughness + matB.Roughness) * 0.5f,
+			EmissionEnabled = matA.EmissionEnabled,
+			Emission = matA.Emission,
+			EmissionEnergyMultiplier = matA.EmissionEnergyMultiplier,
+			MetallicSpecular = (matA.MetallicSpecular + matB.MetallicSpecular) * 0.5f,
+			AlbedoColor = (matA.AlbedoColor + matB.AlbedoColor) * 0.5f,
+		};
+		// Use a texture only when BOTH materials have one (a 50/50 texture crossfade
+		// needs a shader); otherwise the flat averaged color is the honest blend.
+		if (matA.AlbedoTexture != null && matB.AlbedoTexture != null)
+		{
+			mat.AlbedoTexture = matA.AlbedoTexture;
+			mat.TextureRepeat = true;
+		}
+		_blendCache[key] = mat;
+		return mat;
+	}
+
 	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
 	public int MaterialCount { get; private set; }
+
+	// Blended 50/50 materials cached per (idA, idB) pair by GetBlendMaterial.
+	// Cleared in Resize(), where the Materials array is rebuilt.
+	private readonly System.Collections.Generic.Dictionary<int, StandardMaterial3D> _blendCache = new();
 
 	public VoxelMaterialPalette()
 	{
@@ -177,6 +229,10 @@ public sealed class VoxelMaterialPalette
 		{
 			count = 0;
 		}
+
+		// The Materials array is rebuilt below, so any cached blended materials
+		// would reference stale instances.
+		_blendCache.Clear();
 
 		var old = Materials;
 		var oldScales = TextureScales;
