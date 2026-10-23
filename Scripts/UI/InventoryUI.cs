@@ -2213,8 +2213,17 @@ public partial class InventoryUI : CanvasLayer
 
 			if (mouse.ButtonIndex == MouseButton.Left)
 			{
-				LeftClickSlot(slot);
-				_dragSlot = slot; // begin a drag; release handles the drop
+				if (IsShiftDown())
+				{
+					// Shift+click: quick-move the stack to the opposite region
+					// (storage <-> hotbar). No drag, no cursor involved.
+					ShiftClickMove(slot);
+				}
+				else
+				{
+					LeftClickSlot(slot);
+					_dragSlot = slot; // begin a drag; release handles the drop
+				}
 			}
 			else if (mouse.ButtonIndex == MouseButton.Right)
 			{
@@ -2317,6 +2326,76 @@ public partial class InventoryUI : CanvasLayer
 
 		RefreshSlot(slot);
 		RefreshCursor();
+	}
+
+	/// <summary>
+	/// Shift+click: quick-move a stack between the hotbar (slots 0..HotbarSize-1)
+	/// and the storage (slots HotbarSize..TotalSlots-1).
+	/// - Clicking a STORAGE stack moves it into the first empty HOTBAR slot
+	///   (or merges into a hotbar slot of the same material with room).
+	/// - Clicking a HOTBAR stack moves it into the first empty STORAGE slot
+	///   (or merges into a storage slot of the same material with room).
+	/// The cursor is not involved — this is a direct slot-to-slot move. No-op
+	/// when the stack is empty, the target region is full, or the clicked slot
+	/// is in the same region as the destination (which can't happen here since
+	/// the destination is always the opposite region).
+	/// </summary>
+	private void ShiftClickMove(int slot)
+	{
+		var stack = _inventory.Slots[slot];
+		if (stack.IsEmpty)
+		{
+			return;
+		}
+
+		bool fromHotbar = slot < Inventory.HotbarSize;
+		// Destination region: the opposite of the source.
+		int destStart = fromHotbar ? Inventory.HotbarSize : 0;
+		int destEnd = fromHotbar ? Inventory.TotalSlots : Inventory.HotbarSize;
+
+		// Phase 1: merge into an existing same-material slot in the destination
+		// region that has room.
+		for (int i = destStart; i < destEnd; i++)
+		{
+			var target = _inventory.Slots[i];
+			if (!target.IsEmpty && target.MaterialId == stack.MaterialId && target.Count < ItemStack.StackLimit)
+			{
+				int space = ItemStack.StackLimit - target.Count;
+				int move = Math.Min(space, stack.Count);
+				target.Count += move;
+				if (move >= stack.Count)
+				{
+					_inventory.Slots[slot] = ItemStack.From(0); // whole stack moved
+				}
+				else
+				{
+					stack.Count -= move;
+				}
+				Raise();
+				RefreshSlot(slot);
+				RefreshSlot(i);
+				RefreshHotbar();
+				return;
+			}
+		}
+
+		// Phase 2: move the whole stack into the first empty slot in the
+		// destination region.
+		for (int i = destStart; i < destEnd; i++)
+		{
+			if (_inventory.Slots[i].IsEmpty)
+			{
+				_inventory.Slots[i] = stack;
+				_inventory.Slots[slot] = ItemStack.From(0);
+				Raise();
+				RefreshSlot(slot);
+				RefreshSlot(i);
+				RefreshHotbar();
+				return;
+			}
+		}
+
+		// No room in the destination region: do nothing (the stack stays).
 	}
 
 	/// <summary>
