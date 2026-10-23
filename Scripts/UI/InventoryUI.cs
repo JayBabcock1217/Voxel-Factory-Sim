@@ -493,9 +493,35 @@ public partial class InventoryUI : CanvasLayer
 		_hbox.AddThemeConstantOverride("separation", (int)gap);
 		_panel.AddChild(_hbox);
 
+		// Create the dev pane Panel NOW and add it to the HBox FIRST, so it ends
+		// up leftmost (index 0). Its inner content (title, hint, item list) is
+		// filled in later by BuildDevPanel — this split lets us control the
+		// HBox child order without a MoveChild call (which crashes the mono
+		// bridge in Godot 4.8).
+		float devPaneH = gridH + 12f;
+		_devPanel = new Panel
+		{
+			Name = "DevPanel",
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(devW, devPaneH),
+			Size = new Vector2(devW, devPaneH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		var devStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
+			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
+		_hbox.AddChild(_devPanel); // index 0 = leftmost
+
 		// Slot grid section: a Control that holds the slot cells at their local
-		// (row, col) offsets. It is a child of the HBoxContainer, so the
-		// container positions it between the dev and craft panes.
+		// (row, col) offsets. It is a child of the HBoxContainer (index 1), so
+		// the container positions it between the dev and craft panes.
 		var gridSection = new Control
 		{
 			Name = "GridSection",
@@ -503,7 +529,7 @@ public partial class InventoryUI : CanvasLayer
 			CustomMinimumSize = new Vector2(gridW, gridH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_hbox.AddChild(gridSection);
+		_hbox.AddChild(gridSection); // index 1 = middle
 
 		// Slot grid: rows 0..5 = storage (12 cols each, slots 10-81),
 		// row 6 = hotbar (10 cols, slots 0-9). Both rows are centered within
@@ -918,44 +944,24 @@ public partial class InventoryUI : CanvasLayer
 	}
 
 	/// <summary>
-	/// Builds the dev pane to the LEFT of the slot grid: a title, a short hint,
-	/// and a vertically scrollable list of every item in the game (all placeable
+	/// Fills in the dev pane's inner content: a title, a short hint, and a
+	/// vertically scrollable list of every item in the game (all placeable
 	/// materials + all tools, from <see cref="FactorySim.Items.ItemRegistry"/>).
 	/// Each row is a button: clicking it grants one of that item into the
 	/// inventory (a full stack of the material, or a single tool). This is the
 	/// god-mode way to hand yourself any item to test placing / breaking / tool
 	/// affinities without having to craft or mine first.
+	///
+	/// The dev pane Panel itself is created and added to the HBox in
+	/// <see cref="BuildUi"/> (at index 0, leftmost) so the HBox child order is
+	/// [dev, grid, craft] without a MoveChild call (which crashes the mono
+	/// bridge in Godot 4.8). This method only adds the inner content.
 	/// </summary>
 	private void BuildDevPanel()
 	{
 		const float devW = 240f;
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		float paneH = gridH + 12f;   // match the craft pane height (see BuildCrafting)
-
-		// The dev pane is a child of the HBoxContainer, added LAST so it ends up
-		// on the LEFT (before the grid section and the craft pane). The HBox
-		// positions it automatically — no absolute x needed.
-		_devPanel = new Panel
-		{
-			Name = "DevPanel",
-			LayoutMode = 2,
-			CustomMinimumSize = new Vector2(devW, paneH),
-			Size = new Vector2(devW, paneH),
-			MouseFilter = Control.MouseFilterEnum.Ignore,
-		};
-		var devStyle = new StyleBoxFlat
-		{
-			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
-			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-		};
-		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
-		// Add LAST so it sits on the left of the HBox (before grid + craft).
-		_hbox.AddChild(_devPanel);
-		_hbox.MoveChild(_devPanel, 0);
 
 		const float innerPad = 8f;
 		float innerW = devW - innerPad * 2f;
