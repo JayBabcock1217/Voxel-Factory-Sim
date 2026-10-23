@@ -142,8 +142,9 @@ public sealed class VoxelMaterialPalette
 	/// textures per-pixel. Cached per unordered (idA, idB) pair so a chunk build
 	/// allocates at most one material per distinct pair. The shader samples both
 	/// materials' albedo textures (a 1×1 white fallback when a material has none)
-	/// and mixes them by the per-vertex blend factor (UV2.x); the per-vertex
-	/// albedo tint (COLOR) is applied per-material by the mesh builder.
+	/// and mixes them by the per-vertex blend factor (UV2.x) scaled by the
+	/// palette's <see cref="BlendParams"/> strength; the per-vertex albedo tint
+	/// (COLOR) is applied per-material by the mesh builder.
 	/// </summary>
 	public ShaderMaterial GetBlendShaderMaterial(int idA, int idB)
 	{
@@ -171,8 +172,34 @@ public sealed class VoxelMaterialPalette
 		sm.SetShader(_blendShader);
 		sm.SetShaderParameter(new StringName("TextureA"), matA.AlbedoTexture ?? FallbackTexture);
 		sm.SetShaderParameter(new StringName("TextureB"), matB.AlbedoTexture ?? FallbackTexture);
+		// The blend shader's roughness / metallic / strength are uniform on every
+		// pair (driven by VoxelMaterialConfig's Blend group), so bake them into
+		// each cached material from the current BlendParams.
+		sm.SetShaderParameter(new StringName("Roughness"), BlendParams.roughness);
+		sm.SetShaderParameter(new StringName("Metallic"), BlendParams.metallic);
+		sm.SetShaderParameter(new StringName("BlendStrength"), BlendParams.strength);
 		_blendShaderCache[key] = sm;
 		return sm;
+	}
+
+	/// <summary>
+	/// The current blend parameters (width in voxels, roughness, metallic,
+	/// strength). Read by <see cref="GetBlendShaderMaterial"/> (which bakes
+	/// roughness / metallic / strength into each cached ShaderMaterial) and by
+	/// the mesh builders (the MC boundary ramp uses width). Updated via
+	/// <see cref="SetBlendParams"/>.
+	/// </summary>
+	public (float width, float roughness, float metallic, float strength) BlendParams { get; private set; } = (1f, 0.9f, 0f, 1f);
+
+	/// <summary>
+	/// Stores the new blend parameters and clears the blended ShaderMaterial
+	/// cache: the cached materials bake in the roughness / metallic / strength
+	/// uniforms, so they must be rebuilt when the parameters change.
+	/// </summary>
+	public void SetBlendParams(float width, float roughness, float metallic, float strength)
+	{
+		BlendParams = (width, roughness, metallic, strength);
+		_blendShaderCache.Clear();
 	}
 
 	/// <summary>
@@ -187,6 +214,10 @@ public sealed class VoxelMaterialPalette
 // applies the same sRGB->linear handling the standard materials use.
 uniform sampler2D TextureA : source_color, filter_linear_mipmap, repeat_enable;
 uniform sampler2D TextureB : source_color, filter_linear_mipmap, repeat_enable;
+
+uniform float Roughness : hint_range(0.0, 1.0) = 0.9;
+uniform float Metallic : hint_range(0.0, 1.0) = 0.0;
+uniform float BlendStrength : hint_range(0.0, 2.0) = 1.0;
 
 varying vec2 blendVarying;
 
@@ -206,10 +237,11 @@ void fragment() {
 	vec4 ta = texture(TextureA, tuv);
 	vec4 tb = texture(TextureB, tuv);
 	float f = clamp(blendVarying.x, 0.0, 1.0);
-	vec3 blended = mix(ta.rgb, tb.rgb, f);
-	ALBEDO = blended * COLOR.rgb;
-	ROUGHNESS = 0.9;
-	METALLIC = 0.0;
+	// BlendStrength scales how much of the second texture is mixed in, and
+	// tints the result by the per-vertex albedo (COLOR).
+	ALBEDO = mix(ta.rgb, tb.rgb, clamp(f * BlendStrength, 0.0, 1.0)) * COLOR.rgb;
+	ROUGHNESS = Roughness;
+	METALLIC = Metallic;
 }
 ";
 

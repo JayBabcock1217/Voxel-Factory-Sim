@@ -558,6 +558,8 @@ public partial class VoxelWorld : Node3D
 		{
 			MaterialConfig.PropertyChanged -= OnMaterialConfigChanged; // dedupe on re-ready
 			MaterialConfig.PropertyChanged += OnMaterialConfigChanged;
+			MaterialConfig.BlendChanged -= OnBlendChanged; // dedupe on re-ready
+			MaterialConfig.BlendChanged += OnBlendChanged;
 		}
 
 		// Publish the machine registry to the static MachineRegistry (and any
@@ -585,6 +587,7 @@ public partial class VoxelWorld : Node3D
 		if (MaterialConfig != null)
 		{
 			MaterialConfig.PropertyChanged -= OnMaterialConfigChanged;
+			MaterialConfig.BlendChanged -= OnBlendChanged;
 		}
 
 		MaterialConfig = value ?? new VoxelMaterialConfig();
@@ -592,6 +595,7 @@ public partial class VoxelWorld : Node3D
 		if (IsInsideTree())
 		{
 			MaterialConfig.PropertyChanged += OnMaterialConfigChanged;
+			MaterialConfig.BlendChanged += OnBlendChanged;
 			ApplyMaterials();
 		}
 	}
@@ -704,6 +708,14 @@ public partial class VoxelWorld : Node3D
 
 	private void OnMaterialConfigChanged(VoxelMaterialEntry _) => ApplyMaterials();
 
+	/// <summary>
+	/// A blend parameter (width / roughness / metallic / strength) changed in the
+	/// config: re-push the palette (which clears its cached blend shader
+	/// materials) and remesh — the blend uniforms and the MC boundary ramp both
+	/// depend on the values.
+	/// </summary>
+	private void OnBlendChanged() => ApplyMaterials();
+
 	public void SetBiomeConfig(BiomeConfig value)
 	{
 		if (BiomeConfig != null)
@@ -773,8 +785,9 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// Pushes the material config onto the shared palette instances in place.
 	/// Color/texture/transparency/metallic/etc. update every built chunk with no
-	/// remesh; only a texture-tiling (UV) change needs the chunks rebuilt, which
-	/// is budget-managed through ChunksPerFrame so it never hitches.
+	/// remesh; only a texture-tiling (UV) change or a blend-parameter change
+	/// needs the chunks rebuilt, which is budget-managed through ChunksPerFrame
+	/// so it never hitches.
 	/// </summary>
 	private void ApplyMaterials()
 	{
@@ -797,10 +810,26 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
+		// A blend-parameter change needs a remesh: the cached blend shader
+		// materials bake in the roughness / metallic / strength uniforms and the
+		// MarchingCubes boundary ramp depends on the width. Capture the previous
+		// params BEFORE pushing the new ones so we can detect the change.
+		var prevBlend = Palette.BlendParams;
+		bool blendChanged =
+			!Mathf.IsEqualApprox(prevBlend.width, MaterialConfig.BlendWidth) ||
+			!Mathf.IsEqualApprox(prevBlend.roughness, MaterialConfig.BlendRoughness) ||
+			!Mathf.IsEqualApprox(prevBlend.metallic, MaterialConfig.BlendMetallic) ||
+			!Mathf.IsEqualApprox(prevBlend.strength, MaterialConfig.BlendStrength);
+
 		Palette.Resize(newCount);
 		Palette.Apply(MaterialConfig);
+		Palette.SetBlendParams(
+			MaterialConfig.BlendWidth,
+			MaterialConfig.BlendRoughness,
+			MaterialConfig.BlendMetallic,
+			MaterialConfig.BlendStrength);
 
-		if (tilingChanged || countChanged)
+		if (tilingChanged || countChanged || blendChanged)
 		{
 			foreach (VoxelChunk chunk in _chunks.Values)
 			{
@@ -808,7 +837,8 @@ public partial class VoxelWorld : Node3D
 			}
 			// LOD UVs are tiled by the same per-material TextureScales (and its
 			// per-material slot count), so either change invalidates the cached
-			// LOD meshes too.
+			// LOD meshes too. (Blend params don't reach the LOD meshes, but
+			// invalidating here keeps the single code path simple.)
 			foreach (LodChunk lod in _lodChunks.Values)
 			{
 				lod.Invalidate();

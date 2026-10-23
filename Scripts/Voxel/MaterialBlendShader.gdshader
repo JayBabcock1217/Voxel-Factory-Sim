@@ -14,6 +14,10 @@ shader_type spatial;
 uniform sampler2D TextureA : source_color, filter_linear_mipmap, repeat_enable;
 uniform sampler2D TextureB : source_color, filter_linear_mipmap, repeat_enable;
 
+uniform float Roughness : hint_range(0.0, 1.0) = 0.9;
+uniform float Metallic : hint_range(0.0, 1.0) = 0.0;
+uniform float BlendStrength : hint_range(0.0, 2.0) = 1.0;
+
 varying vec2 blendVarying;
 
 void vertex() {
@@ -32,8 +36,9 @@ void fragment() {
 	vec4 ta = texture(TextureA, tuv);
 	vec4 tb = texture(TextureB, tuv);
 	float f = clamp(blendVarying.x, 0.0, 1.0);
-	vec3 blended = mix(ta.rgb, tb.rgb, f);
-	ALBEDO = blended * COLOR.rgb;
-	ROUGHNESS = 0.9;
-	METALLIC = 0.0;
+	// BlendStrength scales how much of the second texture is mixed in, and
+	// tints the result by the per-vertex albedo (COLOR).
+	ALBEDO = mix(ta.rgb, tb.rgb, clamp(f * BlendStrength, 0.0, 1.0)) * COLOR.rgb;
+	ROUGHNESS = Roughness;
+	METALLIC = Metallic;
 }

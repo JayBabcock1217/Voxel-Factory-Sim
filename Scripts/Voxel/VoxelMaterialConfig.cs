@@ -21,8 +21,71 @@ public partial class VoxelMaterialConfig : Resource
 	/// <summary>Fired whenever the material set changes (a def's entry edited, or the array swapped).</summary>
 	public event Action<VoxelMaterialEntry> PropertyChanged;
 
+	/// <summary>
+	/// Fired whenever any of the blend parameters (see the Blend group below)
+	/// changes. The world subscribes to re-apply the blend shader uniforms and
+	/// remesh (the MarchingCubes boundary ramp depends on the width).
+	/// </summary>
+	public event Action BlendChanged;
+
 	/// <summary>The material definitions, editable in the inspector (array order is display order).</summary>
 	[Export] public VoxelMaterialDef[] Materials { get; set; } = Array.Empty<VoxelMaterialDef>();
+
+	[ExportGroup("Blend")]
+	/// <summary>
+	/// Fade band width of the material blend, in voxels. 1.0 = the crisp 50/50
+	/// look; larger = a softer gradient band at material interfaces (softens the
+	/// MarchingCubes boundary ramp; the Faces path stays a crisp equal blend).
+	/// </summary>
+	[Export(PropertyHint.Range, "0.1,8,0.05")]
+	public float BlendWidth { get; set; } = 1.0f;
+	public void SetBlendWidth(float value)
+	{
+		if (!Mathf.IsEqualApprox(BlendWidth, value))
+		{
+			BlendWidth = Mathf.Max(0.1f, value);
+			BlendChanged?.Invoke();
+		}
+	}
+
+	/// <summary>ROUGHNESS of the blend shader (0 = mirror-like, 1 = fully diffuse).</summary>
+	[Export(PropertyHint.Range, "0.0,1.0,0.01")]
+	public float BlendRoughness { get; set; } = 0.9f;
+	public void SetBlendRoughness(float value)
+	{
+		if (!Mathf.IsEqualApprox(BlendRoughness, value))
+		{
+			BlendRoughness = Mathf.Clamp(value, 0f, 1f);
+			BlendChanged?.Invoke();
+		}
+	}
+
+	/// <summary>METALLIC of the blend shader (0 = matte dielectric, 1 = metal).</summary>
+	[Export(PropertyHint.Range, "0.0,1.0,0.01")]
+	public float BlendMetallic { get; set; } = 0.0f;
+	public void SetBlendMetallic(float value)
+	{
+		if (!Mathf.IsEqualApprox(BlendMetallic, value))
+		{
+			BlendMetallic = Mathf.Clamp(value, 0f, 1f);
+			BlendChanged?.Invoke();
+		}
+	}
+
+	/// <summary>
+	/// How strongly the second texture is mixed into the blend (0 = pure first
+	/// texture, 1 = full crossfade, up to 2 = an over-blend of the second).
+	/// </summary>
+	[Export(PropertyHint.Range, "0.0,2.0,0.01")]
+	public float BlendStrength { get; set; } = 1.0f;
+	public void SetBlendStrength(float value)
+	{
+		if (!Mathf.IsEqualApprox(BlendStrength, value))
+		{
+			BlendStrength = Mathf.Max(0f, value);
+			BlendChanged?.Invoke();
+		}
+	}
 
 	/// <summary>
 	/// Allocates a new <see cref="VoxelMaterialDef"/> with a fresh unique id and a

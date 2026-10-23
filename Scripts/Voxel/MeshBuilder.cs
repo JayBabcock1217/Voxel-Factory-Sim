@@ -39,6 +39,12 @@ public static class MeshBuilder
 	/// collision geometry is exactly the visual geometry (no seam gap in
 	/// Faces mode).
 	/// </param>
+	/// <param name="blendWidth">
+	/// Fade band width of the material blend, in voxels. The Faces path keeps
+	/// a crisp equal 50/50 blend (the face itself is the band), so this is
+	/// accepted for signature parity with the MarchingCubes path but does not
+	/// change its output.
+	/// </param>
 	public static ArrayMesh BuildVisual(
 		ChunkData chunk,
 		int wx0,
@@ -46,7 +52,8 @@ public static class MeshBuilder
 		float voxelSize,
 		VoxelMaterialPalette palette,
 		System.Func<int, int, int, bool> solidQuery,
-		System.Collections.Generic.List<Vector3> collisionOut = null)
+		System.Collections.Generic.List<Vector3> collisionOut = null,
+		float blendWidth = 1f)
 	{
 		int lastMaterial = palette.MaterialCount;
 
@@ -92,7 +99,7 @@ public static class MeshBuilder
 					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<Color>());
 					blended[bm] = bucket;
 				}
-				AddBlendedFace(bucket, origin, face, voxelSize, palette.Materials[m - 1].AlbedoColor, palette.TextureScales[m - 1]);
+				AddBlendedFace(bucket, origin, face, voxelSize, palette.Materials[m - 1].AlbedoColor, palette.TextureScales[m - 1], blendWidth);
 			}
 			else
 			{
@@ -180,6 +187,12 @@ public static class MeshBuilder
 	/// Triangles are grouped by material (majority vote of their vertex
 	/// materials) and emitted as one flat-shaded surface per material,
 	/// matching the face-based mesher's material layout.
+	///
+	/// <paramref name="blendWidth"/> (in voxels, from the palette's
+	/// BlendParams) softens the per-vertex ramp on mixed-material (2-distinct)
+	/// boundary triangles: the ramp's per-vertex 0 / 0.5 / 1 steps are pulled
+	/// toward the middle 0.5 by 1 - 1/width, so a wider band fades more gently
+	/// across the interface.
 	/// </summary>
 	public static ArrayMesh BuildVisualMarchingCubes(
 		ChunkData chunk,
@@ -189,7 +202,8 @@ public static class MeshBuilder
 		VoxelMaterialPalette palette,
 		Vector2I coord,
 		System.Func<Vector2I, ChunkData> neighborQuery,
-		System.Collections.Generic.List<Vector3> collisionOut = null)
+		System.Collections.Generic.List<Vector3> collisionOut = null,
+		float blendWidth = 1f)
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int px = sx + 2, py = sy + 2, pz = sz + 2; // padded lattice dims
@@ -285,10 +299,11 @@ public static class MeshBuilder
 		// Mixed-material triangles (straddling a material boundary) are emitted
 		// with a blend SHADER instead of snapping to the majority: a per-pixel
 		// crossfade between the two materials' textures, tinted per-vertex by
-		// each vertex's own material albedo (COLOR) and a constant 0.5 blend
-		// factor (UV2.x). Buckets are keyed by the blend ShaderMaterial, so each
+		// each vertex's own material albedo (COLOR) and a per-vertex blend
+		// factor (UV2.x) that steps 0 / 0.5 / 1 across the boundary (softened
+		// by BlendWidth). Buckets are keyed by the blend ShaderMaterial, so each
 		// distinct material pair gets exactly one surface.
-		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Color> colors)>();
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<Color> colors)>();
 
 		foreach (var tri in tris)
 		{
@@ -342,13 +357,13 @@ public static class MeshBuilder
 
 			int m; // resolved single material (1 distinct, or 3-distinct fallback)
 			ShaderMaterial blendMat = null; // non-null only for the 2-distinct case
+			int idA = 0, idB = 0; // the two distinct ids (2-distinct case only)
 			float uvScale;
 
 			if (distinct == 2)
 			{
 				// Identify the two distinct ids and their majority (the
 				// id appearing twice, or the first one on a tie).
-				int idA, idB;
 				if (ma == mb)
 				{
 					m = ma;
@@ -399,21 +414,30 @@ public static class MeshBuilder
 			{
 				// Mixed-material triangle: emit each vertex with its own
 				// material's albedo (COLOR), the shared face normal, a planar UV,
-				// and the constant 0.5 equal-blend factor (UV2.x). The shader
-				// crossfades the two textures per-pixel by that factor.
+				// and a per-vertex blend factor (UV2.x). The shader crossfades
+				// the two textures per-pixel by that factor.
 				if (!blended.TryGetValue(blendMat, out var bucket))
 				{
-					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Color>());
+					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<Color>());
 					blended[blendMat] = bucket;
 				}
 				var bverts = bucket.verts;
 				var bnorms = bucket.norms;
 				var buvs = bucket.uvs;
+				var buv2s = bucket.uv2s;
 				var bcolors = bucket.colors;
-				Vector2 blendHalf = new Vector2(0.5f, 0f);
-				bverts.Add(pa); bnorms.Add(n); buvs.Add(PlanarUv(pa, n, uvScale)); bcolors.Add(palette.Materials[ma - 1].AlbedoColor);
-				bverts.Add(pb); bnorms.Add(n); buvs.Add(PlanarUv(pb, n, uvScale)); bcolors.Add(palette.Materials[mb - 1].AlbedoColor);
-				bverts.Add(pc); bnorms.Add(n); buvs.Add(PlanarUv(pc, n, uvScale)); bcolors.Add(palette.Materials[mc - 1].AlbedoColor);
+				// Per-vertex blend ramp (UV2.x): 1.0 on the vertex whose material
+				// is idB, 0.0 on idA's, 0.5 on the majority id — a per-vertex 0 /
+				// 0.5 / 1 step across the boundary, soft toward the middle by
+				// BlendWidth (1.0 = the crisp step, larger = a gentler fade).
+				float w = Mathf.Max(blendWidth, 0.001f);
+				float soft = 1f - 1f / w;
+				float fa = Mathf.Lerp(BlendFactor(ma, idA, idB, m), 0.5f, soft);
+				float fb = Mathf.Lerp(BlendFactor(mb, idA, idB, m), 0.5f, soft);
+				float fc = Mathf.Lerp(BlendFactor(mc, idA, idB, m), 0.5f, soft);
+				bverts.Add(pa); bnorms.Add(n); buvs.Add(PlanarUv(pa, n, uvScale)); buv2s.Add(new Vector2(fa, 0f)); bcolors.Add(palette.Materials[ma - 1].AlbedoColor);
+				bverts.Add(pb); bnorms.Add(n); buvs.Add(PlanarUv(pb, n, uvScale)); buv2s.Add(new Vector2(fb, 0f)); bcolors.Add(palette.Materials[mb - 1].AlbedoColor);
+				bverts.Add(pc); bnorms.Add(n); buvs.Add(PlanarUv(pc, n, uvScale)); buv2s.Add(new Vector2(fc, 0f)); bcolors.Add(palette.Materials[mc - 1].AlbedoColor);
 			}
 			else
 			{
@@ -463,8 +487,9 @@ public static class MeshBuilder
 
 		// Also emit one surface per blended material pair — the mixed-material
 		// boundary triangles. Each vertex carries its own material's albedo
-		// (COLOR) and the constant 0.5 blend factor (UV2), which the shader
-		// crossfades per-pixel between the two textures.
+		// (COLOR) and its per-vertex blend factor (UV2.x: the 0 / 0.5 / 1
+		// boundary ramp, softened by BlendWidth), which the shader crossfades
+		// per-pixel between the two textures.
 		foreach (var entry in blended)
 		{
 			var bverts = entry.Value.verts;
@@ -475,16 +500,16 @@ public static class MeshBuilder
 
 			var bnorms = entry.Value.norms;
 			var buvs = entry.Value.uvs;
+			var buv2s = entry.Value.uv2s;
 			var bcolors = entry.Value.colors;
 			var tool = new SurfaceTool();
 			tool.Begin(Mesh.PrimitiveType.Triangles);
 			tool.SetMaterial(entry.Key);
-			Vector2 blendHalf = new Vector2(0.5f, 0f);
 			for (int i = 0; i < bverts.Count; i++)
 			{
 				tool.SetNormal(bnorms[i]);
 				tool.SetUV(buvs[i]);
-				tool.SetUV2(blendHalf);
+				tool.SetUV2(buv2s[i]);
 				tool.SetColor(bcolors[i]);
 				tool.AddVertex(bverts[i]);
 			}
@@ -492,6 +517,27 @@ public static class MeshBuilder
 		}
 
 		return mesh;
+	}
+
+	/// <summary>
+	/// The per-vertex blend factor for a mixed-material (2-distinct) MC triangle
+	/// vertex: 1.0 when the vertex's material is <paramref name="idB"/>, 0.0
+	/// when it is <paramref name="idA"/>, and 0.5 when it equals the majority
+	/// <paramref name="majority"/>. The three values step 0 / 0.5 / 1 across the
+	/// boundary so the shader's per-vertex crossfade reads as a gradient band
+	/// rather than a constant 50/50 mix.
+	/// </summary>
+	private static float BlendFactor(int m, int idA, int idB, int majority)
+	{
+		if (m == idB)
+		{
+			return 1f;
+		}
+		if (m == idA)
+		{
+			return 0f;
+		}
+		return 0.5f; // m == majority
 	}
 
 	/// <summary>
@@ -603,9 +649,12 @@ public static class MeshBuilder
 		// separate blocky face soup that used to leave a gap under the inset
 		// visual surface.
 		var collision = new List<Vector3>();
+		// The MC boundary ramp uses the palette's current blend width
+		// (VoxelMaterialConfig.BlendWidth, pushed via SetBlendParams).
+		float blendWidth = palette.BlendParams.width;
 		ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision)
-			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision);
+			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, blendWidth)
+			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, blendWidth);
 		return (visual, collision);
 	}
 
@@ -792,9 +841,14 @@ public static class MeshBuilder
 	// material albedo (COLOR), a planar UV, and the constant 0.5 equal-blend
 	// factor (UV2.x); the blend shader crossfades the two materials' textures
 	// per-pixel by that factor. The outward face normal is stored for lighting.
+	//
+	// The <paramref name="blendWidth"/> parameter is accepted for signature
+	// parity with the MarchingCubes path, which softens its boundary ramp with
+	// it. The Faces path deliberately keeps the crisp equal 0.5 blend: the face
+	// itself is the interface, so there is no wider band to fade across.
 	private static void AddBlendedFace(
 		(List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<Color> color) bucket,
-		Vector3 origin, int face, float voxelSize, Color albedo, float uvScale)
+		Vector3 origin, int face, float voxelSize, Color albedo, float uvScale, float blendWidth)
 	{
 		Vector3[] c = FaceCorners[face];
 		Vector3 n = FaceNormals[face];
@@ -804,7 +858,12 @@ public static class MeshBuilder
 		Vector3 d = origin + c[2] * voxelSize;
 		Vector3 e = origin + c[3] * voxelSize;
 
+		// The Faces path keeps the crisp equal 0.5 blend regardless of the band
+		// width (the face itself is the interface); blendWidth is accepted for
+		// signature parity with the MarchingCubes path and intentionally has no
+		// effect here.
 		Vector2 blend = new Vector2(0.5f, 0f);
+		_ = blendWidth;
 
 		bucket.pos.Add(a);
 		bucket.pos.Add(b);
