@@ -8,8 +8,11 @@ shader_type spatial;
 // left to Godot's built-in spatial pipeline (we only set ALBEDO / roughness /
 // metallic), so the blend is lit correctly like the rest of the terrain.
 
-uniform sampler2D TextureA : filter_linear_mip_mipmap;
-uniform sampler2D TextureB : filter_linear_mip_mipmap;
+// repeat_enable wraps UVs at the sampler (the shader equivalent of
+// StandardMaterial3D.TextureRepeat) so tiled UVs > 1.0 work; source_color
+// applies the same sRGB->linear handling the standard materials use.
+uniform sampler2D TextureA : source_color, filter_linear_mip_mipmap, repeat_enable;
+uniform sampler2D TextureB : source_color, filter_linear_mip_mipmap, repeat_enable;
 
 varying vec2 blendVarying;
 
