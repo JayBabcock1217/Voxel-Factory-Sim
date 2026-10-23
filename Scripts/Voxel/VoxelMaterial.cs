@@ -193,8 +193,15 @@ void vertex() {
 }
 
 void fragment() {
-	vec4 ta = texture(TextureA, UV);
-	vec4 tb = texture(TextureB, UV);
+	// The mesh UVs are tiled by the per-material TextureScale (and in
+	// MarchingCubes mode are world-position based), so they routinely exceed
+	// 1.0. A raw spatial sampler has no texture_repeat (that is a
+	// StandardMaterial3D property), so wrap the UV with fract() to tile exactly
+	// like the standard materials — without it, UVs >= 1.0 sample outside the
+	// texture and clamp to the edge mip (which reads as white).
+	vec2 tuv = fract(UV);
+	vec4 ta = texture(TextureA, tuv);
+	vec4 tb = texture(TextureB, tuv);
 	float f = clamp(blendVarying.x, 0.0, 1.0);
 	vec3 blended = mix(ta.rgb, tb.rgb, f);
 	ALBEDO = blended * COLOR.rgb;
