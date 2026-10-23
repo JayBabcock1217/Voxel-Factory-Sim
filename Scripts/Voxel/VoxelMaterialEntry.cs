@@ -108,6 +108,28 @@ public partial class VoxelMaterialEntry : Resource
 		}
 	}
 
+	/// <summary>Specular model: SchlickGgx (default) = standard physically-based dielectric; Toon = stylized; Disabled = fully matte (no specular at all). The "wet" look is controlled by <see cref="SpecularAmount"/>, not the mode.</summary>
+	[Export] public BaseMaterial3D.SpecularModeEnum SpecularMode { get; set; } = BaseMaterial3D.SpecularModeEnum.SchlickGgx;
+	public void SetSpecularMode(BaseMaterial3D.SpecularModeEnum value)
+	{
+		if (SpecularMode != value)
+		{
+			SpecularMode = value;
+			Raise();
+		}
+	}
+
+	/// <summary>Specular reflection strength (0 = none, 1 = full). Mapped onto the material's MetallicSpecular.</summary>
+	[Export(PropertyHint.Range, "0,1,0.01")] public float SpecularAmount { get; set; } = 0.05f;
+	public void SetSpecularAmount(float value)
+	{
+		if (!Mathf.IsEqualApprox(SpecularAmount, value))
+		{
+			SpecularAmount = Mathf.Clamp(value, 0f, 1f);
+			Raise();
+		}
+	}
+
 	/// <summary>Glow: make the material emit its own light (lava, fireflies...).</summary>
 	[Export] public bool EmissionEnabled { get; set; }
 	public void SetEmissionEnabled(bool value)

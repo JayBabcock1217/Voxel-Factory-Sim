@@ -197,11 +197,17 @@ public sealed class VoxelMaterialPalette
 			// geometrically in MeshBuilder: each triangle owns its 3 vertices
 			// and they all carry the face normal, so no face ever blends
 			// normals with a neighbour. Cheap on integrated graphics.
+		// SchlickGgx is the standard physically-based model (healthy diffuse +
+		// a little specular). The "wet" sheen came from the DEFAULT
+		// MetallicSpecular of 0.5, so we lower it to 0.05 (subtle, not mirror-
+		// like). ApplyEntry re-applies the per-material SpecularMode /
+		// SpecularAmount (→ MetallicSpecular) from the entry.
 			newMaterials[i] = new StandardMaterial3D
 			{
 				ShadingMode = BaseMaterial3D.ShadingModeEnum.PerVertex,
 				Roughness = 1.0f,
 				SpecularMode = BaseMaterial3D.SpecularModeEnum.SchlickGgx,
+				MetallicSpecular = 0.05f,
 			};
 			newScales[i] = 1f;
 			newTextures[i] = null;
@@ -226,6 +232,8 @@ public sealed class VoxelMaterialPalette
 		material.Transparency = entry.Transparency;
 		material.Metallic = entry.Metallic;
 		material.Roughness = entry.Roughness;
+		material.SpecularMode = entry.SpecularMode;
+		material.MetallicSpecular = entry.SpecularAmount;
 		material.EmissionEnabled = entry.EmissionEnabled;
 		material.Emission = entry.EmissionColor;
 		material.EmissionEnergyMultiplier = entry.EmissionEnergy;
