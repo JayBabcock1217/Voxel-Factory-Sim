@@ -510,6 +510,38 @@ public partial class InventoryUI : CanvasLayer
 		// the section's width (the hotbar row is narrower than the storage).
 		float storageRowW = Inventory.StorageCols * SlotSize + (Inventory.StorageCols - 1) * SlotGap;
 		float hotbarRowW = Inventory.HotbarSize * SlotSize + (Inventory.HotbarSize - 1) * SlotGap;
+
+		// A bordered panel behind the hotbar row, so the hotbar is visually
+		// distinct from the storage grid above it. It is added to the grid
+		// section BEFORE the slots, so it renders behind them (z-order =
+		// child order). The border is a 1px StyleBoxFlat with a small inset
+		// around the hotbar row.
+		float hotbarBorderPad = 4f; // padding between the border and the slots
+		float hotbarRowY = Inventory.StorageRows * (SlotSize + SlotGap);
+		float hotbarRowH = SlotSize; // one row tall
+		float hotbarBorderW = hotbarRowW + hotbarBorderPad * 2f;
+		float hotbarBorderH = hotbarRowH + hotbarBorderPad * 2f;
+		float hotbarBorderX = (gridW - hotbarBorderW) / 2f; // centered like the row
+		var hotbarBorder = new Panel
+		{
+			Name = "HotbarBorder",
+			LayoutMode = 3, // Position
+			Position = new Vector2(hotbarBorderX, hotbarRowY - hotbarBorderPad),
+			Size = new Vector2(hotbarBorderW, hotbarBorderH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		var hotbarBorderStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0f, 0f, 0f, 0.25f),
+			BorderColor = new Color(0.6f, 0.6f, 0.65f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		hotbarBorder.AddThemeStyleboxOverride("panel", hotbarBorderStyle);
+		gridSection.AddChild(hotbarBorder);
+
 		for (int row = 0; row < Inventory.StorageRows + 1; row++)
 		{
 			bool isHotbarRow = row == Inventory.StorageRows;
