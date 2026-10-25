@@ -124,6 +124,10 @@ public partial class VoxelChunk : Node3D
 		Vector2I coord = Coord;
 		System.Func<int, int, int, bool> solidQuery = world.VoxelSolidForMesh;
 		System.Func<Vector2I, ChunkData> neighborQuery = world.GetChunkData;
+		// The material-blend query (Faces mode only): null when blending is off.
+		System.Func<int, int, int, byte> materialQuery = world.Palette.BlendEnabled
+			? world.VoxelMaterialForMesh
+			: null;
 
 		// A launched build is a chunk update in progress: treat the chunk as
 		// dirty until ApplyBuildResult clears the flag, so a drop queued for
@@ -136,7 +140,7 @@ public partial class VoxelChunk : Node3D
 			// the visual triangles (face quads in Faces mode, the MC isosurface
 			// in MarchingCubes mode) into the collision soup, so the player
 			// stands on exactly what is drawn.
-			var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery);
+			var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery);
 
 			// Store the prebuilt results for the main thread. Written here,
 			// read only in ApplyBuildResult after the task completes (happens-

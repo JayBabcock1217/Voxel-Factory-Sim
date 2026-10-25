@@ -709,10 +709,9 @@ public partial class VoxelWorld : Node3D
 	private void OnMaterialConfigChanged(VoxelMaterialEntry _) => ApplyMaterials();
 
 	/// <summary>
-	/// A blend parameter (width / roughness / metallic / strength) changed in the
-	/// config: re-push the palette (which clears its cached blend shader
-	/// materials) and remesh — the blend uniforms and the MC boundary ramp both
-	/// depend on the values.
+	/// The blend crossfade toggle changed: re-apply the palette (which updates
+	/// <see cref="VoxelMaterialPalette.BlendEnabled"/> and flags chunks for a
+	/// remesh in <see cref="ApplyMaterials"/>).
 	/// </summary>
 	private void OnBlendChanged() => ApplyMaterials();
 
@@ -785,9 +784,8 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// Pushes the material config onto the shared palette instances in place.
 	/// Color/texture/transparency/metallic/etc. update every built chunk with no
-	/// remesh; only a texture-tiling (UV) change or a blend-parameter change
-	/// needs the chunks rebuilt, which is budget-managed through ChunksPerFrame
-	/// so it never hitches.
+	/// remesh; only a texture-tiling (UV) change needs the chunks rebuilt, which
+	/// is budget-managed through ChunksPerFrame so it never hitches.
 	/// </summary>
 	private void ApplyMaterials()
 	{
@@ -801,50 +799,62 @@ public partial class VoxelWorld : Node3D
 		// slots (mesh material indices are id-1), so every chunk must remesh.
 		bool countChanged = Palette.MaterialCount != newCount;
 		bool tilingChanged = false;
+		bool tintChanged = false;
 		for (int i = 0; i < Palette.TextureScales.Length && i < newCount; i++)
 		{
-			if (!Mathf.IsEqualApprox(Palette.TextureScales[i], MaterialConfig.Materials[i].Entry.TextureScale))
+			var entry = MaterialConfig.Materials[i].Entry;
+			if (entry == null)
+			{
+				continue;
+			}
+			if (!Mathf.IsEqualApprox(Palette.TextureScales[i], entry.TextureScale))
 			{
 				tilingChanged = true;
-				break;
+			}
+			// The blend shader bakes each material's EFFECTIVE tint (white for
+			// textured materials, the entry color otherwise — see Palette.Apply)
+			// into its cached ShaderMaterial. Compare against the effective tint,
+			// not the raw entry color, so a textured material's white tint is not
+			// mistaken for a change on every call.
+			Color effectiveTint = entry.Texture != null ? Colors.White : entry.AlbedoColor;
+			if (Palette.Tints.Length > i && Palette.Tints[i] != effectiveTint)
+			{
+				tintChanged = true;
 			}
 		}
 
-		// A blend-parameter change needs a remesh: the cached blend shader
-		// materials bake in the roughness / metallic / strength uniforms and the
-		// MarchingCubes boundary ramp depends on the width. Capture the previous
-		// params BEFORE pushing the new ones so we can detect the change.
-		var prevBlend = Palette.BlendParams;
-		bool blendChanged =
-			!Mathf.IsEqualApprox(prevBlend.width, MaterialConfig.BlendWidth) ||
-			!Mathf.IsEqualApprox(prevBlend.roughness, MaterialConfig.BlendRoughness) ||
-			!Mathf.IsEqualApprox(prevBlend.metallic, MaterialConfig.BlendMetallic) ||
-			!Mathf.IsEqualApprox(prevBlend.strength, MaterialConfig.BlendStrength);
-
 		Palette.Resize(newCount);
 		Palette.Apply(MaterialConfig);
-		Palette.SetBlendParams(
-			MaterialConfig.BlendWidth,
-			MaterialConfig.BlendRoughness,
-			MaterialConfig.BlendMetallic,
-			MaterialConfig.BlendStrength);
-
-		if (tilingChanged || countChanged || blendChanged)
+		Palette.BlendEnabled = MaterialConfig.EnableBlend;
+		if (tintChanged || countChanged)
 		{
+			// countChanged is already handled by Resize() clearing the cache;
+			// tintChanged needs an explicit clear because Resize kept the slots.
+			Palette.ClearBlendCache();
+		}
+
+		// Toggling the blend crossfade changes which faces use the blend shader,
+		// so the chunk meshes must be rebuilt (the LOD is unaffected — it uses
+		// the per-material path).
+		if (tilingChanged || countChanged || Palette.BlendEnabled != _lastBlendEnabled)
+		{
+			_lastBlendEnabled = Palette.BlendEnabled;
 			foreach (VoxelChunk chunk in _chunks.Values)
 			{
 				chunk.NeedsMesh = true;
 			}
 			// LOD UVs are tiled by the same per-material TextureScales (and its
 			// per-material slot count), so either change invalidates the cached
-			// LOD meshes too. (Blend params don't reach the LOD meshes, but
-			// invalidating here keeps the single code path simple.)
+			// LOD meshes too. (A blend toggle alone does NOT.)
 			foreach (LodChunk lod in _lodChunks.Values)
 			{
 				lod.Invalidate();
 			}
 		}
 	}
+
+	/// <summary>Tracks the last blend-enabled state actually applied, to detect toggles.</summary>
+	private bool _lastBlendEnabled;
 
 	public override void _Input(InputEvent @event)
 	{
@@ -1766,6 +1776,33 @@ public partial class VoxelWorld : Node3D
 		}
 
 		return chunk.Data.Get(x - chunk.Coord.X * ChunkSizeXZ, y, z - chunk.Coord.Y * ChunkSizeXZ) != 0;
+	}
+
+	/// <summary>
+	/// Material-id query for the material-blend crossfade (Faces mode): returns
+	/// the material id of a world voxel (0 = air), or 0 when the voxel is out of
+	/// range or its chunk is unloaded/generating. Unloaded neighbours read as
+	/// air, so a chunk-edge face against an unloaded neighbour is NOT treated as
+	/// a material interface (no blend) — consistent with the open-edge rule.
+	/// Only used when <see cref="VoxelMaterialConfig.EnableBlend"/> is on.
+	/// </summary>
+	public byte VoxelMaterialForMesh(int x, int y, int z)
+	{
+		if (y < 0 || y >= ChunkHeight)
+		{
+			return 0;
+		}
+		if (!TryGetGeneratedChunk(ChunkCoordOf(x, z), out VoxelChunk chunk))
+		{
+			return 0; // unloaded / generating: air (no blend at the edge)
+		}
+		int lx = x - chunk.Coord.X * ChunkSizeXZ;
+		int lz = z - chunk.Coord.Y * ChunkSizeXZ;
+		if (lx < 0 || lx >= chunk.Data.SizeX || lz < 0 || lz >= chunk.Data.SizeZ)
+		{
+			return 0;
+		}
+		return chunk.Data.Data[lx + chunk.Data.SizeX * (y + chunk.Data.SizeY * lz)];
 	}
 
 	/// <summary>

@@ -39,13 +39,12 @@ public static class MeshBuilder
 	/// collision geometry is exactly the visual geometry (no seam gap in
 	/// Faces mode).
 	/// </param>
-	/// <param name="blendWidth">
-	/// Fade band width of the material blend, in voxels. Each blended face
-	/// (a voxel face whose outward neighbour is a DIFFERENT solid material)
-	/// sits on the material interface (distance 0) and gets the constant 0.5
-	/// equal-blend factor — the face itself is the boundary plane. The
-	/// distance-based fade over the band is expressed by the nearby voxels'
-	/// faces (see <see cref="BuildInterfaceDistanceField"/>).
+	/// <param name="materialQuery">
+	/// Optional. Returns the MATERIAL ID of a world voxel (0 = air) when
+	/// blending is enabled. When non-null, a face whose outward neighbour is a
+	/// DIFFERENT solid material is emitted as a blend-shader crossfade (a
+	/// per-vertex vertical gradient) instead of snapping to a single material.
+	/// Null = no blending (every face uses the single-material path).
 	/// </param>
 	public static ArrayMesh BuildVisual(
 		ChunkData chunk,
@@ -55,7 +54,7 @@ public static class MeshBuilder
 		VoxelMaterialPalette palette,
 		System.Func<int, int, int, bool> solidQuery,
 		System.Collections.Generic.List<Vector3> collisionOut = null,
-		float blendWidth = 1f)
+		System.Func<int, int, int, byte> materialQuery = null)
 	{
 		int lastMaterial = palette.MaterialCount;
 
@@ -69,19 +68,13 @@ public static class MeshBuilder
 			uvs[i] = new List<Vector2>();
 		}
 
-		// Blended faces (a voxel face whose outward neighbour is a DIFFERENT
-		// solid material) are crossfaded per-pixel by a blend shader instead of
+		// Blended faces (a face whose outward neighbour is a DIFFERENT solid
+		// material) are crossfaded per-pixel by the blend shader instead of
 		// snapping to one material. Buckets are keyed by the blend
-		// ShaderMaterial, so each distinct material pair gets one surface. The
-		// per-vertex albedo tint (COLOR) is the face's own material; UV2.x is
-		// the face's blend factor (0.5 on the interface face — the face itself
-		// is the boundary plane; see BuildInterfaceDistanceField).
-		var blended = new Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<Color> color)>();
-
-		// Per-voxel distance-to-nearest-material-interface field, shared by
-		// every blended face in this chunk (see BuildInterfaceDistanceField).
-		// Local: freed with this build, same order of magnitude as the mesh.
-		BuildInterfaceDistanceField(chunk, blendWidth, out float[] dist, out byte[] otherMat);
+		// ShaderMaterial, so each distinct material pair gets one surface. Each
+		// vertex carries its blend factor (UV2.x: 0 = pure A / lower id, 1 =
+		// pure B / higher id), a vertical gradient across the face.
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2)>();
 
 		ForEachExposedFace(chunk, wx0, wz0, solidQuery, (wx, y, wz, m, face) =>
 		{
@@ -93,29 +86,25 @@ public static class MeshBuilder
 			}
 			Vector3 origin = new Vector3(wx, y, wz) * voxelSize;
 
-			// Is this face at a MATERIAL interface? The outward neighbour (in the
-			// face's direction) is a different, solid, configured material. Only
-			// those faces need a crossfade; every other face keeps the cheap
-			// single-material StandardMaterial path.
-			Vector3I o = FaceOffsets[face];
-			byte neighbor = GetNeighborVoxel(chunk, wx0, wz0, o, wx, y, wz);
-			if (neighbor != 0 && neighbor != m && neighbor >= 1 && neighbor <= lastMaterial)
+			// Is this face at a MATERIAL interface? The outward neighbour (in
+			// the face's direction) is a different, solid, configured material.
+			// Only those faces crossfade; every other face keeps the cheap
+			// single-material path.
+			bool isBlended = false;
+			if (materialQuery != null)
 			{
-				ShaderMaterial bm = palette.GetBlendShaderMaterial(m, neighbor);
-				if (!blended.TryGetValue(bm, out var bucket))
+				Vector3I o = FaceOffsets[face];
+				byte neighbor = materialQuery(wx + o.X, y + o.Y, wz + o.Z);
+				if (neighbor != 0 && neighbor != m && neighbor >= 1 && neighbor <= lastMaterial)
 				{
-					bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<Color>());
-					blended[bm] = bucket;
+					isBlended = true;
+					EmitBlendedFace(blended, palette, origin, face, voxelSize, m, neighbor);
 				}
-				// Distance-based blend factor for this face's voxel (0.5 on the
-				// interface face, ramping toward pure material over the band);
-				// the constant 0.5 equal blend is the fallback when the voxel is
-				// deep inside one material (no interface within the band).
-				int voxIdx = (wx - wx0) + chunk.SizeX * (y + chunk.SizeY * (wz - wz0));
-				float factor = DistanceFactor(m, otherMat[voxIdx], dist[voxIdx], neighbor, blendWidth);
-				AddBlendedFace(bucket, origin, face, voxelSize, palette.Materials[m - 1].AlbedoColor, palette.TextureScales[m - 1], factor);
 			}
-			else
+
+			// A blended face is drawn by the blend shader, not the per-material
+			// path — skip the single-material emission for it.
+			if (!isBlended)
 			{
 				AddFace(positions[m - 1], normals[m - 1], uvs[m - 1], origin, face, voxelSize, palette.TextureScales[m - 1]);
 			}
@@ -152,8 +141,7 @@ public static class MeshBuilder
 		}
 
 		// Emit one surface per blended material pair — the faces that crossfade
-		// between two materials. Each vertex carries its own material's albedo
-		// (COLOR) and the constant 0.5 blend factor (UV2).
+		// between two materials. Each vertex carries its blend factor (UV2.x).
 		foreach (var entry in blended)
 		{
 			var b = entry.Value;
@@ -169,7 +157,6 @@ public static class MeshBuilder
 				tool.SetNormal(b.norm[i]);
 				tool.SetUV(b.uv[i]);
 				tool.SetUV2(b.uv2[i]);
-				tool.SetColor(b.color[i]);
 				tool.AddVertex(b.pos[i]);
 			}
 			tool.Commit(mesh);
@@ -202,14 +189,16 @@ public static class MeshBuilder
 	/// materials) and emitted as one flat-shaded surface per material,
 	/// matching the face-based mesher's material layout.
 	///
-	/// <paramref name="blendWidth"/> (in voxels, from the palette's
-	/// BlendParams) sets the width of the distance fade on mixed-material
-	/// (2-distinct) boundary triangles: each vertex's blend factor (UV2.x) is
-	/// its distance to the nearest material interface, normalized over the band
-	/// (0 at the interface for the lower id, 1 deep in the lower id; 1 at the
-	/// interface for the higher id, 0 deep in the higher id), so the surface
-	/// fades evenly from the interface into both materials (see
-	/// <see cref="BuildInterfaceDistanceField"/>).
+	/// When <paramref name="materialQuery"/> is non-null (blending enabled),
+	/// MIXED triangles — whose three vertices span 2+ distinct materials, i.e.
+	/// the bevels/edges where material regions meet on the isosurface — are
+	/// emitted as a blend-shader crossfade instead of snapping to the majority
+	/// material: each vertex carries a blend factor (UV2.x, 0 = pure A / lower
+	/// id, 1 = pure B / higher id) and the shader mixes the two materials'
+	/// textures per-pixel. The vertex materials themselves come from the padded
+	/// material field (not from this query), which is used only as the on/off
+	/// gate. Single-material triangles are unaffected. Null = no blending
+	/// (every triangle uses the per-material path).
 	/// </summary>
 	public static ArrayMesh BuildVisualMarchingCubes(
 		ChunkData chunk,
@@ -220,7 +209,7 @@ public static class MeshBuilder
 		Vector2I coord,
 		System.Func<Vector2I, ChunkData> neighborQuery,
 		System.Collections.Generic.List<Vector3> collisionOut = null,
-		float blendWidth = 1f)
+		System.Func<int, int, int, byte> materialQuery = null)
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int px = sx + 2, py = sy + 2, pz = sz + 2; // padded lattice dims
@@ -248,12 +237,6 @@ public static class MeshBuilder
 				}
 			}
 		}
-
-		// 1b) Per-voxel distance-to-nearest-material-interface field, used by
-		//     the per-vertex blend factor on mixed-material (2-distinct)
-		//     triangles (see BuildInterfaceDistanceField). Local: freed with
-		//     this build, same order of magnitude as the mesh.
-		BuildInterfaceDistanceField(chunk, blendWidth, out float[] dist, out byte[] otherMat);
 
 		// 2) Extract the single air|solid isosurface.
 		//    Ownership: each chunk draws only its +X/+Z side boundary cells
@@ -319,18 +302,12 @@ public static class MeshBuilder
 			perUv[i] = new List<Vector2>();
 		}
 
-		// Mixed-material triangles (straddling a material boundary) are emitted
-		// with a blend SHADER instead of snapping to the majority: a per-pixel
-		// crossfade between the two materials' textures, tinted per-vertex by
-		// each vertex's own material albedo (COLOR) and a per-vertex blend
-		// factor (UV2.x) derived from the vertex's distance to the nearest
-		// material interface (0 at the interface for the lower id, 1 deep in
-		// the lower id; 1 at the interface for the higher id, 0 deep in the
-		// higher id — a distance ramp over the band, see
-		// BuildInterfaceDistanceField). Buckets are keyed by the blend
-		// ShaderMaterial, so each distinct material pair gets exactly one
-		// surface.
-		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<Color> colors)>();
+		// Mixed-material triangles (their vertices span 2+ distinct materials)
+		// are emitted with a blend SHADER instead of snapping to the majority:
+		// a per-pixel crossfade between the two materials' textures, with a
+		// per-vertex blend factor (UV2.x). Buckets are keyed by the blend
+		// ShaderMaterial, so each distinct material pair gets one surface.
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s)>();
 
 		foreach (var tri in tris)
 		{
@@ -339,19 +316,6 @@ public static class MeshBuilder
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, out pa, out ma);
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out pb, out mb);
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out pc, out mc);
-
-			// Per-vertex interface distance + nearest-other material, from the
-			// chunk's interface-distance field. MUST be read from the LATTICE
-			// position (before the lattice->world transform below): the field
-			// is indexed by chunk-local voxel, and lattice (ix,iy,iz) maps to
-			// voxel (ix-1,iy-1,iz-1). -1 = deep inside one material (no
-			// interface within the band); 0 other = unreached.
-			float da = VoxelDistance(dist, sx, sy, sz, pa.X, pa.Y, pa.Z);
-			float db = VoxelDistance(dist, sx, sy, sz, pb.X, pb.Y, pb.Z);
-			float dc = VoxelDistance(dist, sx, sy, sz, pc.X, pc.Y, pc.Z);
-			byte othA = VoxelOther(otherMat, sx, sy, sz, pa.X, pa.Y, pa.Z);
-			byte othB = VoxelOther(otherMat, sx, sy, sz, pb.X, pb.Y, pb.Z);
-			byte othC = VoxelOther(otherMat, sx, sy, sz, pc.X, pc.Y, pc.Z);
 
 			// Lattice -> world. The padding shifts the lattice by one, and the
 			// +0.5 puts every field point at its voxel's CENTER, so the
@@ -373,142 +337,31 @@ public static class MeshBuilder
 
 			n = -n.Normalized();
 
-			// Triangle material. Count how many DISTINCT material ids this
-			// triangle has (ignoring 0/air) and branch:
-			//  * 1 distinct  -> the normal per-material path (unchanged).
-			//  * 2 distinct  -> the common boundary case (bevel straddling a
-			//    material interface, e.g. grass|dirt): emit with the palette's
-			//    50/50 blended material so the edge fades between the two.
-			//  * 3 distinct  -> rare triple junction: fall back to the majority
-			//    vote, no blending (documented edge case).
-			int distinct;
-			if (ma == mb || ma == mc)
+			// Is this triangle at a material interface (its 3 vertices span 2+
+			// distinct materials)? When blending is on, those triangles are
+			// emitted as a blend-shader crossfade instead of snapping to the
+			// majority material — that's the whole point of the effect.
+			bool isMixed = ma != mb || ma != mc;
+			if (isMixed && materialQuery != null)
 			{
-				distinct = (mb == mc) ? 1 : 2;
-			}
-			else if (mb == mc)
-			{
-				distinct = 2;
+				EmitBlendedTriangle(blended, palette, pa, pb, pc, n, ma, mb, mc);
 			}
 			else
 			{
-				distinct = 3;
-			}
-
-			int m; // resolved single material (1 distinct, or 3-distinct fallback)
-			ShaderMaterial blendMat = null; // non-null only for the 2-distinct case
-			int idA = 0, idB = 0; // the two distinct ids (2-distinct case only)
-			float uvScale;
-
-			if (distinct == 2)
-			{
-				// Identify the two distinct ids and their majority (the
-				// id appearing twice, or the first one on a tie).
-				if (ma == mb)
-				{
-					m = ma;
-					idA = ma;
-					idB = mc;
-				}
-				else if (ma == mc)
-				{
-					m = ma;
-					idA = ma;
-					idB = mb;
-				}
-				else // mb == mc
-				{
-					m = mb;
-					idA = mb;
-					idB = mc;
-				}
-				// Sanity: a boundary vertex against air would yield an
-				// unresolvable id — skip the triangle entirely (visual AND
-				// collision), matching the original out-of-range `continue`
-				// which ran BEFORE the collision add. Keeping collision in lock
-				// step with the visual surface avoids invisible colliders.
-				if (idA < 1 || idA > lastMaterial || idB < 1 || idB > lastMaterial)
-				{
-					continue;
-				}
-
-				blendMat = palette.GetBlendShaderMaterial(idA, idB);
-				uvScale = palette.TextureScales[m - 1]; // dominant material's tiling
-			}
-			else
-			{
-				// Majority vote of the vertex materials (1 distinct: the shared
-				// id; 3 distinct: rare triple-junction fallback, no blending).
-				m = ma == mb || ma == mc ? ma : (mb == mc ? mb : mc);
+				// Single-material triangle (or blending off): majority vote of
+				// the vertex materials.
+				int m = ma == mb || ma == mc ? ma : (mb == mc ? mb : mc);
 				if (m < 1 || m > lastMaterial)
 				{
-					// Air (impossible: every crossing has a solid endpoint) or a
-					// material id with no palette slot — skip instead of indexing
-					// the per-material lists out of bounds.
+					// Air (impossible: every crossing has a solid endpoint) or
+					// a material id with no palette slot — skip instead of
+					// indexing the per-material lists out of bounds.
 					continue;
 				}
-				uvScale = palette.TextureScales[m - 1];
-			}
 
-			if (blendMat != null)
-			{
-				// Mixed-material triangle. Distance-based per-vertex blend
-				// factor (UV2.x): each vertex's factor is its distance to the
-				// nearest material interface, normalized over the band, mapped
-				// so the triangle's lower id is 0 and its higher id is 1 (the
-				// shader's TextureA / TextureB are the lower / higher id's
-				// texture, respectively — GetBlendShaderMaterial orders the pair).
-				// 0.5 at the interface, pure at the band edge: a smooth ramp.
-				int idLow = Math.Min(idA, idB);
-				int idHigh = Math.Max(idA, idB);
-				float fa = DistanceFactor(ma, (int)othA, da, idLow, idHigh, blendWidth);
-				float fb = DistanceFactor(mb, (int)othB, db, idLow, idHigh, blendWidth);
-				float fc = DistanceFactor(mc, (int)othC, dc, idLow, idHigh, blendWidth);
-
-				// Emit the triangle into the blend bucket only when it actually
-				// touches an interface within the band (at least one vertex has
-				// a known distance). A 2-distinct triangle wholly deep in one
-				// material (all d < 0) stays on the normal per-material path
-				// (majority), which is what it would have been anyway.
-				if (da < 0f && db < 0f && dc < 0f)
-				{
-					if (m < 1 || m > lastMaterial)
-					{
-						continue;
-					}
-					var verts = perMaterial[m - 1];
-					var uvs = perUv[m - 1];
-					verts.Add(pa);
-					verts.Add(n);
-					uvs.Add(PlanarUv(pa, n, uvScale));
-					verts.Add(pb);
-					verts.Add(n);
-					uvs.Add(PlanarUv(pb, n, uvScale));
-					verts.Add(pc);
-					verts.Add(n);
-					uvs.Add(PlanarUv(pc, n, uvScale));
-				}
-				else
-				{
-					if (!blended.TryGetValue(blendMat, out var bucket))
-					{
-						bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<Color>());
-						blended[blendMat] = bucket;
-					}
-					var bverts = bucket.verts;
-					var bnorms = bucket.norms;
-					var buvs = bucket.uvs;
-					var buv2s = bucket.uv2s;
-					var bcolors = bucket.colors;
-					bverts.Add(pa); bnorms.Add(n); buvs.Add(PlanarUv(pa, n, uvScale)); buv2s.Add(new Vector2(fa, 0f)); bcolors.Add(palette.Materials[ma - 1].AlbedoColor);
-					bverts.Add(pb); bnorms.Add(n); buvs.Add(PlanarUv(pb, n, uvScale)); buv2s.Add(new Vector2(fb, 0f)); bcolors.Add(palette.Materials[mb - 1].AlbedoColor);
-					bverts.Add(pc); bnorms.Add(n); buvs.Add(PlanarUv(pc, n, uvScale)); buv2s.Add(new Vector2(fc, 0f)); bcolors.Add(palette.Materials[mc - 1].AlbedoColor);
-				}
-			}
-			else
-			{
 				var verts = perMaterial[m - 1];
 				var uvs = perUv[m - 1];
+				float uvScale = palette.TextureScales[m - 1];
 				verts.Add(pa);
 				verts.Add(n);
 				uvs.Add(PlanarUv(pa, n, uvScale));
@@ -551,278 +404,30 @@ public static class MeshBuilder
 			tool.Commit(mesh);
 		}
 
-		// Also emit one surface per blended material pair — the mixed-material
-		// boundary triangles. Each vertex carries its own material's albedo
-		// (COLOR) and its distance-based per-vertex blend factor (UV2.x: the
-		// distance-to-interface ramp over the band), which the shader
-		// crossfades per-pixel between the two textures.
+		// Emit one surface per blended material pair — the mixed triangles
+		// that crossfade between two materials. Each vertex carries its blend
+		// factor (UV2.x: 0 = pure A / lower id, 1 = pure B / higher id).
 		foreach (var entry in blended)
 		{
-			var bverts = entry.Value.verts;
-			if (bverts.Count == 0)
+			var b = entry.Value;
+			if (b.verts.Count == 0)
 			{
 				continue;
 			}
-
-			var bnorms = entry.Value.norms;
-			var buvs = entry.Value.uvs;
-			var buv2s = entry.Value.uv2s;
-			var bcolors = entry.Value.colors;
 			var tool = new SurfaceTool();
 			tool.Begin(Mesh.PrimitiveType.Triangles);
 			tool.SetMaterial(entry.Key);
-			for (int i = 0; i < bverts.Count; i++)
+			for (int i = 0; i < b.verts.Count; i++)
 			{
-				tool.SetNormal(bnorms[i]);
-				tool.SetUV(buvs[i]);
-				tool.SetUV2(buv2s[i]);
-				tool.SetColor(bcolors[i]);
-				tool.AddVertex(bverts[i]);
+				tool.SetNormal(b.norms[i]);
+				tool.SetUV(b.uvs[i]);
+				tool.SetUV2(b.uv2s[i]);
+				tool.AddVertex(b.verts[i]);
 			}
 			tool.Commit(mesh);
 		}
 
 		return mesh;
-	}
-
-	/// <summary>
-	/// Builds the per-voxel interface-distance field for a chunk: for every
-	/// solid voxel, the graph distance (in voxels, capped at
-	/// <paramref name="blendWidth"/>) to the nearest material INTERFACE, plus
-	/// the material on the other side of that interface.
-	///
-	/// The distance is measured to the material BOUNDARY PLANE: a voxel whose
-	/// face touches a different solid material sits ON the interface (distance
-	/// 0); its inward neighbour of the SAME material is distance 1, and so on.
-	/// Air and the chunk boundary are not material interfaces (the air|solid
-	/// boundary is the mesh surface itself, not a material blend), so they
-	/// never seed a band.
-	///
-	/// Algorithm (multi-source BFS):
-	///  * Seed: every solid voxel that has a neighbour of a DIFFERENT solid
-	///    material (a voxel ON a material interface) gets distance 0 and is
-	///    enqueued as a BFS source, recording the other side's material.
-	///  * Expand: pop a voxel of material M at distance d; push each 6-
-	///    neighbour that is the SAME material M and not yet reached, at
-	///    distance d + 1, inheriting M's other-side material. Expansion stops
-	///    when d + 1 reaches the band cap, and NEVER crosses a material
-	///    boundary (only into same-material voxels), so each interface band is
-	///    computed independently.
-	///  * Tie-break: a voxel near several interfaces (a thin slab) is reached
-	///    by the CLOSEST one first (first-reached wins) — the correct
-	///    "blend toward the nearest other material" behaviour, and the reason
-	///    a voxel surrounded by one material fades evenly from all sides.
-	///
-	/// A voxel never reached (deep inside a single material, no interface
-	/// within the band) stays <c>-1</c> in <paramref name="distOut"/> (no
-	/// blend). <paramref name="otherMatOut"/> holds the other side's material
-	/// id (0 = unreached). <paramref name="ownMat"/> is simply
-	/// <c>chunk.Get(x, y, z)</c> and is not returned.
-	/// </summary>
-	private static void BuildInterfaceDistanceField(
-		ChunkData chunk,
-		float blendWidth,
-		out float[] distOut,
-		out byte[] otherMatOut)
-	{
-		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
-		int n = sx * sy * sz;
-		byte[] data = chunk.Data;
-
-		distOut = new float[n];
-		otherMatOut = new byte[n];
-		for (int i = 0; i < n; i++)
-		{
-			distOut[i] = -1f;
-		}
-
-		int cap = Mathf.Max(1, Mathf.RoundToInt(blendWidth)); // band depth (voxels)
-		var queue = new int[n];
-		int head = 0, tail = 0;
-
-		// Seed: every solid voxel that sits ON a material interface (a voxel
-		// with a neighbour of a DIFFERENT solid material) gets distance 0 and
-		// is enqueued as a BFS source. The BFS then expands inward (into
-		// same-material voxels) at distance 1, 2, ... up to the band cap.
-		//
-		// A voxel on an interface is distance 0 (the face itself is the
-		// material boundary plane). Its inward neighbour of the SAME material
-		// is distance 1, and so on. Air and the chunk boundary are not material
-		// interfaces (the air|solid boundary is the mesh surface itself), so
-		// they never seed a band.
-		for (int z = 0; z < sz; z++)
-		{
-			for (int y = 0; y < sy; y++)
-			{
-				for (int x = 0; x < sx; x++)
-				{
-					int i = x + sx * (y + sy * z);
-					byte m = data[i];
-					if (m == 0)
-					{
-						continue;
-					}
-
-					// Check all 6 directions for a different solid neighbour.
-					// If found, this voxel is on an interface (distance 0).
-					// Record the other side's material (the first one found
-					// wins; a voxel on multiple interfaces keeps the closest,
-					// which is the first-seeded one — consistent with the
-					// "nearest other material" semantics).
-					for (int f = 0; f < 6; f++)
-					{
-						Vector3I o = FaceOffsets[f];
-						int nx = x + o.X, ny = y + o.Y, nz = z + o.Z;
-						if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz)
-						{
-							continue; // chunk boundary: no interface here
-						}
-						byte nm = data[nx + sx * (ny + sy * nz)];
-						if (nm == 0 || nm == m)
-						{
-							continue; // air or same material: no interface
-						}
-						// This voxel is on an interface. Mark it distance 0
-						// and enqueue it as a BFS source (if not already
-						// reached by a closer interface).
-						if (distOut[i] < 0f)
-						{
-							distOut[i] = 0f;
-							otherMatOut[i] = nm;
-							queue[tail++] = i;
-						}
-						break; // one interface is enough to mark this voxel
-					}
-				}
-			}
-		}
-
-		// Multi-source BFS, expanding only into same-material voxels, capped at
-		// the band depth.
-		while (head < tail)
-		{
-			int i = queue[head++];
-			byte m = data[i];
-			float d = distOut[i];
-			if (d + 1f >= cap)
-			{
-				continue; // band exhausted
-			}
-			int x = i % sx;
-			int t = i / sx;
-			int y = t % sy;
-			int z = t / sy;
-			float nd = d + 1f;
-			for (int f = 0; f < 6; f++)
-			{
-				Vector3I o = FaceOffsets[f];
-				int nx = x + o.X, ny = y + o.Y, nz = z + o.Z;
-				if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz)
-				{
-					continue;
-				}
-				int ni = nx + sx * (ny + sy * nz);
-				if (data[ni] != m || distOut[ni] >= 0f)
-				{
-					continue; // different material or already reached
-				}
-				distOut[ni] = nd;
-				otherMatOut[ni] = otherMatOut[i];
-				queue[tail++] = ni;
-			}
-		}
-	}
-
-	/// <summary>
-	/// Reads the interface distance for the voxel containing the (chunk-local)
-	/// lattice point (px, py, pz): lattice (ix,iy,iz) maps to voxel
-	/// (ix-1,iy-1,iz-1), valid only when in 0..s-1. Out-of-range (a vertex on
-	/// the chunk's padded shell) or a voxel with no interface within the band
-	/// returns -1.
-	/// </summary>
-	private static float VoxelDistance(float[] dist, int sx, int sy, int sz, float px, float py, float pz)
-	{
-		int ix = (int)px, iy = (int)py, iz = (int)pz;
-		int vx = ix - 1, vy = iy - 1, vz = iz - 1;
-		if (vx < 0 || vx >= sx || vy < 0 || vy >= sy || vz < 0 || vz >= sz)
-		{
-			return -1f;
-		}
-		return dist[vx + sx * (vy + sy * vz)];
-	}
-
-	/// <summary>
-	/// Reads the other-side material for the voxel containing the (chunk-local)
-	/// lattice point (px, py, pz); 0 when out-of-range or unreached (no
-	/// interface within the band).
-	/// </summary>
-	private static byte VoxelOther(byte[] otherMat, int sx, int sy, int sz, float px, float py, float pz)
-	{
-		int ix = (int)px, iy = (int)py, iz = (int)pz;
-		int vx = ix - 1, vy = iy - 1, vz = iz - 1;
-		if (vx < 0 || vx >= sx || vy < 0 || vy >= sy || vz < 0 || vz >= sz)
-		{
-			return 0;
-		}
-		return otherMat[vx + sx * (vy + sy * vz)];
-	}
-
-	/// <summary>
-	/// The distance-based blend factor for a voxel / triangle vertex.
-	///
-	/// <paramref name="ownMat"/> is the vertex's own material, <paramref name="other"/>
-	/// the nearest other material (0 when none), <paramref name="d"/> the
-	/// distance to that interface (<c>0</c> = on the interface face, larger =
-	/// deeper into ownMat; -1 = no interface within the band), and
-	/// <paramref name="idLow"/> / <paramref name="idHigh"/> the triangle's two
-	/// material ids (lower / higher), which line up with the shader's
-	/// TextureA / TextureB (GetBlendShaderMaterial orders the pair ascending).
-	///
-	/// Mapping (ownMat == idLow, other == idHigh): factor = d / bandWidth, so
-	/// 0 at the interface (d = 0) and 1 deep in idLow (d = bandWidth). The
-	/// idHigh side is mirrored (1 - d / bandWidth): 1 at the interface, 0 deep
-	/// in idHigh. A vertex whose nearest interface is a DIFFERENT pair, or with
-	/// no interface (d < 0), falls back to the constant 0.5 equal blend.
-	///
-	/// Note: the factor is 0 at the interface (not 0.5) for the MC path because
-	/// the MC isosurface lands ON the voxel boundary (the interface plane), and
-	/// the vertex's own material is the one on the vertex's side. The shader
-	/// then crossfades toward the other material as the surface recedes into
-	/// the band. The Faces path uses a separate overload that returns 0.5 at
-	/// the interface (the face itself is the blend plane).
-	/// </summary>
-	private static float DistanceFactor(int ownMat, int other, float d, int idLow, int idHigh, float bandWidth)
-	{
-		if (other != 0 && ownMat == idLow && other == idHigh)
-		{
-			float w = Mathf.Max(bandWidth, 0.001f);
-			return Mathf.Clamp(d / w, 0f, 1f);
-		}
-		if (other != 0 && ownMat == idHigh && other == idLow)
-		{
-			float w = Mathf.Max(bandWidth, 0.001f);
-			return 1f - Mathf.Clamp(d / w, 0f, 1f);
-		}
-		return 0.5f; // deep in one material, or a different interface pair
-	}
-
-	/// <summary>
-	/// The distance-based blend factor for a Faces-path blended face.
-	///
-	/// The face voxel's own material is <paramref name="ownMat"/>; the face's
-	/// outward neighbour (the other side of the interface) is
-	/// <paramref name="neighborMat"/>. The face voxel sits ON the interface
-	/// (distance 0), so its blend factor is the constant 0.5 equal blend — the
-	/// face itself is the material boundary plane. This is the same value the
-	/// old flat-step path used; the distance-based fade is expressed by the
-	/// NEARBY voxels' faces (the band), not by this face voxel itself.
-	/// </summary>
-	private static float DistanceFactor(int ownMat, int other, float d, int neighborMat, float bandWidth)
-	{
-		// The face voxel is on the interface (d = 0): the equal 0.5 blend.
-		// (The distance-based fade is expressed by the nearby voxels' faces,
-		// which have d > 0 and get a factor that ramps toward pure material.)
-		return 0.5f;
 	}
 
 	/// <summary>
@@ -923,7 +528,8 @@ public static class MeshBuilder
 		VoxelMeshMode mode,
 		Vector2I coord,
 		System.Func<int, int, int, bool> solidQuery,
-		System.Func<Vector2I, ChunkData> neighborQuery)
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		System.Func<int, int, int, byte> materialQuery = null)
 	{
 		// The collision surface is ALWAYS the visual surface, exactly: in both
 		// mesh modes the triangles emitted into the visual mesh are also
@@ -934,12 +540,13 @@ public static class MeshBuilder
 		// separate blocky face soup that used to leave a gap under the inset
 		// visual surface.
 		var collision = new List<Vector3>();
-		// The MC boundary ramp uses the palette's current blend width
-		// (VoxelMaterialConfig.BlendWidth, pushed via SetBlendParams).
-		float blendWidth = palette.BlendParams.width;
+		// Blending: when a material query is supplied, material-interface faces
+		// (Faces mode) and mixed triangles (MarchingCubes mode) crossfade via
+		// the blend shader; null = no blending (every face/triangle snaps to a
+		// single material).
 		ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, blendWidth)
-			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, blendWidth);
+			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery)
+			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery);
 		return (visual, collision);
 	}
 
@@ -1075,6 +682,119 @@ public static class MeshBuilder
 	};
 
 	/// <summary>
+	/// Emits a face quad into the blend buckets as a per-vertex crossfade between
+	/// the face voxel's material (<paramref name="m"/>) and the outward
+	/// neighbour's material (<paramref name="neighbor"/>). The pair is ordered
+	/// ascending (A = lower id, B = higher id, matching
+	/// <see cref="VoxelMaterialPalette.GetBlendShaderMaterial"/>).
+	///
+	/// The blend factor is a VERTICAL gradient across the face: 0 at the top, 1
+	/// at the bottom (UV2.x). For a horizontal interface (grass over dirt, the
+	/// common case) the top corner belongs to the upper material and the bottom
+	/// to the lower one, so the gradient fades the upper material out downward.
+	/// The UV is tiled by the face voxel's own material scale (one full tile per
+	/// face, same as <see cref="AddFace"/>).
+	/// </summary>
+	private static void EmitBlendedFace(
+		Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2)> blended,
+		VoxelMaterialPalette palette, Vector3 origin, int face, float voxelSize, byte m, byte neighbor)
+	{
+		int idA = m < neighbor ? m : neighbor; // lower id
+		int idB = m < neighbor ? neighbor : m; // higher id
+		bool mIsA = m == idA;
+
+		ShaderMaterial bm = palette.GetBlendShaderMaterial(idA, idB);
+		if (!blended.TryGetValue(bm, out var bucket))
+		{
+			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>());
+			blended[bm] = bucket;
+		}
+
+		Vector3[] c = FaceCorners[face];
+		Vector3 n = FaceNormals[face];
+
+		Vector3 a = origin + c[0] * voxelSize;
+		Vector3 b = origin + c[1] * voxelSize;
+		Vector3 d = origin + c[2] * voxelSize;
+		Vector3 e = origin + c[3] * voxelSize;
+
+		// Vertical gradient: the two bottom corners (c[2], c[3]) get factor 1,
+		// the two top corners (c[0], c[1]) get factor 0. Convert the face voxel's
+		// material to the shader convention (1 = pure A / lower id, 0 = pure B /
+		// higher id) at each corner: the corner that "belongs" to the face voxel's
+		// material gets its side of the gradient, the other gets the opposite.
+		float fa = mIsA ? 0f : 1f; // top-left  (c[0])
+		float fb = mIsA ? 0f : 1f; // top-right (c[1])
+		float fd = mIsA ? 1f : 0f; // bottom-left  (c[2])
+		float fe = mIsA ? 1f : 0f; // bottom-right (c[3])
+
+		float uvScale = palette.TextureScales[m - 1];
+
+		// Same winding + UV table as AddFace (c[0],c[1],c[2] then c[0],c[2],c[3]).
+		bucket.pos.Add(a); bucket.pos.Add(b); bucket.pos.Add(d);
+		bucket.pos.Add(a); bucket.pos.Add(d); bucket.pos.Add(e);
+		for (int i = 0; i < 6; i++) bucket.norm.Add(n);
+		bucket.uv.Add(QuadUv[0] * uvScale); bucket.uv.Add(QuadUv[1] * uvScale); bucket.uv.Add(QuadUv[2] * uvScale);
+		bucket.uv.Add(QuadUv[0] * uvScale); bucket.uv.Add(QuadUv[2] * uvScale); bucket.uv.Add(QuadUv[3] * uvScale);
+		bucket.uv2.Add(new Vector2(fa, 0f)); bucket.uv2.Add(new Vector2(fb, 0f)); bucket.uv2.Add(new Vector2(fd, 0f));
+		bucket.uv2.Add(new Vector2(fa, 0f)); bucket.uv2.Add(new Vector2(fd, 0f)); bucket.uv2.Add(new Vector2(fe, 0f));
+	}
+
+	/// <summary>
+	/// Emits a Marching-Cubes triangle into the blend buckets as a per-vertex
+	/// crossfade between two materials. Each vertex's material (from the MC
+	/// crossing) determines its blend factor: a vertex whose material IS the
+	/// lower id (A) gets 0 (pure A), a vertex whose material IS the higher id
+	/// (B) gets 1 (pure B), and a vertex with a third material gets the
+	/// majority's side. The pair is ordered ascending (A = lower id, B = higher
+	/// id, matching <see cref="VoxelMaterialPalette.GetBlendShaderMaterial"/>).
+	/// </summary>
+	private static void EmitBlendedTriangle(
+		Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s)> blended,
+		VoxelMaterialPalette palette, Vector3 pa, Vector3 pb, Vector3 pc, Vector3 n, int ma, int mb, int mc)
+	{
+		// The interface is the pair of the two most common vertex materials
+		// (a triangle spans 2 or 3 distinct materials; the 3rd, if any, is a
+		// minority vertex on a bevel and snaps to the dominant side below).
+		// Candidate pair: (ma, the first of mb/mc that differs from ma).
+		int a = ma, b = ma != mb ? mb : mc;
+		// Count occurrences of each candidate among the three vertices:
+		int ca = 1 + (mb == a ? 1 : 0) + (mc == a ? 1 : 0);
+		int cb = 1 + (ma == b ? 1 : 0) + (mc == b ? 1 : 0);
+		if (cb > ca)
+		{
+			// The second candidate is the more common one: swap so A is dominant.
+			int t = a; a = b; b = t;
+			int tc = ca; ca = cb; cb = tc;
+		}
+		int idA = a, idB = b;
+		if (idA > idB) { int t = idA; idA = idB; idB = t; }
+
+		ShaderMaterial bm = palette.GetBlendShaderMaterial(idA, idB);
+		if (!blended.TryGetValue(bm, out var bucket))
+		{
+			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>());
+			blended[bm] = bucket;
+		}
+
+		// Per-vertex blend factor: 0 = pure A (lower id), 1 = pure B (higher id).
+		// A vertex whose material is the dominant one (a, = idA or idB with the
+		// higher count) snaps to that side; a vertex with the other interface
+		// material snaps to its side. (Every vertex is one of the pair: the pair
+		// is built from the distinct vertex materials.)
+		float Factor(int matId) => matId == idA ? 0f : 1f;
+
+		float uvScale = palette.TextureScales[idA - 1];
+
+		bucket.verts.Add(pa); bucket.norms.Add(n);
+		bucket.uvs.Add(PlanarUv(pa, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(ma), 0f));
+		bucket.verts.Add(pb); bucket.norms.Add(n);
+		bucket.uvs.Add(PlanarUv(pb, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mb), 0f));
+		bucket.verts.Add(pc); bucket.norms.Add(n);
+		bucket.uvs.Add(PlanarUv(pc, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mc), 0f));
+	}
+
+	/// <summary>
 	/// World-aligned planar UV for the Marching-Cubes mesh: project the point
 	/// onto the plane whose axis is dominant in the face normal. Flat regions
 	/// get continuous, seamless tiling; bevels blend between projections.
@@ -1100,80 +820,6 @@ public static class MeshBuilder
 		}
 
 		return uv * scale;
-	}
-
-	/// <summary>
-	/// Reads the material id of the voxel one step from (wx, y, wz) in the
-	/// direction <paramref name="offset"/>. Out-of-chunk coordinates return air
-	/// (0) — the chunk's boundary shell, matching the "unloaded neighbour is
-	/// solid" rule only where the mesher actually samples; here a missing voxel
-	/// simply means "no different-material neighbour" (no blend).
-	/// </summary>
-	private static byte GetNeighborVoxel(ChunkData chunk, int wx0, int wz0, Vector3I o, int wx, int y, int wz)
-	{
-		int lx = wx - wx0 + o.X;
-		int ly = y + o.Y;
-		int lz = wz - wz0 + o.Z;
-		if (lx < 0 || lx >= chunk.SizeX || ly < 0 || ly >= chunk.SizeY || lz < 0 || lz >= chunk.SizeZ)
-		{
-			return 0;
-		}
-		return chunk.Get(lx, ly, lz);
-	}
-
-	// Emits one flat-shaded quad (6 vertices) for a face of a unit cube that
-	// borders a DIFFERENT solid material. Every vertex carries the face's own
-	// material albedo (COLOR), a planar UV, and the face's distance-based blend
-	// factor (UV2.x) supplied by the caller from the chunk's interface-distance
-	// field; the blend shader crossfades the two materials' textures per-pixel
-	// by that factor. The outward face normal is stored for lighting.
-	//
-	// <paramref name="blendFactor"/> is the face's blend factor (UV2.x). The
-	// face voxel sits ON the material interface (distance 0), so its factor is
-	// the constant 0.5 equal blend (the face itself IS the boundary plane). The
-	// distance-based fade over the band is expressed by the nearby voxels'
-	// faces (see BuildInterfaceDistanceField). All 6 vertices of the quad share
-	// the factor — a face is one voxel, one distance.
-	private static void AddBlendedFace(
-		(List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<Color> color) bucket,
-		Vector3 origin, int face, float voxelSize, Color albedo, float uvScale, float blendFactor)
-	{
-		Vector3[] c = FaceCorners[face];
-		Vector3 n = FaceNormals[face];
-
-		Vector3 a = origin + c[0] * voxelSize;
-		Vector3 b = origin + c[1] * voxelSize;
-		Vector3 d = origin + c[2] * voxelSize;
-		Vector3 e = origin + c[3] * voxelSize;
-
-		Vector2 blend = new Vector2(Mathf.Clamp(blendFactor, 0f, 1f), 0f);
-
-		bucket.pos.Add(a);
-		bucket.pos.Add(b);
-		bucket.pos.Add(d);
-		bucket.pos.Add(a);
-		bucket.pos.Add(d);
-		bucket.pos.Add(e);
-
-		for (int i = 0; i < 6; i++)
-		{
-			bucket.norm.Add(n);
-		}
-
-		// Same UV table as AddFace: one full texture tile per voxel face,
-		// tiled uvScale times.
-		bucket.uv.Add(QuadUv[0] * uvScale);
-		bucket.uv.Add(QuadUv[1] * uvScale);
-		bucket.uv.Add(QuadUv[2] * uvScale);
-		bucket.uv.Add(QuadUv[0] * uvScale);
-		bucket.uv.Add(QuadUv[2] * uvScale);
-		bucket.uv.Add(QuadUv[3] * uvScale);
-
-		for (int i = 0; i < 6; i++)
-		{
-			bucket.uv2.Add(blend);
-			bucket.color.Add(albedo);
-		}
 	}
 
 	// Emits the same quad as a bare triangle soup for the collision shape

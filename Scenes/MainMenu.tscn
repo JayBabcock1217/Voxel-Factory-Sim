@@ -1,11 +1,10 @@
 [gd_scene format=3 uid="uid://c8skfy68lxu21"]
 
-[ext_resource type="Script" path="res://Scripts/UI/MainMenu.cs" id="1_mainmenu"]
-[ext_resource type="Script" path="res://Scripts/Voxel/WorldSave.cs" id="2_worldsave"]
+[ext_resource type="Script" uid="uid://dcnsyehqpqo33" path="res://Scripts/UI/MainMenu.cs" id="1_mainmenu"]
+[ext_resource type="Script" uid="uid://bbv1r43h3vyi3" path="res://Scripts/Voxel/WorldSave.cs" id="2_worldsave"]
 
-[node name="MainMenu" type="CanvasLayer"]
-layer = 1
+[node name="MainMenu" type="CanvasLayer" unique_id=811105650]
 script = ExtResource("1_mainmenu")
 
-[node name="WorldSave" type="Node" parent="."]
+[node name="WorldSave" type="Node" parent="." unique_id=294548750]
 script = ExtResource("2_worldsave")

@@ -122,6 +122,15 @@ public sealed class VoxelMaterialPalette
 	public Texture2D[] Textures { get; private set; } = Array.Empty<Texture2D>();
 
 	/// <summary>
+	/// The per-material albedo tint (index = material id - 1), mirroring
+	/// <see cref="VoxelMaterialEntry.AlbedoColor"/>. The blend shader applies
+	/// this tint exactly like <see cref="StandardMaterial3D"/> does
+	/// (ALBEDO = tint × texture) so the crossfade reads the same brightness as
+	/// the plain materials. Updated in place by <see cref="Apply"/>.
+	/// </summary>
+	public Color[] Tints { get; private set; } = Array.Empty<Color>();
+
+	/// <summary>
 	/// The texture for material <paramref name="id"/> (null when the material has
 	/// no texture or the id is unconfigured). The inventory / hotbar / recipe UI
 	/// uses this to draw the terrain's own texture as the item icon.
@@ -129,22 +138,43 @@ public sealed class VoxelMaterialPalette
 	public Texture2D GetTexture(int id)
 		=> id > 0 && id < Textures.Length ? Textures[id - 1] : null;
 
+	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
+	public int MaterialCount { get; private set; }
+
+	/// <summary>
+	/// Whether the material-blend crossfade is enabled (mirrors
+	/// <see cref="VoxelMaterialConfig.EnableBlend"/>). The mesh builders use this
+	/// to decide whether material-interface faces crossfade. Set by the world in
+	/// <c>ApplyMaterials</c>; a change requires a remesh (the world handles that
+	/// via the config's BlendChanged event).
+	/// </summary>
+	public bool BlendEnabled { get; set; }
+
+	// ------------------------------------------------------------------
+	// Material-blend crossfade
+	// ------------------------------------------------------------------
+
 	/// <summary>
 	/// The shared blend shader (one <see cref="Shader"/> instance per palette)
 	/// whose two samplers crossfade two material textures per-pixel. The
-	/// per-vertex albedo tint (COLOR) and blend factor (UV2.x) are supplied by
-	/// the mesh builder, so a single shader serves every material pair.
+	/// per-vertex blend factor (UV2.x) is supplied by the mesh builder, so a
+	/// single shader serves every material pair.
 	/// </summary>
 	private Shader _blendShader;
+
+	// Blended shader materials cached per (idA, idB) pair. Cleared in Resize(),
+	// where the Materials/Textures arrays are rebuilt (cached materials would then
+	// reference stale textures).
+	private readonly System.Collections.Generic.Dictionary<int, ShaderMaterial> _blendShaderCache = new();
 
 	/// <summary>
 	/// A <see cref="ShaderMaterial"/> that crossfades the two given materials'
 	/// textures per-pixel. Cached per unordered (idA, idB) pair so a chunk build
 	/// allocates at most one material per distinct pair. The shader samples both
 	/// materials' albedo textures (a 1×1 white fallback when a material has none)
-	/// and mixes them by the per-vertex blend factor (UV2.x) scaled by the
-	/// palette's <see cref="BlendParams"/> strength; the per-vertex albedo tint
-	/// (COLOR) is applied per-material by the mesh builder.
+	/// and mixes them by the per-vertex blend factor (UV2.x: 0 = pure A / lower
+	/// id, 1 = pure B / higher id). The pair is ALWAYS ordered by id: A = lower
+	/// id, B = higher id, so the same material is returned for (a,b) and (b,a).
 	/// </summary>
 	public ShaderMaterial GetBlendShaderMaterial(int idA, int idB)
 	{
@@ -160,9 +190,6 @@ public sealed class VoxelMaterialPalette
 			return cached;
 		}
 
-		var matA = Materials[idA - 1];
-		var matB = Materials[idB - 1];
-
 		if (_blendShader == null)
 		{
 			_blendShader = new Shader { Code = BlendShaderCode };
@@ -170,82 +197,90 @@ public sealed class VoxelMaterialPalette
 
 		var sm = new ShaderMaterial();
 		sm.SetShader(_blendShader);
-		sm.SetShaderParameter(new StringName("TextureA"), matA.AlbedoTexture ?? FallbackTexture);
-		sm.SetShaderParameter(new StringName("TextureB"), matB.AlbedoTexture ?? FallbackTexture);
-		// The blend shader's roughness / metallic / strength are uniform on every
-		// pair (driven by VoxelMaterialConfig's Blend group), so bake them into
-		// each cached material from the current BlendParams.
-		sm.SetShaderParameter(new StringName("Roughness"), BlendParams.roughness);
-		sm.SetShaderParameter(new StringName("Metallic"), BlendParams.metallic);
-		sm.SetShaderParameter(new StringName("BlendStrength"), BlendParams.strength);
+		sm.SetShaderParameter(new StringName("TextureA"), Textures[idA - 1] ?? FallbackTexture);
+		sm.SetShaderParameter(new StringName("TextureB"), Textures[idB - 1] ?? FallbackTexture);
+		// Each material's AlbedoColor tint, applied in the shader exactly like
+		// StandardMaterial3D (ALBEDO = tint * texture) so the blend reads the
+		// same brightness as the plain materials. Out-of-range = white tint.
+		sm.SetShaderParameter(new StringName("TintA"), Tints.Length > idA - 1 ? Tints[idA - 1] : Colors.White);
+		sm.SetShaderParameter(new StringName("TintB"), Tints.Length > idB - 1 ? Tints[idB - 1] : Colors.White);
 		_blendShaderCache[key] = sm;
 		return sm;
 	}
 
 	/// <summary>
-	/// The current blend parameters (width in voxels, roughness, metallic,
-	/// strength). Read by <see cref="GetBlendShaderMaterial"/> (which bakes
-	/// roughness / metallic / strength into each cached ShaderMaterial) and by
-	/// the mesh builders (the MC boundary ramp uses width). Updated via
-	/// <see cref="SetBlendParams"/>.
+	/// Drops all cached blend shader materials so they are rebuilt on the next
+	/// mesh build. Call this when a material's <see cref="VoxelMaterialEntry
+	/// .AlbedoColor"/> (the tint baked into the cached ShaderMaterials) changes,
+	/// or its texture changes — otherwise a cached pair keeps the stale tint.
 	/// </summary>
-	public (float width, float roughness, float metallic, float strength) BlendParams { get; private set; } = (1f, 0.9f, 0f, 1f);
-
-	/// <summary>
-	/// Stores the new blend parameters and clears the blended ShaderMaterial
-	/// cache: the cached materials bake in the roughness / metallic / strength
-	/// uniforms, so they must be rebuilt when the parameters change.
-	/// </summary>
-	public void SetBlendParams(float width, float roughness, float metallic, float strength)
-	{
-		BlendParams = (width, roughness, metallic, strength);
-		_blendShaderCache.Clear();
-	}
+	public void ClearBlendCache() => _blendShaderCache.Clear();
 
 	/// <summary>
 	/// The spatial-shader source backing <see cref="GetBlendShaderMaterial"/>.
 	/// Kept verbatim in C# (and mirrored in MaterialBlendShader.gdshader) so the
 	/// blend works without a compiled shader resource.
+	///
+	/// Four correctness gotchas are baked in (all learned the hard way):
+	///  * The samplers MUST be declared :source_color — the material textures are
+	///    sRGB, and a plain sampler reads sRGB bytes as linear values, which the
+	///    engine then converts back to sRGB on output, producing an overexposed
+	///    wash. source_color gives the SAME sRGB->linear handling StandardMaterial3D
+	///    applies, so the blend matches the rest of the terrain.
+	///  * The mesh UVs are tiled by the per-material TextureScale and routinely
+	///    exceed 1.0; a raw spatial sampler has no texture_repeat, so wrap with
+	///    fract(UV) to tile exactly like the standard materials.
+	///  * The ALBEDO MUST be tinted by each material's AlbedoColor, mixed by the
+	///    blend factor — StandardMaterial3D computes ALBEDO = AlbedoColor ×
+	///    albedoTexture, so skipping the tint (as the first version did) made the
+	///    blend visibly LIGHTER than the plain materials. Tinting both sides and
+	///    mixing makes the blend's albedo path identical to the standard one.
+	///  * Godot spatial shaders have NO WORLD_POSITION built-in. VERTEX is in
+	///    model (local) space in vertex(), so the world position is
+	///    (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz.
 	/// </summary>
 	private const string BlendShaderCode = @"shader_type spatial;
 
-// repeat_enable wraps UVs at the sampler (the shader equivalent of
-// StandardMaterial3D.TextureRepeat) so tiled UVs > 1.0 work; source_color
-// applies the same sRGB->linear handling the standard materials use.
 uniform sampler2D TextureA : source_color, filter_linear_mipmap, repeat_enable;
 uniform sampler2D TextureB : source_color, filter_linear_mipmap, repeat_enable;
+// Per-material albedo tint, applied exactly like StandardMaterial3D does:
+// ALBEDO = tint * texture. Without this the blend skips the tint and reads
+// lighter than the plain (non-blended) materials.
+uniform vec4 TintA;
+uniform vec4 TintB;
 
-uniform float Roughness : hint_range(0.0, 1.0) = 0.9;
-uniform float Metallic : hint_range(0.0, 1.0) = 0.0;
-uniform float BlendStrength : hint_range(0.0, 2.0) = 1.0;
-
-varying vec2 blendVarying;
+varying float vFactor;
 
 void vertex() {
-	// UV2.x carries the per-vertex blend factor (0 = pure A, 1 = pure B).
-	blendVarying = UV2;
+	// UV2.x carries the per-vertex blend factor (0 = pure A / lower id,
+	// 1 = pure B / higher id). The mesh builder computes it as a vertical
+	// gradient across the face.
+	vFactor = UV2.x;
 }
 
 void fragment() {
-	// The mesh UVs are tiled by the per-material TextureScale (and in
-	// MarchingCubes mode are world-position based), so they routinely exceed
-	// 1.0. A raw spatial sampler has no texture_repeat (that is a
-	// StandardMaterial3D property), so wrap the UV with fract() to tile exactly
-	// like the standard materials — without it, UVs >= 1.0 sample outside the
-	// texture and clamp to the edge mip (which reads as white).
+	// Tiled UVs (see the gotchas in the C# doc): wrap with fract() to tile
+	// beyond 1.0, since a raw spatial sampler has no texture_repeat.
 	vec2 tuv = fract(UV);
-	vec4 ta = texture(TextureA, tuv);
-	vec4 tb = texture(TextureB, tuv);
-	float f = clamp(blendVarying.x, 0.0, 1.0);
-	// BlendStrength scales how much of the second texture is mixed in.
-	// NOTE: we deliberately do NOT multiply by the per-vertex albedo tint
-	// (COLOR.rgb) here. The textures already carry each material's color, so
-	// mixing them directly is a pure crossfade that can never be brighter than
-	// either source. Multiplying by COLOR (the material's albedo color) on top
-	// of the texture was pushing the blend whiter than both materials alone.
-	ALBEDO = mix(ta.rgb, tb.rgb, clamp(f * BlendStrength, 0.0, 1.0));
-	ROUGHNESS = Roughness;
-	METALLIC = Metallic;
+	vec4 ta = texture(TextureA, tuv) * TintA;
+	vec4 tb = texture(TextureB, tuv) * TintB;
+	float f = clamp(vFactor, 0.0, 1.0);
+	// The samplers are :source_color and the tint is the linear AlbedoColor,
+	// so each side is EXACTLY what StandardMaterial3D produces for that
+	// material's ALBEDO — mixing them gives a crossfade that matches the
+	// plain materials at f=0 and f=1 and reads the same brightness in between.
+	ALBEDO = mix(ta.rgb, tb.rgb, f);
+	// Match the standard materials' PBR response EXACTLY. The plain materials
+	// (VoxelMaterialEntry defaults) are: Roughness 1.0, Metallic 0.0, and
+	// SchlickGgx specular with MetallicSpecular 0.05. In a raw spatial shader
+	// the SchlickGgx specular strength is the SPECULAR output — leaving it at
+	// the 0.5 default adds ~10x the sheen the plain material has, which is what
+	// made the blend read BRIGHTER. Pinning SPECULAR to 0.05 (and ROUGHNESS to
+	// 1.0) reproduces the plain material's diffuse + subtle specular, so the
+	// crossfade reads the same brightness as the non-blended surfaces.
+	ROUGHNESS = 1.0;
+	SPECULAR = 0.05;
+	METALLIC = 0.0;
 }
 ";
 
@@ -255,14 +290,6 @@ void fragment() {
 	/// </summary>
 	private static Texture2D FallbackTexture { get; } = ImageTexture.CreateFromImage(
 		Image.CreateEmpty(1, 1, false, Image.Format.Rgb8));
-
-	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
-	public int MaterialCount { get; private set; }
-
-	// Blended shader materials cached per (idA, idB) pair by
-	// GetBlendShaderMaterial. Cleared in Resize(), where the Materials array
-	// is rebuilt (cached materials would then reference stale textures).
-	private readonly System.Collections.Generic.Dictionary<int, ShaderMaterial> _blendShaderCache = new();
 
 	public VoxelMaterialPalette()
 	{
@@ -279,6 +306,13 @@ void fragment() {
 	/// so each is mutated in place — a live update that needs no remesh. When the
 	/// material SET changes (count or ids), the caller resizes via
 	/// <see cref="Resize"/> and flags chunks for a rebuild.
+	///
+	/// Brighter-look rule: a material that has a TEXTURE gets a white AlbedoColor
+	/// tint, so the texture shows at full brightness (the texture carries the
+	/// color). Untextured materials keep their configured AlbedoColor (it IS the
+	/// color — there is no texture to brighten). This applies to BOTH the
+	/// StandardMaterial3D (plain surfaces) and the blend shader's tint, so the
+	/// crossfade and the plain materials read identically.
 	/// </summary>
 	public void Apply(VoxelMaterialConfig cfg)
 	{
@@ -286,14 +320,22 @@ void fragment() {
 		int n = Math.Min(Materials.Length, defs.Length);
 		for (int i = 0; i < n; i++)
 		{
-			if (defs[i].Entry != null)
+			if (defs[i].Entry == null)
 			{
-				ApplyEntry(Materials[i], defs[i].Entry);
+				continue;
 			}
-			TextureScales[i] = defs[i].Entry != null ? defs[i].Entry.TextureScale : 1f;
+
+			bool hasTexture = defs[i].Entry.Texture != null;
+			// A textured material shows the texture at full brightness (white
+			// tint); an untextured one keeps its configured color.
+			Color tint = hasTexture ? Colors.White : defs[i].Entry.AlbedoColor;
+
+			ApplyEntry(Materials[i], defs[i].Entry, tint);
+			TextureScales[i] = defs[i].Entry.TextureScale;
 			// Expose the texture directly so the UI can draw the same texture
 			// it uses on the terrain as the item icon.
-			Textures[i] = defs[i].Entry != null ? defs[i].Entry.Texture : null;
+			Textures[i] = defs[i].Entry.Texture;
+			Tints[i] = tint;
 		}
 	}
 
@@ -310,22 +352,25 @@ void fragment() {
 			count = 0;
 		}
 
-		// The Materials array is rebuilt below, so any cached blended shader
-		// materials would reference stale textures.
+		// The Materials/Textures arrays are rebuilt below, so any cached blended
+		// shader materials would reference stale textures.
 		_blendShaderCache.Clear();
 
 		var old = Materials;
 		var oldScales = TextureScales;
 		var oldTextures = Textures;
+		var oldTints = Tints;
 		var newMaterials = new StandardMaterial3D[count];
 		var newScales = new float[count];
 		var newTextures = new Texture2D[count];
+		var newTints = new Color[count];
 		int keep = Math.Min(old.Length, count);
 		for (int i = 0; i < keep; i++)
 		{
 			newMaterials[i] = old[i];
 			newScales[i] = oldScales[i];
 			newTextures[i] = i < oldTextures.Length ? oldTextures[i] : null;
+			newTints[i] = i < oldTints.Length ? oldTints[i] : Colors.White;
 		}
 		for (int i = keep; i < count; i++)
 		{
@@ -347,17 +392,25 @@ void fragment() {
 			};
 			newScales[i] = 1f;
 			newTextures[i] = null;
+			newTints[i] = Colors.White;
 		}
 
 		Materials = newMaterials;
 		TextureScales = newScales;
 		Textures = newTextures;
+		Tints = newTints;
 		MaterialCount = count;
 	}
 
-	private static void ApplyEntry(StandardMaterial3D material, VoxelMaterialEntry entry)
+	/// <summary>
+	/// Copies a config entry onto a material. <paramref name="albedoTint"/> is
+	/// the AlbedoColor to apply — normally the entry's own color, but a white
+	/// tint for textured materials (so the texture shows at full brightness;
+	/// see <see cref="Apply"/>).
+	/// </summary>
+	private static void ApplyEntry(StandardMaterial3D material, VoxelMaterialEntry entry, Color albedoTint)
 	{
-		material.AlbedoColor = entry.AlbedoColor;
+		material.AlbedoColor = albedoTint;
 		material.AlbedoTexture = entry.Texture;
 
 		// Repeat mode is what lets TextureScale tile beyond one 0..1 face:
