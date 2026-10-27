@@ -32,6 +32,18 @@ public enum VoxelMeshMode
 [GlobalClass]
 public partial class VoxelWorld : Node3D
 {
+	/// <summary>
+	/// The render layer every terrain chunk mesh is placed on (layer 2). This
+	/// is what lets the <c>DirectionalLight3D</c> sun cast real-time shadows of
+	/// non-terrain entities (player, machines, drops — all on the default layer
+	/// 1) ONTO the terrain without the terrain itself casting a shadow: the sun's
+	/// shadow <c>CasterMask</c> is layer 1 only, so the layer-2 terrain never
+	/// enters the shadow map, but it still receives the shadow (the Caster Mask
+	/// does not gate receiving). Keep in sync with the DirectionalLight3D's
+	/// <c>Shadow &gt; Caster Mask</c> in <c>Scenes/Main.tscn</c>.
+	/// </summary>
+	public const int TerrainRenderLayer = 2;
+
 	[ExportGroup("Chunks")]
 	/// <summary>Chunk width/depth in voxels (XZ).</summary>
 	[Export(PropertyHint.Range, "8,64,8")]
@@ -240,6 +252,141 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public VoxelMeshMode MeshMode { get; set; } = VoxelMeshMode.Faces;
 
+	[ExportGroup("Lighting")]
+	/// <summary>
+	/// The brightest the DARKEST spots get: a floor (0..1) applied to the
+	/// per-voxel light before it is written to the mesh. 0 = fully black where
+	/// there is no light (the default — enclosed cave interiors read near-black);
+	/// higher values lift the shadows so the darkest spots are a dark grey
+	/// instead of black (0.25 = a quarter-bright floor, 1.0 = no darkening at
+	/// all). Open-sky light (level 15) is always 1.0 and is unaffected; only the
+	/// dark side of the 0..1 light range is raised toward this floor. Changing
+	/// it (in the inspector or in code) rebuilds all loaded chunks, because the
+	/// light is baked into the mesh UVs.
+	/// </summary>
+	[Export(PropertyHint.Range, "0.0,1.0,0.01")]
+	public float MinLight
+	{
+		get => _minLight;
+		set
+		{
+			float v = Mathf.Clamp(value, 0f, 1f);
+			if (Mathf.IsEqualApprox(v, _minLight))
+			{
+				return;
+			}
+			_minLight = v;
+			// The light is baked into the mesh UVs, so a floor change requires
+			// every loaded chunk to re-mesh. (No-op before the tree is set up.)
+			if (IsInsideTree())
+			{
+				foreach (VoxelChunk chunk in _chunks.Values)
+				{
+					chunk.NeedsMesh = true;
+				}
+			}
+		}
+	}
+	private float _minLight = 0.0f;
+
+	/// <summary>
+	/// The maximum light level (0..maxLevel). Open-sky air is seeded at this
+	/// level and light decays by 1 per voxel, so it reaches zero after
+	/// <see cref="MaxLightLevel"/> voxels. The Minecraft default is 15 (light
+	/// penetrates ~15 voxels). Raise it to make caves stay lit further in and
+	/// the fade from a cave mouth stretch over more voxels (e.g. 30 = twice as
+	/// far). Lower it for quicker falloff. Changing it rebuilds all loaded
+	/// chunks (the light is baked into the mesh UVs).
+	/// </summary>
+	[Export(PropertyHint.Range, "1,255,1")]
+	public int MaxLightLevel
+	{
+		get => _maxLightLevel;
+		set
+		{
+			int v = Mathf.Clamp(value, 1, 255);
+			if (v == _maxLightLevel)
+			{
+				return;
+			}
+			_maxLightLevel = v;
+			// The light is baked into the mesh UVs, so a max-level change
+			// requires every loaded chunk to re-mesh.
+			if (IsInsideTree())
+			{
+				foreach (VoxelChunk chunk in _chunks.Values)
+				{
+					chunk.NeedsMesh = true;
+				}
+			}
+		}
+	}
+	private int _maxLightLevel = 15;
+
+	/// <summary>
+	/// The light FALLOFF CURVE: how the per-voxel light level maps to visible
+	/// brightness. The flood-filled light decays 1 level per voxel, so any cave
+	/// interior more than <see cref="MaxLightLevel"/> voxels from the nearest
+	/// opening is level 0 (black) — a linear curve (1.0) gives the faithful
+	/// Minecraft look but deep caves go hard-black with no visible gradient.
+	/// Raising this exponent (&gt;1) lifts every sub-full level, stretching the
+	/// *visible* falloff so the brightness gradient spans many more voxels and
+	/// cave interiors stay dim-but-readable instead of black. 1.0 = linear
+	/// (Minecraft), ~2.0 = gentle (caves stay visibly lit far in), 3.0+ = very
+	/// gentle. Changing it rebuilds all loaded chunks (the light is baked into
+	/// the mesh UVs).
+	/// </summary>
+	[Export(PropertyHint.Range, "1.0,6.0,0.1")]
+	public float LightFalloff
+	{
+		get => _lightFalloff;
+		set
+		{
+			float v = Mathf.Clamp(value, 1f, 6f);
+			if (Mathf.Abs(v - _lightFalloff) < 0.0001f)
+			{
+				return;
+			}
+			_lightFalloff = v;
+			// The light is baked into the mesh UVs, so a curve change requires
+			// every loaded chunk to re-mesh.
+			if (IsInsideTree())
+			{
+				foreach (VoxelChunk chunk in _chunks.Values)
+				{
+					chunk.NeedsMesh = true;
+				}
+			}
+		}
+	}
+	private float _lightFalloff = 1.0f;
+
+	/// <summary>
+	/// DEBUG: when true, the FIRST chunk to build logs a histogram of the
+	/// per-vertex light the Marching-Cubes mesh actually emits (so we can see
+	/// whether the cave surface carries a light gradient or a uniform value).
+	/// One-shot: auto-clears after the first dump. Off by default.
+	/// </summary>
+	[Export]
+	public bool DebugVertexLight
+	{
+		get => _debugVertexLight;
+		set => _debugVertexLight = value;
+	}
+	private bool _debugVertexLight = false;
+	internal static bool VertexLightDumpPending;
+
+	/// <summary>
+	/// Applies the <see cref="MinLight"/> floor to a normalized (0..1) light
+	/// value: <c>floor + light * (1 - floor)</c>. This maps 0 -> MinLight and
+	/// 1 -> 1, linearly raising the dark side while leaving full light intact.
+	/// </summary>
+	public static float ApplyMinLight(float light, float minLight)
+	{
+		float f = Mathf.Clamp(minLight, 0f, 1f);
+		return f + light * (1f - f);
+	}
+
 	[ExportGroup("LOD (Distant)")]
 	/// <summary>
 	/// Masters the Distant-Horizons-style distant level-of-detail: simplified
@@ -415,6 +562,16 @@ public partial class VoxelWorld : Node3D
 	private readonly Dictionary<Vector3I, float> _damagedHealth = new();
 
 	/// <summary>
+	/// Block light level for every voxel the player placed as a LIGHT SOURCE,
+	/// keyed by world voxel. Only non-zero levels are stored (0 = not a light
+	/// source is the implicit default and is never recorded). Complementary to
+	/// <see cref="_edits"/>: a replaced/broken voxel drops its entry so a stale
+	/// light level can't survive the voxel it belonged to. Saved to / loaded
+	/// from the <c>WorldSave</c> service (a separate v4+ section).
+	/// </summary>
+	private readonly Dictionary<Vector3I, byte> _blockLightEdits = new();
+
+	/// <summary>
 	/// The <c>WorldSave</c> service node (looked up lazily). Owns the pending
 	/// snapshot loaded from disk and the save triggers. Null when there is no
 	/// save node in the scene (the world then runs without persistence).
@@ -448,19 +605,20 @@ public partial class VoxelWorld : Node3D
 	private int _generatingBudget;
 
 	/// <summary>
-	/// Nearest-first queue of chunk coords that need generating but are not yet
-	/// started. A chunk is enqueued by the load loop and dequeued (nearest
-	/// first) by <see cref="PumpGenerationQueue"/> whenever a generation slot
-	/// frees up. This is what gives generation *priority ordering*: the thread
-	/// pool runs tasks in whatever order it pleases, so without this gate a far
-	/// chunk could be mid-generation while nearer chunks wait — the in-flight
-	/// set is always the nearest <see cref="MaxConcurrentGenerations"/>
-	/// unfinished chunks, so completions always come from the nearest ring.
-	/// Ordered by squared distance to the player at enqueue time; the player
-	/// moves slowly relative to a chunk, so a stale ordering is acceptable and
-	/// re-queued on the next frame if still pending.
+	/// Queue of chunk coords that need generating but are not yet started.
+	/// <b>Re-sorted by the player's CURRENT position every time it is pumped</b>
+	/// (see <see cref="PumpGenerationQueue"/>), so the in-flight set is always
+	/// the nearest <see cref="MaxConcurrentGenerations"/> unfinished chunks to
+	/// WHERE THE PLAYER ACTUALLY IS NOW — not to where they spawned. This is
+	/// what "prioritize by distance from the player" really means: as the
+	/// player walks, chunks ahead of them jump the queue and chunks behind them
+	/// fall away, so the load ring follows the player instead of staying pinned
+	/// to the spawn point. (The earlier origin-anchored pre-filled spiral kept
+	/// feeding chunks in the original spawn-ring order even after the player
+	/// had walked, which is why distant full-res chunks were seen generating
+	/// while the area around the player was still waiting.)
 	/// </summary>
-	private readonly System.Collections.Generic.List<(Vector2I Coord, float DistSq)> _genQueue = new();
+	private readonly List<Vector2I> _genQueue = new();
 
 	/// <summary>
 	/// True while a coord is in <see cref="_genQueue"/> (not yet started), so the
@@ -504,6 +662,12 @@ public partial class VoxelWorld : Node3D
 		// meshes that never build, so the spawn gate never opens.
 		SanitizeExports();
 
+		// One-shot vertex-light diagnostic: arm it if the export is on.
+		if (DebugVertexLight)
+		{
+			VertexLightDumpPending = true;
+		}
+
 		// VoxelTool (and any other systems) can locate us via this group.
 		AddToGroup("voxel_world");
 
@@ -529,17 +693,27 @@ public partial class VoxelWorld : Node3D
 			SaveMaterialConfig();
 		}
 
-		// A "New World" session carries a user-chosen seed (published by the
-		// main menu's slot picker and read by this scene's WorldSave node in its
-		// own _Ready, which runs first — WorldSave is an earlier sibling).
-		// Apply it to Seed BEFORE BuildConfig() so the height/cave/forest/biome
-		// noise sources and GenConfig.Seed (ores/rocks) all pick it up. A load
-		// session (no session seed) keeps the export/scene seed, and a directly-
-		// run scene (no WorldSave node) also keeps the export seed.
-		var sessionSave = GetSaveService();
-		if (sessionSave != null && sessionSave.HasSessionSeed)
+		// A "New World" session carries a user-chosen seed published by the main
+		// menu's slot picker as the STATIC WorldSave.SessionSeed / SessionHasSeed
+		// (set before the scene loads). We must read those statics HERE, in this
+		// node's _Ready, and NOT rely on the WorldSave node's instance handoff:
+		// in this scene the WorldSave node is a LATER sibling (its _Ready runs
+		// AFTER VoxelWorld's), so by the time this _Ready runs the WorldSave node
+		// has not yet transferred the statics to its instance (HasSessionSeed is
+		// still false). Reading the instance handoff here silently dropped the
+		// menu seed — the world always generated with the export seed.
+		//
+		// Consume the statics directly (read + clear) so we don't depend on the
+		// WorldSave node clearing them, and a stale seed never leaks into a later
+		// scene load. (The WorldSave node's own _Ready also clears the statics;
+		// by then they are already 0/false, so that clear is a harmless no-op.)
+		// A load session (no session seed) or a directly-run scene (no published
+		// seed) keeps the export/scene seed.
+		if (WorldSave.SessionHasSeed)
 		{
-			Seed = sessionSave.ActiveSessionSeed;
+			Seed = WorldSave.SessionSeed;
+			WorldSave.SessionSeed = 0;
+			WorldSave.SessionHasSeed = false;
 			GD.Print($"[VoxelWorld] Applying session seed {Seed} for this world.");
 		}
 
@@ -794,7 +968,18 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
-		int newCount = MaterialConfig.Materials.Length;
+		// Size the palette to the MAX material id, not the def count. Mesh
+		// builders index the palette's per-material arrays by (materialId - 1),
+		// and a voxel can hold ANY id up to 255 (e.g. the torch is id 23). If the
+		// palette were sized only to the def count, a voxel holding an id above
+		// that count (a def added in code but not yet in the saved .tres, or a
+		// gap in the id sequence) would index past the end and crash the mesh
+		// build. Sizing to the max id keeps every id-1 index in bounds.
+		int newCount = MaterialConfig.MaxId();
+		if (newCount < MaterialConfig.Materials.Length)
+		{
+			newCount = MaterialConfig.Materials.Length;
+		}
 		// Growing or shrinking the material list changes the palette's material
 		// slots (mesh material indices are id-1), so every chunk must remesh.
 		bool countChanged = Palette.MaterialCount != newCount;
@@ -890,39 +1075,47 @@ public partial class VoxelWorld : Node3D
 
 		Vector2I playerChunk = ChunkCoordOf(playerNode.GlobalPosition);
 
-		// Enqueue every in-range chunk that isn't already loaded or queued, then
-		// pump the nearest-first generation queue. The queue (not the thread
-		// pool) decides which chunk generates next, so the in-flight set is
-		// always the nearest MaxConcurrentGenerations unfinished chunks and a far
-		// chunk can never be mid-generation while nearer ones wait. SpiralCoords
-		// is only used to *enumerate* in-range coords; the queue re-sorts them by
-		// true distance to the player each frame.
-		foreach (Vector2I coord in SpiralCoords(playerChunk, RenderDistanceChunks))
-		{
-			if (_chunks.ContainsKey(coord) || _genQueued.Contains(coord))
-			{
-				continue;
-			}
-
-			_genQueued.Add(coord);
-			_genQueue.Add((coord, DistanceSq(coord, playerChunk)));
-		}
-
+		// Enqueue every in-range chunk that isn't already loaded or queued, in
+		// SPIRAL (ring) order around the player's CURRENT chunk, then pump the
+		// queue (which re-sorts by the live player position). The queue (not the
+		// thread pool) decides which chunk generates next, so the in-flight set
+		// is always the MaxConcurrentGenerations chunks nearest to where the
+		// player actually is — the load ring FOLLOWS the player: chunks ahead
+		// of them generate before chunks behind them, and a far chunk can never
+		// be mid-generation while a nearer one (relative to the player) waits.
+		//
+		// Anchoring on the live player chunk (not the fixed spawn origin) is what
+		// fixes the "distant full-res chunks generating while I walk" bug: the
+		// old origin-anchored spiral kept feeding chunks in the original
+		// spawn-ring order even after the player had moved, so chunks that were
+		// near AT SPAWN but now far got generated ahead of the chunks around the
+		// player's new position.
+		EnqueueSpiralRing(playerChunk, RenderDistanceChunks);
 		PumpGenerationQueue(playerChunk);
 
-		// One-time spawn: voxel data is now generated asynchronously, but mesh +
+		// One-time spawn: voxel data is generated asynchronously, but mesh +
 		// collision are only built in Rebuild() under the ChunksPerFrame budget.
-		// Wait until the chunk at (0,0) — the one under the player's origin —
-		// has its data generated (DataReady) and is solid (mesh + collision
-		// built), then place the player on the terrain. The player is frozen
-		// meanwhile so it can't fall through the not-yet-solid ground (its
-		// movement lives in _PhysicsProcess).
+		// Gate the spawn on the MESH of the chunk the player is standing on AND
+		// the single first ring around it (the full 3x3 neighbourhood): every
+		// one of the 9 must be present, data-ready, fully meshed (NeedsMesh
+		// clear) and not mid-build. This is what stops the player falling
+		// through the world — the player only gets physics (and becomes
+		// visible) once the ground under and around it is solid, visible
+		// geometry with a live collision shape.
+		//
+		// The wait is kept SHORT by two things: (1) the 3x3 is the first area
+		// the spiral generation order finishes, so its data is ready in the
+		// first generation batch; (2) the spawn neighbourhood is priority-boosted
+		// in the ChunksPerFrame budget (BoostSpawnNeighbourhoodPriority, called
+		// from OnGenerationComplete as each of the 9 comes ready) so those 9
+		// chunks mesh before anything else. Deliberately NOT the full render
+		// distance: the 3x3 is the tight area the player depends on (its
+		// surface scan, its seams, its collision) and it is the first thing the
+		// load order completes.
 		if (!_playerSpawned)
 		{
 			playerNode.SetPhysicsProcess(false);
-			if (_chunks.TryGetValue(Vector2I.Zero, out VoxelChunk spawnChunk)
-				&& spawnChunk.DataReady && !spawnChunk.NeedsMesh
-				&& !HasPendingEdits
+			if (SpawnNeighbourhoodReady(playerChunk) && !HasPendingEdits
 				&& SpawnOrRestorePlayer(playerNode))
 			{
 				_playerSpawned = true;
@@ -945,11 +1138,34 @@ public partial class VoxelWorld : Node3D
 		// player. Edited chunks (EditPriority > 0) sort before never-edited ones
 		// at the same distance. Chunks whose data isn't generated yet are
 		// skipped — Rebuild would no-op on them anyway.
+		//
+		// WHY THIS YIELDS RING ORDER: first-builds (chunks just generated) carry
+		// EditPriority 0, so they are ordered purely by distance-to-player —
+		// nearest first, i.e. the innermost unfinished ring. That is exactly the
+		// order generation completed them in (the gen queue is spiral-ordered),
+		// so the budget meshes the spawn neighbourhood before the outer ring.
+		// MarkNeighboursForRebuild deliberately does NOT stamp a rising priority
+		// (see its docs): doing so let a LATER (farther) completion re-prioritise
+		// the budget ahead of the not-yet-meshed inner ring, so the budget chased
+		// the newest completions "all over the place" and the spawn gate starved.
+		//
+		// STALE-PRIORITY CAP: an edit stamp from many frames ago is no longer
+		// "fresh" — if it still sits at the top, it would pin the budget to one
+		// far chunk while first-builds wait. Cap every priority to a recent
+		// window (the last ~120 stamps) so stale edits age out and distance
+		// order (the ring order) takes over again.
+		const int PriorityWindow = 120;
+		int priorityCap = _editPriorityCounter - PriorityWindow;
 		var pending = new List<VoxelChunk>();
 		foreach (VoxelChunk chunk in _chunks.Values)
 		{
 			if (chunk.NeedsMesh && chunk.DataReady)
 			{
+				if (chunk.EditPriority > 0 && chunk.EditPriority < priorityCap)
+				{
+					// Stale edit priority: age it out so it can't pin the budget.
+					chunk.EditPriority = priorityCap;
+				}
 				pending.Add(chunk);
 			}
 		}
@@ -1097,6 +1313,21 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Returns a copy of every placed block-light source this session (world
+	/// voxel → emission level 1..15). Only non-zero levels are stored. The
+	/// <c>WorldSave</c> service iterates this when collecting a snapshot (v4+).
+	/// </summary>
+	public IReadOnlyDictionary<Vector3I, byte> GetBlockLightEdits()
+	{
+		var copy = new Dictionary<Vector3I, byte>(_blockLightEdits.Count);
+		foreach (var kv in _blockLightEdits)
+		{
+			copy[kv.Key] = kv.Value;
+		}
+		return copy;
+	}
+
+	/// <summary>
 	/// Re-applies a set of saved voxel edits to the world, for one chunk. Each
 	/// (world voxel, material) pair is written via <see cref="SetVoxel"/> into
 	/// the chunk it belongs to (voxels outside the chunk or out of range are
@@ -1150,6 +1381,39 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Re-applies a set of saved block-light sources to the world, for one
+	/// chunk. Each level is written with <c>ChunkData.SetBlockLight</c> directly
+	/// (no re-mesh here — the caller flags the chunk + its 1-ring for a rebuild
+	/// in <see cref="ApplyLoadedChunk"/>). Voxels in a neighbour chunk or out of
+	/// range are ignored.
+	/// </summary>
+	public void ApplyBlockLight(IReadOnlyList<(Vector3I Voxel, byte Level)> lights)
+	{
+		if (lights == null)
+		{
+			return;
+		}
+
+		foreach (var (v, level) in lights)
+		{
+			if (v.Y < 0 || v.Y >= ChunkHeight)
+			{
+				continue;
+			}
+
+			if (!_chunks.TryGetValue(ChunkCoordOf(v.X, v.Z), out VoxelChunk chunk))
+			{
+				continue;
+			}
+
+			int lx = v.X - chunk.Coord.X * ChunkSizeXZ;
+			int lz = v.Z - chunk.Coord.Y * ChunkSizeXZ;
+			chunk.Data.SetBlockLight(lx, v.Y, lz, level);
+			_blockLightEdits[v] = level; // keep the in-session copy in sync
+		}
+	}
+
+	/// <summary>
 	/// The load-time hook: apply one chunk's saved edits + health (pulled from
 	/// the <c>WorldSave</c> service's pending snapshot) and flag the chunk plus
 	/// its 1-chunk ring for a rebuild with fresh edit priority, so the budget
@@ -1191,6 +1455,13 @@ public partial class VoxelWorld : Node3D
 		if (health.Count > 0)
 		{
 			ApplyHealth(health);
+			anything = true;
+		}
+
+		var blockLights = save.ConsumePendingBlockLight(chunk.Coord, ChunkSizeXZ);
+		if (blockLights.Count > 0)
+		{
+			ApplyBlockLight(blockLights);
 			anything = true;
 		}
 
@@ -1456,8 +1727,16 @@ public partial class VoxelWorld : Node3D
 	/// <paramref name="center"/> (world voxel coordinates). Non-persistent.
 	/// </summary>
 	public void AddSphere(Vector3I center, int radius, int material)
+		=> AddSphere(center, radius, material, 0);
+
+	/// <summary>
+	/// Adds a sphere of voxels and (when <paramref name="lightLevel"/> is
+	/// non-zero) marks each placed voxel as a block-light source of that level
+	/// (0-15). Used when placing a light-source item (a torch/glowstone).
+	/// </summary>
+	public void AddSphere(Vector3I center, int radius, int material, byte lightLevel)
 	{
-		FillSphere(center, radius, material);
+		FillSphere(center, radius, material, lightLevel);
 	}
 
 	/// <summary>
@@ -1534,6 +1813,15 @@ public partial class VoxelWorld : Node3D
 	/// into <c>_edits</c> for persistence.
 	/// </summary>
 	public bool PlaceVoxel(Vector3I v, int material)
+		=> PlaceVoxel(v, material, 0);
+
+	/// <summary>
+	/// Like <see cref="PlaceVoxel(Vector3I, int)"/> but also marks the placed
+	/// voxel as a block-light source of level <paramref name="lightLevel"/>
+	/// (0-15) when non-zero. This is how a light-source item (torch/glowstone)
+	/// lights its neighbourhood on placement.
+	/// </summary>
+	public bool PlaceVoxel(Vector3I v, int material, byte lightLevel)
 	{
 		if (material == VoxelMaterialIds.Air || IsUnbreakable(material))
 		{
@@ -1549,7 +1837,7 @@ public partial class VoxelWorld : Node3D
 			return false;
 		}
 
-		SetVoxel(v, material);
+		SetVoxel(v, material, lightLevel);
 		MarkChunkDirty(v, 0);
 		return true;
 	}
@@ -1806,6 +2094,33 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Block-light query for the light flood fill: returns the per-voxel BLOCK
+	/// LIGHT source level (0..15, 0 = not a light source) of a world voxel, or
+	/// 0 when the voxel is out of range or its chunk is unloaded/generating.
+	/// Used to build the padded block-light field the sky-light flood fill seeds
+	/// from, so a placed light source in a neighbouring chunk correctly lights
+	/// the air across the chunk seam.
+	/// </summary>
+	public byte VoxelBlockLightForMesh(int x, int y, int z)
+	{
+		if (y < 0 || y >= ChunkHeight)
+		{
+			return 0;
+		}
+		if (!TryGetGeneratedChunk(ChunkCoordOf(x, z), out VoxelChunk chunk))
+		{
+			return 0; // unloaded / generating: no block light
+		}
+		int lx = x - chunk.Coord.X * ChunkSizeXZ;
+		int lz = z - chunk.Coord.Y * ChunkSizeXZ;
+		if (lx < 0 || lx >= chunk.Data.SizeX || lz < 0 || lz >= chunk.Data.SizeZ)
+		{
+			return 0;
+		}
+		return chunk.Data.GetBlockLight(lx, y, lz);
+	}
+
+	/// <summary>
 	/// Solid query for collision: unloaded (or not-yet-generated) chunks
 	/// count as solid so we never generate interior walls at chunk borders.
 	/// </summary>
@@ -1834,6 +2149,9 @@ public partial class VoxelWorld : Node3D
 	// ------------------------------------------------------------------
 
 	private void FillSphere(Vector3I center, int radius, int material)
+		=> FillSphere(center, radius, material, 0);
+
+	private void FillSphere(Vector3I center, int radius, int material, byte lightLevel)
 	{
 		int r2 = radius * radius;
 		for (int dx = -radius; dx <= radius; dx++)
@@ -1847,7 +2165,7 @@ public partial class VoxelWorld : Node3D
 						continue;
 					}
 
-					SetVoxel(center + new Vector3I(dx, dy, dz), material);
+					SetVoxel(center + new Vector3I(dx, dy, dz), material, lightLevel);
 				}
 			}
 		}
@@ -1993,7 +2311,15 @@ public partial class VoxelWorld : Node3D
 		}
 	}
 
-	private void SetVoxel(Vector3I v, int material)
+	private void SetVoxel(Vector3I v, int material) => SetVoxel(v, material, 0);
+
+	/// <summary>
+	/// Places/removes a voxel and (when <paramref name="lightLevel"/> is
+	/// non-zero) marks it as a block-light source of that level (0-15). The
+	/// light level is stored on the voxel and in <see cref="_blockLightEdits"/>
+	/// for persistence; a zero level clears any prior light level on that voxel.
+	/// </summary>
+	private void SetVoxel(Vector3I v, int material, byte lightLevel)
 	{
 		if (v.Y < 0 || v.Y >= ChunkHeight)
 		{
@@ -2017,6 +2343,19 @@ public partial class VoxelWorld : Node3D
 		else
 		{
 			chunk.Data.SetHealth(lx, v.Y, lz, VoxelHealth.MaxHealth);
+		}
+
+		// Block light: store the source level on the voxel (0 = none). Only a
+		// SOLID voxel can be a light source (air carries no light).
+		byte storeLight = material == VoxelMaterialIds.Air ? (byte)0 : lightLevel;
+		chunk.Data.SetBlockLight(lx, v.Y, lz, storeLight);
+		if (storeLight != 0)
+		{
+			_blockLightEdits[v] = storeLight;
+		}
+		else
+		{
+			_blockLightEdits.Remove(v); // cleared / replaced / broken
 		}
 
 		// Record the edit for persistence (latest value wins). SetVoxel is the
@@ -2061,15 +2400,48 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// Starts the nearest pending chunk generations to fill any free concurrent
-	/// slots. Pops from <see cref="_genQueue"/> in nearest-first order (re-sorting
-	/// by the player's CURRENT position, since the player may have moved since the
-	/// coord was enqueued) and calls <see cref="CreateChunk"/> until either the
-	/// queue is empty or <see cref="MaxConcurrentGenerations"/> are in flight.
-	/// Called every frame by the load loop and immediately from
-	/// <see cref="OnGenerationComplete"/> so a freed slot is refilled the same frame
-	/// a generation finishes — this is what keeps the in-flight set pinned to the
-	/// nearest unfinished chunks.
+	/// Enqueues every chunk in the square of radius <paramref name="radius"/>
+	/// around <paramref name="anchor"/> that is neither loaded nor already
+	/// queued, in SPIRAL (ring) order — centre first, then each expanding
+	/// square ring. This is a cheap O(radius²) enumeration (≤ 1,089 coords at a
+	/// 16-chunk radius) and the <see cref="_genQueued"/> set makes it idempotent,
+	/// so calling it every frame just adds the newly-in-range coords as the
+	/// player moves. The resulting order is only a starting hint: the pump
+	/// re-sorts the whole queue by the live player position on every call, so
+	/// the spiral order here does not need to be "the" priority — it just gives
+	/// a sensible initial arrangement.
+	/// </summary>
+	private void EnqueueSpiralRing(Vector2I anchor, int radius)
+	{
+		foreach (Vector2I coord in SpiralCoords(anchor, radius))
+		{
+			if (_chunks.ContainsKey(coord) || _genQueued.Contains(coord))
+			{
+				continue;
+			}
+			_genQueued.Add(coord);
+			_genQueue.Add(coord);
+		}
+	}
+
+	/// <summary>
+	/// Starts the next pending chunk generations to fill any free concurrent
+	/// slots. RE-SORTS <see cref="_genQueue"/> by squared distance to the
+	/// player's CURRENT position (<paramref name="playerChunk"/>) and then takes
+	/// from the front, so the in-flight set is always the
+	/// <see cref="MaxConcurrentGenerations"/> chunks nearest to where the player
+	/// actually is. Called every frame by the load loop and immediately from
+	/// <see cref="OnGenerationComplete"/> so a freed slot is refilled the same
+	/// frame a generation finishes — always with the chunk nearest the player's
+	/// live position, which is what keeps the load ring glued to the player
+	/// instead of letting it drift to distant chunks.
+	///
+	/// Re-sorting is cheap (the queue is bounded by the render area, a few
+	/// thousand coords at most) and runs at most once per pump; the earlier
+	/// "scrambled ring order" concern was about an UNSTABLE sort with many equal
+	/// distance keys, but here the keys are squared distances (mostly distinct)
+	/// and the goal is explicit — nearest-to-player-first — not a fixed spiral,
+	/// so the re-sort is the feature, not a bug.
 	/// </summary>
 	private void PumpGenerationQueue(Vector2I playerChunk)
 	{
@@ -2078,17 +2450,19 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
-		// Re-sort by the player's current position (the queue may hold coords
-		// enqueued a few frames ago at a different player location). Cheap: the
-		// queue is bounded by the render distance and is drained as fast as it
-		// fills.
-		_genQueue.Sort((a, b) => DistanceSq(a.Coord, playerChunk).CompareTo(DistanceSq(b.Coord, playerChunk)));
+		// Nearest-to-the-player's-current-chunk first.
+		_genQueue.Sort((a, b) => DistanceSq(a, playerChunk).CompareTo(DistanceSq(b, playerChunk)));
 
-		while (_genQueue.Count > 0 && _generatingBudget < MaxConcurrentGenerations)
+		while (_generatingBudget < MaxConcurrentGenerations)
 		{
+			if (_genQueue.Count == 0)
+			{
+				return; // nothing left in range
+			}
+
 			// Take the nearest, but skip any that became loaded (e.g. freed and
 			// re-created, or a stale entry) — they are already handled.
-			var (coord, _) = _genQueue[0];
+			Vector2I coord = _genQueue[0];
 			_genQueue.RemoveAt(0);
 			_genQueued.Remove(coord);
 			if (_chunks.ContainsKey(coord))
@@ -2119,9 +2493,9 @@ public partial class VoxelWorld : Node3D
 		}
 
 		_generatingBudget = Mathf.Max(0, _generatingBudget - 1);
-		// A slot just freed up: immediately start the next nearest pending chunk
-		// so the in-flight set stays pinned to the nearest unfinished chunks
-		// without waiting a full frame.
+		// A slot just freed up: immediately start the next pending chunk — the
+		// one nearest the player's CURRENT position — so the in-flight set stays
+		// pinned to the area around the player without waiting a full frame.
 		var playerForPump = GetTree()?.GetFirstNodeInGroup("player") as Node3D;
 		PumpGenerationQueue(ChunkCoordOf(playerForPump?.GlobalPosition ?? Vector3.Zero));
 		if (!_chunks.TryGetValue(coord, out VoxelChunk current) || current != chunk)
@@ -2153,6 +2527,13 @@ public partial class VoxelWorld : Node3D
 		// pick up any canopy overhang voxels this chunk's foliage stage wrote
 		// into their buffers (an overhang can only land in one of these 8).
 		MarkNeighboursForRebuild(coord);
+
+		// Pre-spawn: this chunk's data just became ready. If it is inside the
+		// 3x3 spawn neighbourhood, stamp the whole neighbourhood with a top
+		// priority so the budget meshes those 9 chunks first — keeping the
+		// mesh-gated spawn wait short (see BoostSpawnNeighbourhoodPriority).
+		// No-op once the player has spawned.
+		BoostSpawnNeighbourhoodPriority();
 	}
 
 	/// <summary>
@@ -2213,11 +2594,14 @@ public partial class VoxelWorld : Node3D
 		MarkNeighboursForRebuild(coord);
 		_chunks.Remove(coord);
 		// Drop any pending generation-queue entry for this coord so it can be
-		// re-enqueued if it comes back in range.
+		// re-enqueued if it is still in range. The next EnqueueSpiralRing /
+		// PumpGenerationQueue pass (which sorts by the live player position)
+		// will re-add it in the correct distance order, so there is no need to
+		// re-insert it at a specific position here — just drop the stale entry.
 		_genQueued.Remove(coord);
 		for (int i = _genQueue.Count - 1; i >= 0; i--)
 		{
-			if (_genQueue[i].Coord == coord)
+			if (_genQueue[i] == coord)
 			{
 				_genQueue.RemoveAt(i);
 			}
@@ -2618,6 +3002,17 @@ public partial class VoxelWorld : Node3D
 	/// MeshBuilder and the solid queries below), so adding or removing a chunk
 	/// changes which edge cells its neighbours draw — they must re-mesh to
 	/// close or open the seam. Rebuilds are budget-managed (ChunksPerFrame).
+	///
+	/// CRITICAL: this must NOT stamp a fresh (rising) <see cref="VoxelChunk.EditPriority"/>.
+	/// Generation completes in spiral (ring) order, so a LATER completion is
+	/// always at least as far from the spawn anchor as an earlier one. Stamping
+	/// a rising priority here would let a far chunk's completion re-prioritise
+	/// the budget ahead of the not-yet-meshed inner ring — the budget chases the
+	/// newest completions "all over the place", the spawn neighbourhood's mesh
+	/// is starved, and the spawn gate never opens. The neighbour only needs
+	/// <c>NeedsMesh = true</c>: its rebuild is already ordered by the budget
+	/// loop's distance-to-player tiebreak (see <c>_Process</c>), which is
+	/// exactly the ring order we want.
 	/// </summary>
 	private void MarkNeighboursForRebuild(Vector2I coord)
 	{
@@ -2653,6 +3048,40 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Snapshots the voxel data of the 8 neighbours of <paramref name="coord"/>
+	/// (plus the centre, if requested) into a plain dictionary on the CALLING
+	/// (main) thread. The returned dictionary is a stable, thread-safe view: a
+	/// chunk mesh build runs on the worker pool and must read a CONSISTENT
+	/// neighbour set for its whole build. Passing the live <see cref="GetChunkData"/>
+	/// to the worker lets it read <c>_chunks</c>/<c>ChunkData</c> mid-mutation
+	/// (the main thread generates/edits concurrently), so one build's light field
+	/// can disagree with its neighbour's at their shared seam — a persistent
+	/// brightness step along the chunk grid. Snapshotting on the main thread
+	/// freezes the neighbour state for the duration of the build, so both sides
+	/// of every seam are computed from the same data.
+	/// </summary>
+	public System.Collections.Generic.Dictionary<Vector2I, ChunkData> SnapshotNeighbours(Vector2I coord, bool includeCentre = true)
+	{
+		var snap = new System.Collections.Generic.Dictionary<Vector2I, ChunkData>();
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				if (dx == 0 && dz == 0 && !includeCentre)
+				{
+					continue;
+				}
+				var c = coord + new Vector2I(dx, dz);
+				if (TryGetGeneratedChunk(c, out VoxelChunk chunk))
+				{
+					snap[c] = chunk.Data;
+				}
+			}
+		}
+		return snap;
+	}
+
+	/// <summary>
 	/// Returns the fully-generated voxel data of the chunk at world voxel
 	/// (wx0, wz0), or null when that chunk is unloaded or still generating.
 	/// Static so generation workers (thread pool, no node access) can fetch
@@ -2678,6 +3107,74 @@ public partial class VoxelWorld : Node3D
 		int dx = a.X - b.X;
 		int dy = a.Y - b.Y;
 		return dx * dx + dy * dy;
+	}
+
+	/// <summary>
+	/// True when the chunk at <paramref name="coord"/> AND its full 3x3
+	/// neighbourhood (the single first ring) are all present and solid: data
+	/// generated (DataReady), mesh built (NeedsMesh clear), and no build in
+	/// flight. Used to gate the one-time player spawn: the player must not get
+	/// physics (or become visible) until the ground under and around it is
+	/// solid, visible geometry with a live collision shape — otherwise it would
+	/// fall through the world. See the spawn gate in <c>_Process</c> for the
+	/// full rationale.
+	/// </summary>
+	private bool SpawnNeighbourhoodReady(Vector2I coord)
+	{
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				if (!_chunks.TryGetValue(coord + new Vector2I(dx, dz), out VoxelChunk c)
+					|| !c.DataReady || c.NeedsMesh || c.MeshBuildInFlight)
+				{
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	/// <summary>
+	/// While the player has not spawned yet, stamps every loaded chunk inside
+	/// the 3x3 neighbourhood of the SPAWN ANCHOR with a fresh (top) edit
+	/// priority so the ChunksPerFrame budget meshes those 9 chunks before any
+	/// other pending chunk. Called from <see cref="OnGenerationComplete"/> as
+	/// each chunk's data finishes generating — i.e. BEFORE the spawn gate in
+	/// <c>_Process</c> evaluates, so the boost is already in place when the
+	/// budget loop orders its work. This is what keeps the mesh-gated spawn
+	/// wait short: the 3x3 data is ready in the first generation batch, and
+	/// this boost makes those 9 chunks the first the budget meshes, so the gate
+	/// opens as soon as the ground is solid instead of after the whole render
+	/// distance has queued up behind them.
+	///
+	/// Raise-only: a chunk already carrying a higher priority (a player edit)
+	/// is never lowered, so the boost can't steal the budget away from a region
+	/// the player is actively editing. It is a no-op once the player has spawned.
+	/// </summary>
+	private void BoostSpawnNeighbourhoodPriority()
+	{
+		if (_playerSpawned)
+		{
+			return;
+		}
+
+		Vector2I anchor = Vector2I.Zero;
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				if (_chunks.TryGetValue(anchor + new Vector2I(dx, dz), out VoxelChunk c))
+				{
+					int stamp = ++_editPriorityCounter;
+					if (c.EditPriority < stamp)
+					{
+						c.EditPriority = stamp;
+					}
+					c.NeedsMesh = true;
+				}
+			}
+		}
 	}
 
 	private Vector2I ChunkCoordOf(Vector3 worldPos)

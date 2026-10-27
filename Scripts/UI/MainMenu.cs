@@ -191,7 +191,43 @@ public partial class MainMenu : CanvasLayer
 		{
 			GD.PushWarning($"[MainMenu] Slot '{slotId}' could not be loaded — starting a fresh world.");
 		}
+		// Publish the slot's SEED too. A load is a "delta" save: terrain is
+		// REGENERATED from the seed, so the world must generate with the SAME
+		// seed the slot was created with, or the saved edits would be re-applied
+		// on top of different terrain (and a load would look like a different
+		// world than the one that was saved). The seed is recorded in the slot's
+		// index entry (SaveSlotIndex); restore it as the session seed so the
+		// gameplay scene's VoxelWorld applies it in its _Ready (the same
+		// statics the New World path publishes). A slot with no recorded seed
+		// (0 / legacy) keeps the export/scene seed.
+		int seed = FindSlotSeed(slotId);
+		if (seed != 0)
+		{
+			WorldSave.SessionSeed = seed;
+			WorldSave.SessionHasSeed = true;
+		}
 		GotoGameScene();
+	}
+
+	/// <summary>
+	/// Looks up the recorded world seed for a slot from the save index. Returns
+	/// 0 when the slot is not in the index (the caller then keeps the export
+	/// seed).
+	/// </summary>
+	private int FindSlotSeed(string slotId)
+	{
+		if (string.IsNullOrEmpty(slotId) || _worldSave == null)
+		{
+			return 0;
+		}
+		foreach (SlotInfo slot in _worldSave.ListSlots())
+		{
+			if (slot.Id == slotId)
+			{
+				return slot.Seed;
+			}
+		}
+		return 0;
 	}
 
 	private void OnNewWorld(string slotId, string slotName)

@@ -37,12 +37,12 @@ environment = SubResource("Environment_world")
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="Enviornment" unique_id=761222868]
 transform = Transform3D(-0.8660253, -0.35355338, 0.3535538, 0, 0.70710725, 0.7071064, -0.50000024, 0.612372, -0.6123727, 0, 0, 0)
 shadow_enabled = true
+shadow_caster_mask = 1
 
 [node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
 script = ExtResource("2_voxelworld")
 ChunkHeight = 256
 RenderDistanceChunks = 16
-ChunksPerFrame = 1
 Seed = 123123
 SpawnOffset = 5.0
 BaseHeight = 128.0
@@ -57,6 +57,10 @@ BiomeNoiseFrequency = 0.001
 FoliageDensity = 0.1
 EnableRocks = false
 MeshMode = 1
+MinLight = 0.01
+MaxLightLevel = 30
+LightFalloff = 2.0
+DebugVertexLight = true
 LodRenderDistanceChunks = 128
 LodDistanceBase = 1.5
 MaterialConfig = ExtResource("11_materialconfig")

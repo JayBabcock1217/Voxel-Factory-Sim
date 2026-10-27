@@ -21,11 +21,18 @@ public readonly struct ItemEntry
 	public bool IsMachine { get; }
 	/// <summary>The machine kind, when this entry is a machine item (null otherwise).</summary>
 	public MachineType? MachineKind { get; }
+	/// <summary>
+	/// The block light level (0-15) this item emits when placed as a voxel
+	/// (0 = not a light source, the default). Set on the <see cref="ItemStack"/>
+	/// it becomes in <c>GrantDevItem</c>, so a placed torch lights its
+	/// neighbourhood.
+	/// </summary>
+	public byte LightLevel { get; }
 	public string Name { get; }
 	public Color IconColor { get; }
 
 	public ItemEntry(int materialId, bool isTool, ToolType? toolType, string name, Color iconColor,
-		bool isMachine = false, MachineType? machineKind = null)
+		bool isMachine = false, MachineType? machineKind = null, byte lightLevel = 0)
 	{
 		MaterialId = materialId;
 		IsTool = isTool;
@@ -34,6 +41,7 @@ public readonly struct ItemEntry
 		IconColor = iconColor;
 		IsMachine = isMachine;
 		MachineKind = machineKind;
+		LightLevel = lightLevel;
 	}
 
 	public override bool Equals(object obj) => obj is ItemEntry other && Equals(other);
@@ -149,6 +157,12 @@ public static class ItemRegistry
 			{
 				continue;
 			}
+			// The torch is listed in AllLightSources (it carries a LightLevel),
+			// so skip it here to avoid a double entry without the light level.
+			if (def.Id == VoxelMaterialIds.Torch)
+			{
+				continue;
+			}
 			string name = string.IsNullOrEmpty(def.Name) ? $"Material {def.Id}" : def.Name;
 			Color color = def.Entry?.AlbedoColor ?? new Color(1f, 1f, 1f);
 			list.Add(new ItemEntry(def.Id, false, null, name, color));
@@ -157,10 +171,43 @@ public static class ItemRegistry
 	}
 
 	/// <summary>
+	/// The torch's block light level (Minecraft torch ≈ 14). A torch is a
+	/// bright, medium-reach light source.
+	/// </summary>
+	public const byte TorchLightLevel = 14;
+
+	// Light-source items: placeable materials that emit block light when placed.
+	// These are NOT derived from the material config (their LightLevel is an
+	// item property, not a material property), so they are listed explicitly.
+	private static readonly (int MaterialId, string Name, Color Color, byte LightLevel)[] _lightSources =
+	{
+		(VoxelMaterialIds.Torch, "Torch", new Color(1.0f, 0.85f, 0.45f), TorchLightLevel),
+	};
+
+	/// <summary>
+	/// Every light-source item. These are placeable materials that emit block
+	/// light on placement (a torch lights its neighbourhood). Listed explicitly
+	/// because the light level is an ITEM property, not a material property.
+	/// </summary>
+	public static IReadOnlyList<ItemEntry> AllLightSources
+	{
+		get
+		{
+			var list = new List<ItemEntry>(_lightSources.Length);
+			foreach (var (id, name, color, level) in _lightSources)
+			{
+				list.Add(new ItemEntry(id, false, null, name, color, lightLevel: level));
+			}
+			return list;
+		}
+	}
+
+	/// <summary>
 	/// The full ordered item list: all materials first (id order), then all
-	/// tools, then all machines. This is what the dev panel renders as its
-	/// scrollable list. <paramref name="machineConfig"/> (optional) lets machine
-	/// entries use a registered definition's name when available.
+	/// tools, then all machines, then all light sources. This is what the dev
+	/// panel renders as its scrollable list. <paramref name="machineConfig"/>
+	/// (optional) lets machine entries use a registered definition's name when
+	/// available.
 	/// </summary>
 	public static List<ItemEntry> AllItems(VoxelMaterialConfig config,
 		FactorySim.Machines.MachineDefConfig machineConfig = null)
@@ -169,6 +216,7 @@ public static class ItemRegistry
 		list.AddRange(AllMaterials(config));
 		list.AddRange(AllTools);
 		list.AddRange(AllMachines(machineConfig));
+		list.AddRange(AllLightSources);
 		return list;
 	}
 

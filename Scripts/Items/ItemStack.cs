@@ -41,6 +41,19 @@ public class ItemStack
 	/// </summary>
 	public MachineType? MachineType { get; set; }
 
+	/// <summary>
+	/// The BLOCK LIGHT LEVEL this item emits when placed as a voxel (0-15).
+	/// 0 = not a light source (the default for every ordinary material). A
+	/// non-zero value marks the item as a light source: when it is placed, the
+	/// world stores this level on that voxel and the sky-light flood fill seeds
+	/// the surrounding air from it, so the block lights its neighbourhood the
+	/// way a Minecraft torch or glowstone does. The level doubles as the
+	/// approximate reach in blocks (15 = bright, 7 = dim). Set per item
+	/// (e.g. a crafted "torch" item sets this to 14) so the SAME material can be
+	/// a light source or not depending on which item placed it.
+	/// </summary>
+	public byte LightLevel { get; set; }
+
 	/// <summary>True when the stack holds nothing.</summary>
 	public bool IsEmpty => MaterialId == 0 || Count <= 0;
 

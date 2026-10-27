@@ -287,6 +287,12 @@ public partial class WorldSave : Node
 					data.Health.Add(new WorldSaveFile.HealthRecord(v, health));
 				}
 			}
+
+			// Placed light-source voxels (v4+). Only non-zero levels are stored.
+			foreach (var (v, level) in world.GetBlockLightEdits())
+			{
+				data.BlockLights.Add(new WorldSaveFile.BlockLightRecord(v, level));
+			}
 		}
 
 		if (player != null)
@@ -824,6 +830,36 @@ public partial class WorldSave : Node
 	}
 
 	/// <summary>
+	/// Returns and removes this chunk's portion of the pending block-light
+	/// sources from <see cref="PendingEdits"/>. Called by the world once per
+	/// chunk right after <see cref="ConsumePendingHealth"/>. v1-v3 saves have
+	/// none (the list is empty), so this is a no-op for them.
+	/// </summary>
+	public List<(Vector3I Voxel, byte Level)> ConsumePendingBlockLight(Vector2I chunkCoord, int chunkSize)
+	{
+		var result = new List<(Vector3I Voxel, byte Level)>();
+		if (PendingEdits == null)
+		{
+			return result;
+		}
+
+		var keep = new List<WorldSaveFile.BlockLightRecord>(PendingEdits.BlockLights.Count);
+		foreach (var b in PendingEdits.BlockLights)
+		{
+			if (InChunk(b.Position, chunkCoord, chunkSize))
+			{
+				result.Add((b.Position, b.Level));
+			}
+			else
+			{
+				keep.Add(b);
+			}
+		}
+		PendingEdits.BlockLights = keep;
+		return result;
+	}
+
+	/// <summary>
 	/// True when <see cref="PendingEdits"/> still holds any unapplied edits or
 	/// health entries (i.e. the world has not yet finished re-applying the
 	/// saved world). Used to keep the spawn gate honest when the saved player
@@ -857,7 +893,8 @@ public partial class WorldSave : Node
 		PendingEdits.PlayerYaw = 0f;
 		PendingEdits.PlayerPitch = 0f;
 		// A snapshot whose only remaining payload was the player is done.
-		if (PendingEdits.Edits.Count == 0 && PendingEdits.Health.Count == 0)
+		if (PendingEdits.Edits.Count == 0 && PendingEdits.Health.Count == 0
+			&& PendingEdits.BlockLights.Count == 0)
 		{
 			PendingEdits = null;
 		}

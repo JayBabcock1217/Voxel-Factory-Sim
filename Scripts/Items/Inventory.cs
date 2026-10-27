@@ -99,7 +99,9 @@ public partial class Inventory : Node
 			}
 
 			int take = Math.Min(ItemStack.StackLimit, remaining);
-			Slots[i] = ItemStack.From(stack.MaterialId, take);
+			var placed = ItemStack.From(stack.MaterialId, take);
+			placed.LightLevel = stack.LightLevel; // carry the light source's level
+			Slots[i] = placed;
 			remaining -= take;
 		}
 
@@ -315,6 +317,15 @@ public partial class Inventory : Node
 				{
 					stack.MachineType = machine;
 					stack.Count = 1; // machines are single items, never stacked
+				}
+				// A torch's LightLevel is an intrinsic item property (always
+				// TorchLightLevel), not per-instance state, so it is not persisted
+				// in the (id, count) inventory format — reconstruct it here the
+				// way tools/machines reconstruct their type, so a saved torch
+				// still emits block light when re-placed.
+				if (materialIds[i] == FactorySim.Voxel.VoxelMaterialIds.Torch)
+				{
+					stack.LightLevel = FactorySim.Items.ItemRegistry.TorchLightLevel;
 				}
 				Slots[i] = stack;
 			}

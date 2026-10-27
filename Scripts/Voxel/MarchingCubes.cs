@@ -490,6 +490,50 @@ public static class MarchingCubes
 	}
 
 	/// <summary>
+	/// Returns the lattice coordinates of the AIR-side endpoint of a crossed
+	/// edge — the corner opposite the solid corner that
+	/// <see cref="ResolveEdge"/> returns. Used by the sky-light system to
+	/// sample the light of the air voxel a surface vertex borders. The field
+	/// is the same binary solid field passed to <see cref="ResolveEdge"/> and
+	/// is indexed over the caller's padded volume (the caller already passes
+	/// the same <c>field</c> and cell coords it used for ResolveEdge).
+	/// </summary>
+	public static void ResolveEdgeAirCorner(
+		float[] field,
+		int nx,
+		int ny,
+		int nz,
+		int cx,
+		int cy,
+		int cz,
+		int edge,
+		out int airX,
+		out int airY,
+		out int airZ)
+	{
+		int c0 = Edges[edge][0];
+		int c1 = Edges[edge][1];
+		Vector3 p0 = Corners[c0];
+		Vector3 p1 = Corners[c1];
+		int ix0 = cx + (int)p0.X, iy0 = cy + (int)p0.Y, iz0 = cz + (int)p0.Z;
+		int ix1 = cx + (int)p1.X, iy1 = cy + (int)p1.Y, iz1 = cz + (int)p1.Z;
+		float v0 = field[ix0 + nx * (iy0 + ny * iz0)];
+		float v1 = field[ix1 + nx * (iy1 + ny * iz1)];
+		// Mirror ResolveEdge's solid decision: solid = (v0 >= 0.5) ? c0 : c1.
+		// The air corner is the other one.
+		if (v0 >= 0.5f)
+		{
+			// c0 is solid -> c1 is air.
+			(airX, airY, airZ) = (ix1, iy1, iz1);
+		}
+		else
+		{
+			// c1 is solid -> c0 is air.
+			(airX, airY, airZ) = (ix0, iy0, iz0);
+		}
+	}
+
+	/// <summary>
 	/// Signed tilt of <paramref name="n"/> toward the solid-side endpoint of
 	/// <paramref name="edge"/> (positive when it points into the solid).
 	/// </summary>

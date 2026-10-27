@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -76,6 +77,15 @@ public partial class VoxelChunk : Node3D
 		Data = data;
 
 		_meshInstance = new MeshInstance3D { Name = "Mesh" };
+		// Terrain lives on RENDER LAYER 2 (see VoxelWorld.TerrainRenderLayer). The
+		// DirectionalLight3D's shadow Caster Mask is layer 1 only, so the terrain
+		// RECEIVES the sun's real-time shadow (the Caster Mask does not gate
+		// receiving) but does NOT CAST one — only layer-1 entities (the player,
+		// machines, drops) cast. Keeps the huge voxel terrain out of the shadow
+		// map while still showing a crisp character shadow on the ground.
+		// Render layer: GeometryInstance3D exposes the bitmask as `Layers` in C#
+		// (maps to the `layer` scene property). Layer 2 = 1 << 1.
+		_meshInstance.Layers = VoxelWorld.TerrainRenderLayer;
 		AddChild(_meshInstance);
 
 		var body = new StaticBody3D { Name = "Collision" };
@@ -123,11 +133,46 @@ public partial class VoxelChunk : Node3D
 		VoxelMeshMode mode = world.MeshMode;
 		Vector2I coord = Coord;
 		System.Func<int, int, int, bool> solidQuery = world.VoxelSolidForMesh;
-		System.Func<Vector2I, ChunkData> neighborQuery = world.GetChunkData;
+		// SNAPSHOT the 8 neighbours' voxel data on the MAIN thread (here) into a
+		// plain dictionary, and give the worker a closure over THAT snapshot —
+		// not the live world.GetChunkData. The build runs on the worker pool while
+		// the main thread keeps generating/editing chunks; a live read lets the
+		// worker see _chunks/ChunkData mid-mutation, so one build's light field
+		// can disagree with its neighbour's at their shared seam (a persistent
+		// brightness step along the chunk grid). A frozen snapshot makes both
+		// sides of every seam compute from the same neighbour state. The centre
+		// is included because the wide light field also reads the chunk's own
+		// data through the same query (it short-circuits to `chunk`, but the
+		// snapshot keeps the code path uniform and race-free).
+		var neighbourSnapshot = world.SnapshotNeighbours(Coord, includeCentre: true);
+		System.Func<Vector2I, ChunkData> neighborQuery = c =>
+			neighbourSnapshot.TryGetValue(c, out ChunkData d) ? d : null;
 		// The material-blend query (Faces mode only): null when blending is off.
 		System.Func<int, int, int, byte> materialQuery = world.Palette.BlendEnabled
 			? world.VoxelMaterialForMesh
 			: null;
+		// The block-light query: each voxel's own light-source level (0 = none).
+		// Seeds the sky-light flood fill so placed torches/glowstones light
+		// their neighbourhood, including across chunk seams.
+		System.Func<int, int, int, byte> blockLightQuery = world.VoxelBlockLightForMesh;
+		// The wide light field (Faces mode) reads neighbouring chunks' ChunkData
+		// directly to gather a 3x3-chunk region; use the SAME frozen snapshot the
+		// MC path uses so the two never see different neighbour states.
+		System.Func<Vector2I, ChunkData> neighborChunkQuery = neighborQuery;
+		// The darkness floor: lifts the darkest spots above black. Snapshot it
+		// here so the worker uses a stable value for the whole build.
+		float minLight = world.MinLight;
+		// The max light level (open sky seeds at this; light decays 1/voxel to 0).
+		int maxLight = world.MaxLightLevel;
+		// The falloff curve: stretches the visible brightness gradient so cave
+		// interiors stay readable instead of hard-black beyond the light range.
+		float lightFalloff = world.LightFalloff;
+		// Debug: one-shot vertex-light histogram (auto-clears after first dump).
+		bool debugVertexLight = world.DebugVertexLight && VoxelWorld.VertexLightDumpPending;
+		if (debugVertexLight)
+		{
+			VoxelWorld.VertexLightDumpPending = false;
+		}
 
 		// A launched build is a chunk update in progress: treat the chunk as
 		// dirty until ApplyBuildResult clears the flag, so a drop queued for
@@ -135,25 +180,38 @@ public partial class VoxelChunk : Node3D
 		NeedsMesh = true;
 		_meshBuild = Task.Run(() =>
 		{
-			// All the heavy voxel math happens here, off the main thread.
-			// Collision is the visual surface exactly: MeshBuilder.Build emits
-			// the visual triangles (face quads in Faces mode, the MC isosurface
-			// in MarchingCubes mode) into the collision soup, so the player
-			// stands on exactly what is drawn.
-			var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery);
+			try
+			{
+				// All the heavy voxel math happens here, off the main thread.
+				// Collision is the visual surface exactly: MeshBuilder.Build
+				// emits the visual triangles (face quads in Faces mode, the MC
+				// isosurface in MarchingCubes mode) into the collision soup, so
+				// the player stands on exactly what is drawn.
+				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight);
 
-			// Store the prebuilt results for the main thread. Written here,
-			// read only in ApplyBuildResult after the task completes (happens-
-			// before via the task completion + the deferred call on a later
-			// frame). No lock needed.
-			_pendingMesh = visual;
-			_pendingCollision = collision;
+				// Store the prebuilt results for the main thread. Written here,
+				// read only in ApplyBuildResult after the task completes (happens-
+				// before via the task completion + the deferred call on a later
+				// frame). No lock needed.
+				_pendingMesh = visual;
+				_pendingCollision = collision;
 
-			// Marshal the cheap engine wiring back to the main thread. CallDeferred
-			// resolves the method on THIS object (the chunk, where ApplyBuildResult
-			// lives) and runs it on the main thread next frame. Same pattern
-			// VoxelWorld.StartGeneration uses to marshal generation completion back.
-			CallDeferred(nameof(ApplyBuildResult));
+				// Marshal the cheap engine wiring back to the main thread.
+				// CallDeferred resolves the method on THIS object (the chunk,
+				// where ApplyBuildResult lives) and runs it on the main thread
+				// next frame. Same pattern VoxelWorld.StartGeneration uses to
+				// marshal generation completion back.
+				CallDeferred(nameof(ApplyBuildResult));
+			}
+			catch (Exception ex)
+			{
+				// A build failure must not silently leave the chunk without a
+				// mesh (it would just never appear). Log it and still marshal a
+				// no-op result back so _meshBuild clears and the chunk can be
+				// retried.
+				GD.PushError($"[VoxelChunk] Mesh build failed for {Coord}: {ex}");
+				CallDeferred(nameof(ApplyBuildResult));
+			}
 		});
 	}
 
@@ -168,7 +226,8 @@ public partial class VoxelChunk : Node3D
 	{
 		_meshBuild = null;
 
-		if (_pendingMesh != null)
+		bool appliedMesh = _pendingMesh != null;
+		if (appliedMesh)
 		{
 			_meshInstance.Mesh = _pendingMesh;
 			_pendingMesh = null;
@@ -184,7 +243,13 @@ public partial class VoxelChunk : Node3D
 			_shape.Shape = _builtShape;
 		}
 
-		NeedsMesh = false;
+		// Only clear the dirty flag when a mesh was actually applied. If the
+		// build threw (see Rebuild's catch), keep NeedsMesh true so the world's
+		// per-frame budget retries the chunk instead of leaving it empty.
+		if (appliedMesh)
+		{
+			NeedsMesh = false;
+		}
 	}
 
 	/// <summary>

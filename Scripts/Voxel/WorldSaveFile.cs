@@ -66,13 +66,15 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
+	///   v4 — added the block-light section (placed light-source voxels: voxel
+	///        + emission level), so a torch/glowstone's light survives a restart.
 	///   v3 — the machine record now also carries the machine's runtime state
 	///        (input/output buffer stacks + selected recipe index), so a smelter's
 	///        or crafter's in-progress contents and recipe survive a restart.
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 3;
+	public const int CurrentVersion = 4;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -83,10 +85,13 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
+
+	/// <summary>The first version that carries the block-light section.</summary>
+	private const int VersionWithBlockLight = 4;
 
 	/// <summary>
 	/// The first version whose machine record carries runtime state (buffer
@@ -134,8 +139,12 @@ public static class WorldSaveFile
 		// machines with no saved runtime state — exactly what it was. No
 		// re-derivation needed; return as-is.
 		//
+		// v3 -> v4: the reader leaves data.BlockLights empty for v3 files (the
+		// section is absent), so a v3 world simply had no saved light sources.
+		// Nothing to re-derive; return as-is.
+		//
 		// Future version migrations go here, e.g.:
-		//   if (fromVersion == 3) { /* v3 -> v4: add new field, re-derive ... */ }
+		//   if (fromVersion == 4) { /* v4 -> v5: add new field, re-derive ... */ }
 		return data;
 	}
 
@@ -185,6 +194,28 @@ public static class WorldSaveFile
 		{
 			Position = position;
 			Health = health;
+		}
+	}
+
+	/// <summary>
+	/// One placed LIGHT-SOURCE voxel (v4+): its world voxel and the block-light
+	/// level (1..15) it emits. Only non-zero levels are persisted (0 = not a
+	/// light source is the implicit default and is never stored). Unlike the
+	/// derived sky light, this is real world state — two identical-looking
+	/// voxels can carry different light levels — so it must survive save/load.
+	/// </summary>
+	public readonly struct BlockLightRecord
+	{
+		/// <summary>World voxel position of the light source.</summary>
+		public Vector3I Position { get; }
+
+		/// <summary>The block light level the voxel emits (1..15).</summary>
+		public byte Level { get; }
+
+		public BlockLightRecord(Vector3I position, byte level)
+		{
+			Position = position;
+			Level = level;
 		}
 	}
 
@@ -286,6 +317,9 @@ public static class WorldSaveFile
 		/// <summary>Placed machines (voxel + item id + rotation). Empty for v1 saves.</summary>
 		public List<MachineRecord> Machines { get; set; } = new();
 
+		/// <summary>Placed light-source voxels (v4+). Empty for v1-v3 saves.</summary>
+		public List<BlockLightRecord> BlockLights { get; set; } = new();
+
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
 	}
@@ -384,6 +418,20 @@ public static class WorldSaveFile
 				}
 				w.Write(m.RecipeIndex);
 			}
+		}
+
+		// Placed light-source voxels (v4+). Written unconditionally (even when
+		// empty) so the reader can tell the layout apart by version. Each record
+		// is a world voxel (i32 x3) + the emission level (u8) + 1 pad byte
+		// (13 bytes each), matching the edit/health record alignment.
+		w.Write(data.BlockLights.Count);
+		foreach (var b in data.BlockLights)
+		{
+			w.Write(b.Position.X);
+			w.Write(b.Position.Y);
+			w.Write(b.Position.Z);
+			w.Write(b.Level);
+			w.Write((byte)0); // padding
 		}
 
 		// Trailing FNV-1a over every byte written above the checksum. Flush the
@@ -561,6 +609,25 @@ public static class WorldSaveFile
 
 					data.Machines.Add(new MachineRecord(new Vector3I(x, y, z), itemId, rotation,
 						inputSlots, outputSlots, recipeIndex));
+				}
+			}
+
+			// Placed light-source voxels (v4+). v1-v3 files end right after the
+			// machine section (or the drops, for v1), so the block-light section
+			// is read only for v4-and-later versions. For older versions the list
+			// stays empty (Migrate is identity for them).
+			if (version >= VersionWithBlockLight)
+			{
+				int blockLightCount = ReadCount(r);
+				data.BlockLights = new List<BlockLightRecord>(blockLightCount);
+				for (int i = 0; i < blockLightCount; i++)
+				{
+					int x = r.ReadInt32();
+					int y = r.ReadInt32();
+					int z = r.ReadInt32();
+					byte level = r.ReadByte();
+					r.ReadByte(); // padding
+					data.BlockLights.Add(new BlockLightRecord(new Vector3I(x, y, z), level));
 				}
 			}
 

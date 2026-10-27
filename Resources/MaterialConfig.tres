@@ -153,7 +153,6 @@ Entry = SubResource("entry13")
 [sub_resource type="Resource" id="entry14"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.75, 0.68, 0.6, 1)
-BreakTime = 3
 
 [sub_resource type="Resource" id="def14"]
 script = ExtResource("2_def")
@@ -164,7 +163,6 @@ Entry = SubResource("entry14")
 [sub_resource type="Resource" id="entry15"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.72, 0.47, 0.33, 1)
-BreakTime = 2
 
 [sub_resource type="Resource" id="def15"]
 script = ExtResource("2_def")
@@ -175,7 +173,6 @@ Entry = SubResource("entry15")
 [sub_resource type="Resource" id="entry16"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.83, 0.71, 0.33, 1)
-BreakTime = 4
 
 [sub_resource type="Resource" id="def16"]
 script = ExtResource("2_def")
@@ -188,7 +185,6 @@ script = ExtResource("3_entry")
 AlbedoColor = Color(0.12, 0.12, 0.14, 1)
 Description = "The unbreakable floor of the world."
 Unbreakable = true
-BreakTime = 60
 
 [sub_resource type="Resource" id="def17"]
 script = ExtResource("2_def")

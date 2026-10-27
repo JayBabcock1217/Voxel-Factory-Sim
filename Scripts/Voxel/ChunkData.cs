@@ -8,6 +8,15 @@ namespace FactorySim.Voxel;
 /// done to each voxel. Generation never writes it, so it is implicitly
 /// 100 ("full") for every generated voxel; edits (adds / breaks) reset it
 /// through <see cref="VoxelWorld.SetVoxel"/>.
+///
+/// And the per-voxel BLOCK LIGHT (0..15): how much light this voxel itself
+/// emits, set when a light-source item is placed (see
+/// <see cref="FactorySim.Items.ItemStack.LightLevel"/>). 0 = not a light
+/// source (the implicit default for every generated voxel and ordinary
+/// placement). The sky-light flood fill seeds the surrounding air from these
+/// values, so a placed torch/glowstone lights its neighbourhood. Unlike the
+/// derived sky light, this is real world STATE (two identical-looking voxels
+/// can differ), so it is persisted in the save file.
 /// </summary>
 public sealed class ChunkData
 {
@@ -23,6 +32,13 @@ public sealed class ChunkData
 	/// </summary>
 	public float[] Health { get; }
 
+	/// <summary>
+	/// Per-voxel block light level (0..15). 0 = not a light source (the
+	/// implicit default). Written by the place path when a light-source item is
+	/// placed; cleared when the voxel is removed or replaced.
+	/// </summary>
+	public byte[] BlockLight { get; }
+
 	public ChunkData(int sizeX, int sizeY, int sizeZ)
 	{
 		SizeX = sizeX;
@@ -30,6 +46,7 @@ public sealed class ChunkData
 		SizeZ = sizeZ;
 		Data = new byte[sizeX * sizeY * sizeZ];
 		Health = new float[sizeX * sizeY * sizeZ];
+		BlockLight = new byte[sizeX * sizeY * sizeZ];
 	}
 
 	public int Index(int x, int y, int z) => x + SizeX * (y + SizeY * z);
@@ -37,6 +54,17 @@ public sealed class ChunkData
 	public byte Get(int x, int y, int z) => Data[Index(x, y, z)];
 
 	public void Set(int x, int y, int z, byte value) => Data[Index(x, y, z)] = value;
+
+	// ------------------------------------------------------------------
+	// Per-voxel block light (light-source blocks)
+	// ------------------------------------------------------------------
+
+	/// <summary>Reads a voxel's block light level (0 = not a light source).</summary>
+	public byte GetBlockLight(int x, int y, int z) => BlockLight[Index(x, y, z)];
+
+	/// <summary>Writes a voxel's block light level, clamped to [0, 15].</summary>
+	public void SetBlockLight(int x, int y, int z, byte value)
+		=> BlockLight[Index(x, y, z)] = System.Math.Clamp(value, (byte)0, (byte)15);
 
 	// ------------------------------------------------------------------
 	// Voxel health

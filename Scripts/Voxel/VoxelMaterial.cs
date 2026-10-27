@@ -41,6 +41,14 @@ public static class VoxelMaterialIds
 	public const int StoneBrick = 21;
 	public const int MachineFrame = 22;
 
+	/// <summary>
+	/// The TORCH voxel: a small solid light source. Placed by the torch item
+	/// (which carries <see cref="FactorySim.Items.ItemStack.LightLevel"/> = 14)
+	/// so it emits block light into its neighbourhood. Not generated in terrain;
+	/// obtainable only from the dev panel / crafting.
+	/// </summary>
+	public const int Torch = 23;
+
 	// ------------------------------------------------------------------
 	// Tool items (not placeable voxels; they live in the inventory and are
 	// selected from the hotbar to break blocks). These ids are NOT solid
@@ -107,8 +115,16 @@ public static class VoxelHealth
 /// </summary>
 public sealed class VoxelMaterialPalette
 {
-	/// <summary>Material for each solid voxel type (index = material id - 1).</summary>
-	public StandardMaterial3D[] Materials { get; private set; } = Array.Empty<StandardMaterial3D>();
+	/// <summary>
+	/// Material for each solid voxel type (index = material id - 1). Each slot is
+	/// a light-aware <see cref="ShaderMaterial"/> (see <see cref="BuildMaterial"/>)
+	/// that samples the material's texture, applies its tint, multiplies by the
+	/// per-vertex sky-light (UV3.x), and reproduces the standard PBR response —
+	/// so caves/enclosed geometry darken to near-black while open surfaces stay
+	/// bright. (Was StandardMaterial3D before the sky-light system; the base
+	/// Material type lets the palette hold the shader materials.)
+	/// </summary>
+	public Material[] Materials { get; private set; } = Array.Empty<Material>();
 
 	/// <summary>Per-material texture tiling, consumed by the mesh builders when they emit UVs.</summary>
 	public float[] TextureScales { get; private set; } = Array.Empty<float>();
@@ -137,6 +153,15 @@ public sealed class VoxelMaterialPalette
 	/// </summary>
 	public Texture2D GetTexture(int id)
 		=> id > 0 && id < Textures.Length ? Textures[id - 1] : null;
+
+	/// <summary>
+	/// The effective albedo color for material <paramref name="id"/> — the tint
+	/// the surface shader applies (white for textured materials, the configured
+	/// AlbedoColor for untextured ones). The inventory / hotbar UI uses this to
+	/// draw a flat color swatch for a material that has no texture.
+	/// </summary>
+	public Color GetAlbedoColor(int id)
+		=> id > 0 && id < Tints.Length ? Tints[id - 1] : new Color(0.5f, 0.5f, 0.5f);
 
 	/// <summary>Number of material slots the palette was last sized to (0 = never applied).</summary>
 	public int MaterialCount { get; private set; }
@@ -197,13 +222,19 @@ public sealed class VoxelMaterialPalette
 
 		var sm = new ShaderMaterial();
 		sm.SetShader(_blendShader);
-		sm.SetShaderParameter(new StringName("TextureA"), Textures[idA - 1] ?? FallbackTexture);
-		sm.SetShaderParameter(new StringName("TextureB"), Textures[idB - 1] ?? FallbackTexture);
+		// A voxel can hold any id up to 255 (the mesh builder passes raw
+		// material ids); guard the slot index so an id above the palette's
+		// MaxId() degrades to the white fallback texture instead of crashing
+		// the whole chunk's mesh build.
+		int slotA = idA - 1;
+		int slotB = idB - 1;
+		sm.SetShaderParameter(new StringName("TextureA"), slotA >= 0 && slotA < Textures.Length ? (Textures[slotA] ?? FallbackTexture) : FallbackTexture);
+		sm.SetShaderParameter(new StringName("TextureB"), slotB >= 0 && slotB < Textures.Length ? (Textures[slotB] ?? FallbackTexture) : FallbackTexture);
 		// Each material's AlbedoColor tint, applied in the shader exactly like
 		// StandardMaterial3D (ALBEDO = tint * texture) so the blend reads the
 		// same brightness as the plain materials. Out-of-range = white tint.
-		sm.SetShaderParameter(new StringName("TintA"), Tints.Length > idA - 1 ? Tints[idA - 1] : Colors.White);
-		sm.SetShaderParameter(new StringName("TintB"), Tints.Length > idB - 1 ? Tints[idB - 1] : Colors.White);
+		sm.SetShaderParameter(new StringName("TintA"), slotA >= 0 && slotA < Tints.Length ? Tints[slotA] : Colors.White);
+		sm.SetShaderParameter(new StringName("TintB"), slotB >= 0 && slotB < Tints.Length ? Tints[slotB] : Colors.White);
 		_blendShaderCache[key] = sm;
 		return sm;
 	}
@@ -215,6 +246,85 @@ public sealed class VoxelMaterialPalette
 	/// or its texture changes — otherwise a cached pair keeps the stale tint.
 	/// </summary>
 	public void ClearBlendCache() => _blendShaderCache.Clear();
+
+	// ------------------------------------------------------------------
+	// Per-material light-aware surface shader (the sky-light system)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The shared spatial shader for SINGLE-material surfaces. Samples the
+	/// material's texture, applies its albedo tint, multiplies the result by the
+	/// per-vertex SKY LIGHT (UV2.x, 0..1), and sets the PBR response to match the
+	/// old StandardMaterial3D defaults (Roughness 1.0 / Specular 0.05 / Metallic
+	/// 0.0). This is what makes enclosed geometry (caves) darken to near-black:
+	/// the flood-filled sky light is 0 there, so ALBEDO → 0.
+	///
+	/// Mirrors the blend shader's albedo path (same :source_color samplers, same
+	/// fract(UV) tiling, same tint×texture) so a plain surface and a blended face
+	/// read identically at the same light level. One shared Shader instance;
+	/// <see cref="BuildMaterial"/> makes a per-material ShaderMaterial with that
+	/// material's texture + tint.
+	/// </summary>
+	private Shader _voxelShader;
+
+	/// <summary>
+	/// Builds (or returns) the light-aware ShaderMaterial for a single material.
+	/// The texture + tint are baked in (the mesh builder emits one surface per
+	/// material, so a surface never needs a different texture at runtime). UV2.x
+	/// carries the per-vertex sky light the mesh builder emits.
+	/// </summary>
+	private ShaderMaterial BuildMaterial(int id)
+	{
+		if (_voxelShader == null)
+		{
+			_voxelShader = new Shader { Code = VoxelShaderCode };
+		}
+		var sm = new ShaderMaterial();
+		sm.SetShader(_voxelShader);
+		sm.SetShaderParameter(new StringName("Texture"), id >= 0 && id < Textures.Length ? (Textures[id] ?? FallbackTexture) : FallbackTexture);
+		sm.SetShaderParameter(new StringName("Tint"), id >= 0 && id < Tints.Length ? Tints[id] : Colors.White);
+		return sm;
+	}
+
+	/// <summary>
+	/// The spatial-shader source backing <see cref="BuildMaterial"/>. Same
+	/// albedo path as the blend shader (source_color, fract(UV), tint×texture)
+	/// plus the per-vertex sky-light multiply (UV2.x). PBR response matches the
+	/// old StandardMaterial3D defaults so the surface reads the same as before,
+	/// just darkened where the sky light says it should be.
+	/// </summary>
+	private const string VoxelShaderCode = @"shader_type spatial;
+
+uniform sampler2D Texture : source_color, filter_linear_mipmap, repeat_enable;
+uniform vec4 Tint;
+
+varying float vLight;
+
+void vertex() {
+	// UV2.x carries the per-vertex sky light (0 = enclosed/near-black,
+	// 1 = open to sky). The mesh builder emits it from the flood-filled
+	// sky-light field. (UV2 is the free channel on the single-material
+	// path; on blended faces the blend factor is UV2.x and light is UV2.y.)
+	vLight = UV2.x;
+}
+
+void fragment() {
+	// Tiled UVs: wrap with fract() to tile beyond 1.0 (a raw spatial sampler
+	// has no texture_repeat).
+	vec2 tuv = fract(UV);
+	vec4 t = texture(Texture, tuv) * Tint;
+	// Sky light darkens enclosed geometry: ALBEDO is scaled by the per-vertex
+	// light (0..1). A cave interior (light 0) goes to black; an open surface
+	// (light 1) is unchanged. clamp guards against out-of-range attributes.
+	ALBEDO = t.rgb * clamp(vLight, 0.0, 1.0);
+	// Match the standard materials' PBR response (Roughness 1.0, Specular 0.05,
+	// Metallic 0.0 — see VoxelMaterialEntry defaults) so the surface reads the
+	// same as the old StandardMaterial3D, just light-scaled.
+	ROUGHNESS = 1.0;
+	SPECULAR = 0.05;
+	METALLIC = 0.0;
+}
+";
 
 	/// <summary>
 	/// The spatial-shader source backing <see cref="GetBlendShaderMaterial"/>.
@@ -250,12 +360,15 @@ uniform vec4 TintA;
 uniform vec4 TintB;
 
 varying float vFactor;
+varying float vLight;
 
 void vertex() {
 	// UV2.x carries the per-vertex blend factor (0 = pure A / lower id,
 	// 1 = pure B / higher id). The mesh builder computes it as a vertical
-	// gradient across the face.
+	// gradient across the face. UV2.y carries the per-vertex sky light (0..1);
+	// the mesh builder stores it there so the blend factor (UV2.x) is free.
 	vFactor = UV2.x;
+	vLight = UV2.y;
 }
 
 void fragment() {
@@ -269,7 +382,10 @@ void fragment() {
 	// so each side is EXACTLY what StandardMaterial3D produces for that
 	// material's ALBEDO — mixing them gives a crossfade that matches the
 	// plain materials at f=0 and f=1 and reads the same brightness in between.
-	ALBEDO = mix(ta.rgb, tb.rgb, f);
+	vec3 albedo = mix(ta.rgb, tb.rgb, f);
+	// Sky light darkens enclosed geometry (caves): scale the crossfade by the
+	// per-vertex light (0..1), same as the plain-surface shader.
+	ALBEDO = albedo * clamp(vLight, 0.0, 1.0);
 	// Match the standard materials' PBR response EXACTLY. The plain materials
 	// (VoxelMaterialEntry defaults) are: Roughness 1.0, Metallic 0.0, and
 	// SchlickGgx specular with MetallicSpecular 0.05. In a raw spatial shader
@@ -285,11 +401,21 @@ void fragment() {
 ";
 
 	/// <summary>
-	/// A 1×1 white texture used as the sampler fallback for a material that has
-	/// no albedo texture, so the blend shader always samples something.
+	/// A 1×1 WHITE texture used as the sampler fallback for a material that has
+	/// no albedo texture. The light-aware surface shader always samples a texture
+	/// (ALBEDO = texture × tint), so an untextured material must sample pure
+	/// white and let the tint carry the color — otherwise it renders black.
+	/// (Image.CreateEmpty leaves pixels UNINITIALIZED / zero = black, so the
+	/// pixel is filled with white explicitly.)
 	/// </summary>
-	private static Texture2D FallbackTexture { get; } = ImageTexture.CreateFromImage(
-		Image.CreateEmpty(1, 1, false, Image.Format.Rgb8));
+	private static Texture2D FallbackTexture { get; } = CreateWhiteTexture();
+
+	private static Texture2D CreateWhiteTexture()
+	{
+		var img = Image.CreateEmpty(1, 1, false, Image.Format.Rgb8);
+		img.Fill(Colors.White);
+		return ImageTexture.CreateFromImage(img);
+	}
 
 	public VoxelMaterialPalette()
 	{
@@ -301,49 +427,71 @@ void fragment() {
 	public bool HasMaterial(int id) => id > 0 && id <= Materials.Length;
 
 	/// <summary>
-	/// Copies every config value onto the material instances. Instances already
-	/// occupy id-ordered slots (slot <c>i</c> = the <c>i</c>-th def in id order),
-	/// so each is mutated in place — a live update that needs no remesh. When the
-	/// material SET changes (count or ids), the caller resizes via
-	/// <see cref="Resize"/> and flags chunks for a rebuild.
+	/// Applies the config to the palette. Each slot's light-aware
+	/// <see cref="ShaderMaterial"/> is (re)built from that material's texture +
+	/// tint (the shader bakes them in, so a live edit rebuilds the affected
+	/// material — the mesh surfaces reference the palette's Materials[] by index,
+	/// so reassigning the slot updates every already-built chunk with no remesh).
 	///
 	/// Brighter-look rule: a material that has a TEXTURE gets a white AlbedoColor
 	/// tint, so the texture shows at full brightness (the texture carries the
 	/// color). Untextured materials keep their configured AlbedoColor (it IS the
-	/// color — there is no texture to brighten). This applies to BOTH the
-	/// StandardMaterial3D (plain surfaces) and the blend shader's tint, so the
-	/// crossfade and the plain materials read identically.
+	/// color — there is no texture to brighten). This applies to BOTH the plain
+	/// surface shader and the blend shader's tint, so the crossfade and the plain
+	/// materials read identically.
 	/// </summary>
 	public void Apply(VoxelMaterialConfig cfg)
 	{
 		var defs = cfg.GetAll(); // id order, id 1 first
-		int n = Math.Min(Materials.Length, defs.Length);
-		for (int i = 0; i < n; i++)
+		// Index the palette arrays by (def.Id - 1), NOT by list position. The
+		// mesh builders read slot = materialId - 1, so a def with id N must land
+		// in slot N-1. If the id sequence has a gap (e.g. the torch is id 23 but
+		// a saved config only defines 22 materials, so position 22 == id 23 but
+		// there are only 22 defs), indexing by position would write the wrong
+		// slot and leave the high-id slot null — the mesh would then sample a
+		// missing texture (or crash the blend path). Sizing to MaxId() in
+		// ApplyMaterials guarantees slot (id-1) always exists.
+		foreach (var def in defs)
 		{
-			if (defs[i].Entry == null)
+			if (def == null || def.Id <= 0)
+			{
+				continue;
+			}
+			int slot = def.Id - 1;
+			if (slot >= Materials.Length)
+			{
+				continue; // palette not sized for this id yet (Resize comes first)
+			}
+			var entry = def.Entry;
+			if (entry == null)
 			{
 				continue;
 			}
 
-			bool hasTexture = defs[i].Entry.Texture != null;
+			bool hasTexture = entry.Texture != null;
 			// A textured material shows the texture at full brightness (white
 			// tint); an untextured one keeps its configured color.
-			Color tint = hasTexture ? Colors.White : defs[i].Entry.AlbedoColor;
+			Color tint = hasTexture ? Colors.White : entry.AlbedoColor;
 
-			ApplyEntry(Materials[i], defs[i].Entry, tint);
-			TextureScales[i] = defs[i].Entry.TextureScale;
+			TextureScales[slot] = entry.TextureScale;
 			// Expose the texture directly so the UI can draw the same texture
 			// it uses on the terrain as the item icon.
-			Textures[i] = defs[i].Entry.Texture;
-			Tints[i] = tint;
+			Textures[slot] = entry.Texture;
+			Tints[slot] = tint;
+			// Rebuild the slot's shader material with the (possibly new)
+			// texture + tint. Reassigning the array slot is a live update: the
+			// mesh surfaces index Materials[slot], so they pick up the new
+			// material on the next draw without a remesh.
+			Materials[slot] = BuildMaterial(slot);
 		}
 	}
 
 	/// <summary>
 	/// Resizes the palette to <paramref name="count"/> slots. Existing slots are
-	/// kept (and re-<see cref="Apply"/>-ed in place); new slots get a fresh
-	/// StandardMaterial3D with the shared faceted defaults. Call this when the
-	/// material list's count changes, then <see cref="Apply"/> to fill values.
+	/// kept; new slots get a placeholder (white, no-texture) light-aware shader
+	/// material until <see cref="Apply"/> fills them with the config's texture +
+	/// tint. Call this when the material list's count changes, then <see
+	/// cref="Apply"/> to fill values.
 	/// </summary>
 	public void Resize(int count)
 	{
@@ -360,7 +508,7 @@ void fragment() {
 		var oldScales = TextureScales;
 		var oldTextures = Textures;
 		var oldTints = Tints;
-		var newMaterials = new StandardMaterial3D[count];
+		var newMaterials = new Material[count];
 		var newScales = new float[count];
 		var newTextures = new Texture2D[count];
 		var newTints = new Color[count];
@@ -374,57 +522,27 @@ void fragment() {
 		}
 		for (int i = keep; i < count; i++)
 		{
-			// The faceted "flat shaded" look (Astroneer-style) is achieved
-			// geometrically in MeshBuilder: each triangle owns its 3 vertices
-			// and they all carry the face normal, so no face ever blends
-			// normals with a neighbour. Cheap on integrated graphics.
-		// SchlickGgx is the standard physically-based model (healthy diffuse +
-		// a little specular). The "wet" sheen came from the DEFAULT
-		// MetallicSpecular of 0.5, so we lower it to 0.05 (subtle, not mirror-
-		// like). ApplyEntry re-applies the per-material SpecularMode /
-		// SpecularAmount (→ MetallicSpecular) from the entry.
-			newMaterials[i] = new StandardMaterial3D
-			{
-				ShadingMode = BaseMaterial3D.ShadingModeEnum.PerVertex,
-				Roughness = 1.0f,
-				SpecularMode = BaseMaterial3D.SpecularModeEnum.SchlickGgx,
-				MetallicSpecular = 0.05f,
-			};
-			newScales[i] = 1f;
+			// Placeholder slot values: white tint, no texture, scale 1. The
+			// material itself is built below (once the arrays are assigned, so
+			// BuildMaterial reads the NEW full-size Textures/Tints, not the old
+			// shorter ones). Apply() then rebuilds it with the real config.
 			newTextures[i] = null;
 			newTints[i] = Colors.White;
+			newScales[i] = 1f;
 		}
 
+		// Assign the slot arrays FIRST so BuildMaterial reads the new,
+		// full-size Textures/Tints. (Building before the assignment would index
+		// the old, shorter arrays and throw for the new slots.)
 		Materials = newMaterials;
 		TextureScales = newScales;
 		Textures = newTextures;
 		Tints = newTints;
+		for (int i = keep; i < count; i++)
+		{
+			Materials[i] = BuildMaterial(i);
+		}
 		MaterialCount = count;
 	}
 
-	/// <summary>
-	/// Copies a config entry onto a material. <paramref name="albedoTint"/> is
-	/// the AlbedoColor to apply — normally the entry's own color, but a white
-	/// tint for textured materials (so the texture shows at full brightness;
-	/// see <see cref="Apply"/>).
-	/// </summary>
-	private static void ApplyEntry(StandardMaterial3D material, VoxelMaterialEntry entry, Color albedoTint)
-	{
-		material.AlbedoColor = albedoTint;
-		material.AlbedoTexture = entry.Texture;
-
-		// Repeat mode is what lets TextureScale tile beyond one 0..1 face:
-		// without it the sampler clamps at UV (1,1).
-		material.TextureRepeat = entry.Texture != null;
-
-		material.ShadingMode = entry.ShadingMode;
-		material.Transparency = entry.Transparency;
-		material.Metallic = entry.Metallic;
-		material.Roughness = entry.Roughness;
-		material.SpecularMode = entry.SpecularMode;
-		material.MetallicSpecular = entry.SpecularAmount;
-		material.EmissionEnabled = entry.EmissionEnabled;
-		material.Emission = entry.EmissionColor;
-		material.EmissionEnergyMultiplier = entry.EmissionEnergy;
-	}
 }

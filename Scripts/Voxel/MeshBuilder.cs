@@ -54,19 +54,59 @@ public static class MeshBuilder
 		VoxelMaterialPalette palette,
 		System.Func<int, int, int, bool> solidQuery,
 		System.Collections.Generic.List<Vector3> collisionOut = null,
-		System.Func<int, int, int, byte> materialQuery = null)
+		System.Func<int, int, int, byte> materialQuery = null,
+		System.Func<int, int, int, byte> blockLightQuery = null,
+		System.Func<Vector2I, ChunkData> neighborChunkQuery = null,
+		float minLight = 0f,
+		int maxLight = 15,
+		float lightFalloff = 1f)
 	{
 		int lastMaterial = palette.MaterialCount;
 
 		var positions = new List<Vector3>[lastMaterial];
 		var normals = new List<Vector3>[lastMaterial];
 		var uvs = new List<Vector2>[lastMaterial];
+		var lights = new List<float>[lastMaterial];
 		for (int i = 0; i < lastMaterial; i++)
 		{
 			positions[i] = new List<Vector3>();
 			normals[i] = new List<Vector3>();
 			uvs[i] = new List<Vector2>();
+			lights[i] = new List<float>();
 		}
+
+		// Light: build a padded solid|air field (1 = solid) AND a padded
+		// block-light field (0..15 per voxel's own emission) over the chunk plus
+		// a 1-voxel neighbour shell (via solidQuery / blockLightQuery, which
+		// already read neighbouring chunks). Flood-fill both, exposing a
+		// lightQuery that maps a world voxel to its normalized light (0..1).
+		// Sky light darkens caves; block light illuminates around placed
+		// light-source voxels.
+		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
+		// WIDE 3x3-chunk light field so sky light spans seams (see
+		// BuildLightFieldWide). solidQuery / blockLightQuery no longer feed the
+		// light; they still drive face culling further down.
+		byte[] lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight);
+		// The wide field extends maxLight voxels beyond the chunk on every side
+		// (see BuildLightFieldWide), so its X/Z extent is 2*cs+2*maxLight+2.
+		int lpx = 2 * sx + 2 * maxLight + 2, lpy = sy + 2, lpz = 2 * sz + 2 * maxLight + 2;
+		int wideHalf = lpx / 2 - 1; // = sx + maxLight: lattice offset of the center chunk origin
+		// Apply the light response curve (falloff + dark-side floor) to the whole
+		// field once (before any consumer normalizes it), so every per-vertex
+		// light read gets it. Full-light voxels are unaffected.
+		ApplyLightResponse(lightFieldF, minLight, lightFalloff, maxLight);
+		float invMaxLight = 1f / maxLight;
+		System.Func<int, int, int, float> lightQuery = (x, y, z) =>
+		{
+			int ix = x - wx0 + wideHalf;
+			int iy = y + 1;
+			int iz = z - wz0 + wideHalf;
+			if (ix < 0 || ix >= lpx || iy < 0 || iy >= lpy || iz < 0 || iz >= lpz)
+			{
+				return 1f; // outside the wide field: treat as open sky (full light)
+			}
+			return lightFieldF[ix + lpx * (iy + lpy * iz)] * invMaxLight;
+		};
 
 		// Blended faces (a face whose outward neighbour is a DIFFERENT solid
 		// material) are crossfaded per-pixel by the blend shader instead of
@@ -74,7 +114,7 @@ public static class MeshBuilder
 		// ShaderMaterial, so each distinct material pair gets one surface. Each
 		// vertex carries its blend factor (UV2.x: 0 = pure A / lower id, 1 =
 		// pure B / higher id), a vertical gradient across the face.
-		var blended = new Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2)>();
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<float> lights)>();
 
 		ForEachExposedFace(chunk, wx0, wz0, solidQuery, (wx, y, wz, m, face) =>
 		{
@@ -86,6 +126,13 @@ public static class MeshBuilder
 			}
 			Vector3 origin = new Vector3(wx, y, wz) * voxelSize;
 
+			// The sky light this face should be darkened by is the light of the
+			// AIR voxel on the outside of the face (the face's outward
+			// neighbour). Open surfaces border light-15 air; cave walls border
+			// dark air, so they darken to near-black.
+			Vector3I o = FaceOffsets[face];
+			float light = lightQuery(wx + o.X, y + o.Y, wz + o.Z);
+
 			// Is this face at a MATERIAL interface? The outward neighbour (in
 			// the face's direction) is a different, solid, configured material.
 			// Only those faces crossfade; every other face keeps the cheap
@@ -93,12 +140,11 @@ public static class MeshBuilder
 			bool isBlended = false;
 			if (materialQuery != null)
 			{
-				Vector3I o = FaceOffsets[face];
 				byte neighbor = materialQuery(wx + o.X, y + o.Y, wz + o.Z);
 				if (neighbor != 0 && neighbor != m && neighbor >= 1 && neighbor <= lastMaterial)
 				{
 					isBlended = true;
-					EmitBlendedFace(blended, palette, origin, face, voxelSize, m, neighbor);
+					EmitBlendedFace(blended, palette, origin, face, voxelSize, m, neighbor, light);
 				}
 			}
 
@@ -106,7 +152,7 @@ public static class MeshBuilder
 			// path — skip the single-material emission for it.
 			if (!isBlended)
 			{
-				AddFace(positions[m - 1], normals[m - 1], uvs[m - 1], origin, face, voxelSize, palette.TextureScales[m - 1]);
+				AddFace(positions[m - 1], normals[m - 1], uvs[m - 1], lights[m - 1], origin, face, voxelSize, palette.TextureScales[m - 1], light);
 			}
 
 			// Collision is the exact visual surface: emit the same quad.
@@ -134,6 +180,11 @@ public static class MeshBuilder
 			{
 				tool.SetNormal(normals[m - 1][i]);
 				tool.SetUV(uvs[m - 1][i]);
+				// UV2.x = per-vertex sky light (0..1); the material shader
+				// multiplies ALBEDO by it to darken enclosed geometry. UV2 is
+				// free on the single-material path (blending uses it too, but a
+				// surface is either blended or single-material, never both).
+				tool.SetUV2(new Vector2(lights[m - 1][i], 0f));
 				tool.AddVertex(positions[m - 1][i]);
 			}
 
@@ -141,7 +192,8 @@ public static class MeshBuilder
 		}
 
 		// Emit one surface per blended material pair — the faces that crossfade
-		// between two materials. Each vertex carries its blend factor (UV2.x).
+		// between two materials. Each vertex carries its blend factor (UV2.x)
+		// and sky light (UV3.x).
 		foreach (var entry in blended)
 		{
 			var b = entry.Value;
@@ -156,7 +208,8 @@ public static class MeshBuilder
 			{
 				tool.SetNormal(b.norm[i]);
 				tool.SetUV(b.uv[i]);
-				tool.SetUV2(b.uv2[i]);
+				// UV2.x = blend factor, UV2.y = per-vertex sky light (0..1).
+				tool.SetUV2(new Vector2(b.uv2[i].X, b.lights[i]));
 				tool.AddVertex(b.pos[i]);
 			}
 			tool.Commit(mesh);
@@ -209,7 +262,11 @@ public static class MeshBuilder
 		Vector2I coord,
 		System.Func<Vector2I, ChunkData> neighborQuery,
 		System.Collections.Generic.List<Vector3> collisionOut = null,
-		System.Func<int, int, int, byte> materialQuery = null)
+		System.Func<int, int, int, byte> materialQuery = null,
+		float minLight = 0f,
+		int maxLight = 15,
+		float lightFalloff = 1f,
+		bool debugVertexLight = false)
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int px = sx + 2, py = sy + 2, pz = sz + 2; // padded lattice dims
@@ -223,6 +280,7 @@ public static class MeshBuilder
 		//    the voxel boundary (crossing at t = 0.5/value instead of 0.5).
 		var field = new float[px * py * pz];
 		var solid = new float[px * py * pz];
+		var blockLight = new byte[px * py * pz];
 		for (int iz = 0; iz < pz; iz++)
 		{
 			for (int iy = 0; iy < py; iy++)
@@ -234,9 +292,47 @@ public static class MeshBuilder
 					int idx = ix + px * (iy + py * iz);
 					field[idx] = m;
 					solid[idx] = m > 0f ? 1f : 0f;
+					// The voxel's own block-light emission level (0 = not a
+					// source). A torch placed in a neighbouring chunk still
+					// lights the air across the seam via this shell.
+					blockLight[idx] = SampleBlockLight(
+						chunk, sx, sy, sz, coord, neighborQuery, ix - 1, iy - 1, iz - 1);
 				}
 			}
 		}
+
+		// 1b) Light: flood-fill a WIDE 3x3-chunk region (self + 8 neighbours)
+		//     so sky light propagates a full 15-voxel radius across chunk seams
+		//     (caves spanning a seam no longer stay dark on one side) and the
+		//     loaded frontier isn't clipped to a 1-voxel shell. Each MC vertex
+		//     samples the air voxel it borders from this wide field and stores
+		//     it in UV2.x; the material shader multiplies ALBEDO by it. The
+		//     1-voxel padded `solid`/`blockLight` fields above are still used
+		//     for the MC isosurface and for the (now-legacy) debug dump below.
+		byte[] wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight);
+		int wx0w = wx0;
+		int wz0w = wz0;
+		// The wide field extends maxLight voxels beyond the chunk on every side
+		// (see BuildLightFieldWide), so its X/Z extent is 2*cs+2*maxLight+2.
+		int lpx = 2 * sx + 2 * maxLight + 2, lpy = sy + 2, lpz = 2 * sz + 2 * maxLight + 2;
+		int wideHalf = lpx / 2 - 1; // = sx + maxLight: lattice offset of the center chunk origin
+		float invMaxLight = 1f / maxLight;
+		System.Func<int, int, int, float> lightQuery = (x, y, z) =>
+		{
+			int ix = x - wx0w + wideHalf;
+			int iy = y + 1;
+			int iz = z - wz0w + wideHalf;
+			if (ix < 0 || ix >= lpx || iy < 0 || iy >= lpy || iz < 0 || iz >= lpz)
+			{
+				return 1f; // outside the wide field: treat as open sky (full light)
+			}
+			return wideLight[ix + lpx * (iy + lpy * iz)] * invMaxLight;
+		};
+
+		// Apply the light response curve (falloff + dark-side floor) to the wide
+		// field once (before any consumer normalizes it), so every per-vertex
+		// light read gets it. Full-light voxels are unaffected.
+		ApplyLightResponse(wideLight, minLight, lightFalloff, maxLight);
 
 		// 2) Extract the single air|solid isosurface.
 		//    Ownership: each chunk draws only its +X/+Z side boundary cells
@@ -296,10 +392,12 @@ public static class MeshBuilder
 		//    voxel the crossing came from) and group triangles by material.
 		var perMaterial = new List<Vector3>[lastMaterial]; // [pos, normal] pairs
 		var perUv = new List<Vector2>[lastMaterial];        // one UV per pos/normal pair
+		var perLight = new List<float>[lastMaterial];       // one sky-light (0..1) per vertex
 		for (int i = 0; i < lastMaterial; i++)
 		{
 			perMaterial[i] = new List<Vector3>();
 			perUv[i] = new List<Vector2>();
+			perLight[i] = new List<float>();
 		}
 
 		// Mixed-material triangles (their vertices span 2+ distinct materials)
@@ -307,15 +405,31 @@ public static class MeshBuilder
 		// a per-pixel crossfade between the two materials' textures, with a
 		// per-vertex blend factor (UV2.x). Buckets are keyed by the blend
 		// ShaderMaterial, so each distinct material pair gets one surface.
-		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s)>();
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<float> lights)>();
+
+		// DEBUG (one-shot): collect the per-vertex light the mesh actually
+		// emits, so we can see whether the MC surface carries a light gradient
+		// or a uniform value. Gated on debugVertexLight.
+		var dbgLight = debugVertexLight ? new List<(Vector3 p, float l)>() : null;
 
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
 			int ma, mb, mc;
+			float la, lb, lc;
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, out pa, out ma);
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out pb, out mb);
 			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out pc, out mc);
+			// Light comes from the WIDE 3x3-chunk field so it spans seams.
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, invMaxLight, out _, out la);
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, invMaxLight, out _, out lb);
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, invMaxLight, out _, out lc);
+			if (dbgLight != null)
+			{
+				dbgLight.Add((pa, la));
+				dbgLight.Add((pb, lb));
+				dbgLight.Add((pc, lc));
+			}
 
 			// Lattice -> world. The padding shifts the lattice by one, and the
 			// +0.5 puts every field point at its voxel's CENTER, so the
@@ -344,7 +458,7 @@ public static class MeshBuilder
 			bool isMixed = ma != mb || ma != mc;
 			if (isMixed && materialQuery != null)
 			{
-				EmitBlendedTriangle(blended, palette, pa, pb, pc, n, ma, mb, mc);
+				EmitBlendedTriangle(blended, palette, pa, pb, pc, n, ma, mb, mc, la, lb, lc);
 			}
 			else
 			{
@@ -361,16 +475,20 @@ public static class MeshBuilder
 
 				var verts = perMaterial[m - 1];
 				var uvs = perUv[m - 1];
+				var lights = perLight[m - 1];
 				float uvScale = palette.TextureScales[m - 1];
 				verts.Add(pa);
 				verts.Add(n);
 				uvs.Add(PlanarUv(pa, n, uvScale));
+				lights.Add(la);
 				verts.Add(pb);
 				verts.Add(n);
 				uvs.Add(PlanarUv(pb, n, uvScale));
+				lights.Add(lb);
 				verts.Add(pc);
 				verts.Add(n);
 				uvs.Add(PlanarUv(pc, n, uvScale));
+				lights.Add(lc);
 			}
 
 			if (collisionOut != null)
@@ -392,6 +510,7 @@ public static class MeshBuilder
 			}
 
 			var uvs = perUv[m - 1];
+			var lights = perLight[m - 1];
 			var tool = new SurfaceTool();
 			tool.Begin(Mesh.PrimitiveType.Triangles);
 			tool.SetMaterial(palette.Materials[m - 1]);
@@ -399,6 +518,9 @@ public static class MeshBuilder
 			{
 				tool.SetNormal(verts[i + 1]);
 				tool.SetUV(uvs[i / 2]);
+				// UV2.x = per-vertex sky light (0..1); the material shader
+				// multiplies ALBEDO by it to darken enclosed geometry.
+				tool.SetUV2(new Vector2(lights[i / 2], 0f));
 				tool.AddVertex(verts[i]);
 			}
 			tool.Commit(mesh);
@@ -406,7 +528,8 @@ public static class MeshBuilder
 
 		// Emit one surface per blended material pair — the mixed triangles
 		// that crossfade between two materials. Each vertex carries its blend
-		// factor (UV2.x: 0 = pure A / lower id, 1 = pure B / higher id).
+		// factor (UV2.x: 0 = pure A / lower id, 1 = pure B / higher id) and its
+		// sky light (UV3.x).
 		foreach (var entry in blended)
 		{
 			var b = entry.Value;
@@ -421,10 +544,32 @@ public static class MeshBuilder
 			{
 				tool.SetNormal(b.norms[i]);
 				tool.SetUV(b.uvs[i]);
-				tool.SetUV2(b.uv2s[i]);
+				// UV2.x = blend factor, UV2.y = per-vertex sky light (0..1).
+				tool.SetUV2(new Vector2(b.uv2s[i].X, b.lights[i]));
 				tool.AddVertex(b.verts[i]);
 			}
 			tool.Commit(mesh);
+		}
+
+		// DEBUG (one-shot): report the per-vertex light the MC mesh emitted, so
+		// we can see whether the surface carries a light gradient or a uniform
+		// value. If the cave looks uniform, this tells us whether the vertices
+		// actually vary.
+		if (dbgLight != null)
+		{
+			float mn = float.MaxValue, mx = 0f;
+			var byLight = new Dictionary<int, int>(); // rounded light -> count
+			foreach (var (p, l) in dbgLight)
+			{
+				if (l < mn) mn = l;
+				if (l > mx) mx = l;
+				int k = (int)(l * 100f + 0.5f);
+				byLight[k] = byLight.TryGetValue(k, out int c) ? c + 1 : 1;
+			}
+			string hist = string.Join(" ", System.Linq.Enumerable
+				.Select(System.Linq.Enumerable.OrderBy(byLight, kv => kv.Key),
+					kv => $"{(kv.Key / 100f):F2}:{kv.Value}"));
+			GD.Print($"[VTEX-LIGHT] chunk {coord}: {dbgLight.Count} verts min={mn:F2} max={mx:F2} histogram(light:count)= [{hist}]");
 		}
 
 		return mesh;
@@ -432,8 +577,9 @@ public static class MeshBuilder
 
 	/// <summary>
 	/// Resolves one MC triangle vertex: its lattice-space position (from
-	/// the binary solid field) and the material index of the solid voxel
-	/// the crossing came from (from the material field).
+	/// the binary solid field) and the material index of the solid voxel the
+	/// crossing came from (from the material field). (Per-vertex light is
+	/// sampled separately from the WIDE field by <see cref="VertexWideLight"/>.)
 	/// </summary>
 	private static void Vertex(
 		float[] solidField,
@@ -451,6 +597,64 @@ public static class MeshBuilder
 		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
 			out position, out int sx, out int sy, out int sz);
 		material = (int)materialField[sx + nx * (sy + ny * sz)];
+	}
+
+	/// <summary>
+	/// Resolves one MC triangle vertex's light from the WIDE light field
+	/// instead of the 1-voxel padded one. The air corner (ax,ay,az) is in the
+	/// padded lattice (1..nx-1 etc.); converting to world voxels (ax-1, ay-1,
+	/// az-1) and indexing the wide field lets the sample see a full
+	/// maxLight-voxel radius of neighbour light across chunk seams. The solid
+	/// check stays on the padded field (which is what the isosurface was built
+	/// from). The wide field's X/Z offset is <c>lpx/2 - 1</c> (= cs + maxLight):
+	/// it no longer coincides with the padded field's 1-voxel offset, so it is
+	/// derived from the field dimensions instead of the chunk size.
+	/// </summary>
+	private static void VertexWideLight(
+		float[] solidField,
+		int nx,
+		int ny,
+		int nz,
+		int wx0,
+		int wz0,
+		byte[] wideLight,
+		int lpx,
+		int lpy,
+		int lpz,
+		int cs,
+		int cx,
+		int cy,
+		int cz,
+		int edge,
+		float invMaxLight,
+		out Vector3 position,
+		out float light)
+	{
+		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
+			out position, out _, out _, out _);
+		MarchingCubes.ResolveEdgeAirCorner(solidField, nx, ny, nz, cx, cy, cz, edge,
+			out int ax, out int ay, out int az);
+		// Air voxel in the padded field (defensive solid check on the field the
+		// surface was built from), then its world-space light from the wide field.
+		int slidx = ax + nx * (ay + ny * az);
+		if (solidField[slidx] != 0f)
+		{
+			light = 0f;
+			return;
+		}
+		int wx = wx0 + ax - 1;
+		int wy = ay - 1;
+		int wz = wz0 + az - 1;
+		int half = lpx / 2 - 1; // wide field X offset = cs + maxLight
+		int ix = wx - wx0 + half;
+		int iy = wy + 1;
+		int iz = wz - wz0 + half;
+		if (ix < 0 || ix >= lpx || iy < 0 || iy >= lpy || iz < 0 || iz >= lpz)
+		{
+			light = 1f; // outside the wide field: open sky
+			return;
+		}
+		light = wideLight[ix + lpx * (iy + lpy * iz)] * invMaxLight;
 	}
 
 	/// <summary>
@@ -511,6 +715,316 @@ public static class MeshBuilder
 	}
 
 	/// <summary>
+	/// Samples the per-voxel BLOCK LIGHT level (0 = not a light source) at
+	/// chunk-relative lattice point (x, y, z), mirroring
+	/// <see cref="SampleMaterial"/> but reading the <c>BlockLight</c> array
+	/// instead of <c>Data</c>. Used to build the padded block-light field the
+	/// sky-light flood fill seeds from, so a light source in a neighbouring
+	/// chunk correctly lights the air across the chunk seam.
+	/// </summary>
+	private static byte SampleBlockLight(
+		ChunkData chunk,
+		int sx,
+		int sy,
+		int sz,
+		Vector2I coord,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		int x,
+		int y,
+		int z)
+	{
+		if (x >= 0 && x < sx && y >= 0 && y < sy && z >= 0 && z < sz)
+		{
+			return chunk.BlockLight[x + sx * (y + sy * z)];
+		}
+
+		if (y < 0 || y >= sy)
+		{
+			return 0;
+		}
+
+		int dx = x < 0 ? -1 : (x >= sx ? 1 : 0);
+		int dz = z < 0 ? -1 : (z >= sz ? 1 : 0);
+		if (dx != 0 && dz != 0)
+		{
+			var diag = neighborQuery(new Vector2I(coord.X + dx, coord.Y + dz));
+			if (diag != null)
+			{
+				int dlx = dx > 0 ? 0 : diag.SizeX - 1;
+				int dlz = dz > 0 ? 0 : diag.SizeZ - 1;
+				return diag.BlockLight[dlx + diag.SizeX * (y + diag.SizeY * dlz)];
+			}
+			return 0;
+		}
+
+		var neighbour = neighborQuery(new Vector2I(coord.X + dx, coord.Y + dz));
+		if (neighbour == null)
+		{
+			return 0;
+		}
+
+		int lx = dx < 0 ? neighbour.SizeX - 1 : (dx > 0 ? 0 : x);
+		int lz = dz < 0 ? neighbour.SizeZ - 1 : (dz > 0 ? 0 : z);
+		return neighbour.BlockLight[lx + neighbour.SizeX * (y + neighbour.SizeY * lz)];
+	}
+
+	/// <summary>
+	/// Samples the SOLID|air state for the LIGHT flood fill at chunk-relative
+	/// lattice point (x, y, z), mirroring <see cref="SampleMaterial"/> but with
+	/// one crucial difference: an UNLOADED (or still-generating) neighbour
+	/// counts as SOLID, not air. This matches the mesh-culling rule
+	/// (<c>VoxelSolidForMesh</c>) and, more importantly, stops the sky-light
+	/// flood fill from falsely seeding the padded shell as open sky when a
+	/// neighbour is not yet generated. Without this, a chunk built while its
+	/// neighbour is unloaded gets a full-brightness (15) edge, then its
+	/// neighbour (built with the data present) gets a dark edge — producing the
+	/// "0 to 15 across one voxel" seam artifact. Treating unloaded as solid
+	/// keeps the light field consistent with what is actually rendered.
+	/// </summary>
+	private static bool SampleSolidForLight(
+		ChunkData chunk,
+		int sx,
+		int sy,
+		int sz,
+		Vector2I coord,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		int x,
+		int y,
+		int z)
+	{
+		if (x >= 0 && x < sx && y >= 0 && y < sy && z >= 0 && z < sz)
+		{
+			return chunk.Data[x + sx * (y + sy * z)] != 0;
+		}
+
+		// Below the world bottom is solid (the floor); above the chunk top is
+		// open sky (air) — the sky seed needs the top to be air to light down.
+		if (y < 0)
+		{
+			return true;
+		}
+		if (y >= sy)
+		{
+			return false;
+		}
+
+		int dx = x < 0 ? -1 : (x >= sx ? 1 : 0);
+		int dz = z < 0 ? -1 : (z >= sz ? 1 : 0);
+		if (dx != 0 && dz != 0)
+		{
+			// Diagonal corner voxel of the diagonal neighbour. Unloaded = solid
+			// (opaque) for the light field so the edge doesn't leak sky.
+			var diag = neighborQuery(new Vector2I(coord.X + dx, coord.Y + dz));
+			if (diag == null)
+			{
+				return true;
+			}
+			int dlx = dx > 0 ? 0 : diag.SizeX - 1;
+			int dlz = dz > 0 ? 0 : diag.SizeZ - 1;
+			return diag.Data[dlx + diag.SizeX * (y + diag.SizeY * dlz)] != 0;
+		}
+
+		var neighbour = neighborQuery(new Vector2I(coord.X + dx, coord.Y + dz));
+		if (neighbour == null)
+		{
+			return true; // UNLOADED neighbour: solid (opaque), matches culling
+		}
+		int lx = dx < 0 ? neighbour.SizeX - 1 : (dx > 0 ? 0 : x);
+		int lz = dz < 0 ? neighbour.SizeZ - 1 : (dz > 0 ? 0 : z);
+		return neighbour.Data[lx + neighbour.SizeX * (y + neighbour.SizeY * lz)] != 0;
+	}
+
+	/// <summary>
+	/// Resolves the SOLID|air state of a WORLD voxel for the LIGHT field: the
+	/// owning chunk's data when that chunk is loaded and generated, otherwise
+	/// SOLID. Treating an unloaded / still-generating neighbour as solid is the
+	/// conservative (dark) choice that prevents sky light from leaking in across
+	/// an edge whose neighbour hasn't been generated yet (the "0 to 15 across one
+	/// voxel" seam). A chunk whose <c>DataReady</c> is false holds an all-zero
+	/// buffer, so we must check the flag — reading it as air would seed a false
+	/// open-sky column. y below the world floor is solid; y above the chunk top
+	/// is open sky (air) so the sky seed can light down from the top.
+	/// </summary>
+	private static bool WorldSolidForLight(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		int cs,
+		int sy,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		int wx,
+		int wy,
+		int wz)
+	{
+		if (wy < 0)
+		{
+			return true; // world floor: opaque
+		}
+		if (wy >= sy)
+		{
+			return false; // above the chunk top: open sky
+		}
+		// FloorDiv: the world can contain negative coordinates.
+		int cxi = (wx >= 0) ? wx / cs : -((-wx + cs - 1) / cs);
+		int czi = (wz >= 0) ? wz / cs : -((-wz + cs - 1) / cs);
+		if (cxi * cs == wx0 && czi * cs == wz0)
+		{
+			return chunk.Data[(wx - cxi * cs) + cs * (wy + sy * (wz - czi * cs))] != 0;
+		}
+		var n = neighborQuery(new Vector2I(cxi, czi));
+		if (n == null)
+		{
+			// GetChunkData returns null for unloaded / still-generating chunks,
+			// so a null neighbour reads as solid (opaque, dark).
+			return true;
+		}
+		return n.Data[(wx - cxi * cs) + cs * (wy + sy * (wz - czi * cs))] != 0;
+	}
+
+	/// <summary>
+	/// Builds a WIDE light field over a region extending <paramref name="maxLight"/>
+	/// voxels BEYOND the center chunk on all four X/Z sides (plus the 1-voxel
+	/// padding above and below), so the flood fill in <see cref="SkyLight.Compute"/>
+	/// can propagate a FULL light range without hitting the field boundary —
+	/// the fix for caves that span a seam staying dark on one side, and for the
+	/// dark line at chunk borders where a small field clipped the fill.
+	///
+	/// The returned field is (2cs + 2*maxLight + 2) wide in X/Z and (sy+2) tall
+	/// in Y; the center chunk occupies lattice [cs+1+maxLight, 2cs+maxLight] in
+	/// X/Z and [1, sy] in Y. The X/Z extent must cover the center chunk PLUS one
+	/// full light range on each side: a voxel at the far edge of the chunk can
+	/// receive light that traveled maxLevel voxels from a source up to a full
+	/// chunk away across the seam, and the BFS must be able to see that source
+	/// (or the solid wall that blocks it) before it stops. With the old
+	/// 3x3-chunk (cs+1 shell) extent, light from sources beyond the shell was
+	/// clipped at the field edge while the same distance was lit on the
+	/// opposite side — a brightness step right at the chunk border.
+	///
+	/// Unloaded neighbours read as solid (see <see cref="WorldSolidForLight"/>),
+	/// so a not-yet-generated region is dark rather than falsely bright, and it
+	/// re-lights correctly the moment the neighbour appears (VoxelWorld flags
+	/// its neighbours for rebuild).
+	///
+	/// NOTE: the field dimensions must stay in sync with the callers' <c>lpx</c>
+	/// / <c>lpz</c> computations (2*cs + 2*maxLight + 2) and with
+	/// <see cref="VertexWideLight"/>'s <c>lpx/2 - 1</c> offset.
+	/// </summary>
+	private static byte[] BuildLightFieldWide(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		int cs,
+		int sy,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		int maxLight = 15)
+	{
+		// Clamp the range exactly as SkyLight.Compute does (byte field, >= 1).
+		int range = maxLight;
+		if (range < 1)
+		{
+			range = 1;
+		}
+		else if (range > 255)
+		{
+			range = 255;
+		}
+		// Center chunk + one full light range per side + 1-voxel pad per side.
+		int px = 2 * cs + 2 * range + 2, py = sy + 2, pz = 2 * cs + 2 * range + 2;
+		int half = px / 2 - 1; // = cs + range: world offset of lattice ix 0
+		var solid = new byte[px * py * pz];
+		var block = new byte[px * py * pz];
+		for (int iz = 0; iz < pz; iz++)
+		{
+			for (int iy = 0; iy < py; iy++)
+			{
+				for (int ix = 0; ix < px; ix++)
+				{
+					int wx = wx0 + ix - half;
+					int wy = iy - 1;
+					int wz = wz0 + iz - half;
+					int idx = ix + px * (iy + py * iz);
+					if (wy < 0 || wy >= sy)
+					{
+						solid[idx] = (byte)(wy < 0 ? 1 : 0); // floor solid / sky air
+						continue;
+					}
+					int cxi = (wx >= 0) ? wx / cs : -((-wx + cs - 1) / cs);
+					int czi = (wz >= 0) ? wz / cs : -((-wz + cs - 1) / cs);
+					int lx = wx - cxi * cs;
+					int lz = wz - czi * cs;
+					ChunkData c = (cxi * cs == wx0 && czi * cs == wz0)
+						? chunk
+						: neighborQuery(new Vector2I(cxi, czi));
+					if (c == null)
+					{
+						// Neighbor is NOT ready (unloaded or still generating):
+						// read it as SOLID (opaque, dark) everywhere in the wide
+						// field. This matches the mesh-culling rule
+						// (VoxelSolidForMesh treats unloaded chunks as solid) and
+						// is conservative for the deep fill, so the frontier
+						// under-lights rather than falsely over-lighting a cave
+						// mouth that opens toward the frontier. It is also what
+						// stops sky light leaking in across an edge whose
+						// neighbour hasn't been generated yet (the "0 to 15
+						// across one voxel" seam). The old "read as air inside
+						// the 1-voxel shell" special case is no longer needed:
+						// every voxel a vertex can sample lies inside the center
+						// chunk (whose own data is always ready), so vertex
+						// light samples never hit the not-ready fallback.
+						solid[idx] = 1;
+						continue;
+					}
+					int li = lx + cs * (wy + sy * lz);
+					solid[idx] = (byte)(c.Data[li] != 0 ? 1 : 0);
+					block[idx] = c.BlockLight[li];
+				}
+			}
+		}
+		return SkyLight.Compute(solid, px, py, pz, block, maxLight);
+	}
+
+	/// <summary>
+	/// Applies the light RESPONSE CURVE to a 0..maxLight field IN PLACE, in two
+	/// stages (both pure per-voxel remaps, so the field stays a valid light
+	/// field and the result is still seam-safe — both sides of a seam apply the
+	/// same curve to the same values):
+	/// <list type="number">
+	///   <item>FALLOFF: <c>l' = l^exponent</c> on the normalized level. The BFS
+	///   light decays 1/voxel, so a cave interior more than <c>maxLight</c>
+	///   voxels from the nearest opening is level 0 (black) no matter what — a
+	///   linear response can never make deep caves readable. Raising the
+	///   exponent (&gt;1) lifts every sub-full level, stretching the *visible*
+	///   falloff so the gradient spans much more distance and cave interiors
+	///   sit at a dim-but-visible level instead of black. exponent 1.0 = linear
+	///   (Minecraft-faithful, hard cutoff at the light range).</item>
+	///   <item>FLOOR: <see cref="VoxelWorld.ApplyMinLight"/> lifts the remaining
+	///   dark side to <paramref name="minLight"/> (0 = fully black).</item>
+	/// </list>
+	/// Full-light voxels (level maxLight) are unaffected by either stage.
+	/// </summary>
+	private static void ApplyLightResponse(byte[] light, float minLight, float exponent, int maxLight = 15)
+	{
+		float ml = maxLight;
+		float exp = exponent >= 1f ? exponent : 1f;
+		bool hasFloor = minLight > 0f;
+		for (int i = 0; i < light.Length; i++)
+		{
+			float norm = light[i] / ml;
+			// Stage 1 — falloff curve (no-op when exp == 1).
+			if (exp > 1.0001f)
+			{
+				norm = (float)Math.Pow(norm, exp);
+			}
+			// Stage 2 — dark-side floor (no-op when minLight == 0).
+			if (hasFloor)
+			{
+				norm = VoxelWorld.ApplyMinLight(norm, minLight);
+			}
+			light[i] = (byte)(norm * ml + 0.5f);
+		}
+	}
+
+	/// <summary>
 	/// Builds the visual mesh and the collision triangle list for a chunk in a
 	/// single CPU pass. Pure voxel math over <paramref name="chunk"/> plus the
 	/// supplied queries — no engine node access — so it is safe to run on the
@@ -529,7 +1043,13 @@ public static class MeshBuilder
 		Vector2I coord,
 		System.Func<int, int, int, bool> solidQuery,
 		System.Func<Vector2I, ChunkData> neighborQuery,
-		System.Func<int, int, int, byte> materialQuery = null)
+		System.Func<int, int, int, byte> materialQuery = null,
+		System.Func<int, int, int, byte> blockLightQuery = null,
+		System.Func<Vector2I, ChunkData> neighborChunkQuery = null,
+		float minLight = 0f,
+		int maxLight = 15,
+		float lightFalloff = 1f,
+		bool debugVertexLight = false)
 	{
 		// The collision surface is ALWAYS the visual surface, exactly: in both
 		// mesh modes the triangles emitted into the visual mesh are also
@@ -545,8 +1065,8 @@ public static class MeshBuilder
 		// the blend shader; null = no blending (every face/triangle snaps to a
 		// single material).
 		ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery)
-			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery);
+			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight)
+			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff);
 		return (visual, collision);
 	}
 
@@ -639,7 +1159,7 @@ public static class MeshBuilder
 
 	// Emits one flat-shaded quad (6 vertices, fan of 2 triangles) for the face
 	// of the unit cube at <origin>, with the face's outward normal.
-	private static void AddFace(List<Vector3> positions, List<Vector3> normals, List<Vector2> uvs, Vector3 origin, int face, float voxelSize, float uvScale)
+	private static void AddFace(List<Vector3> positions, List<Vector3> normals, List<Vector2> uvs, List<float> lights, Vector3 origin, int face, float voxelSize, float uvScale, float light)
 	{
 		Vector3[] c = FaceCorners[face];
 		Vector3 n = FaceNormals[face];
@@ -659,6 +1179,7 @@ public static class MeshBuilder
 		for (int i = 0; i < 6; i++)
 		{
 			normals.Add(n);
+			lights.Add(light);
 		}
 
 		// FaceCorners lists each face's 4 corners in loop order, so the same
@@ -696,8 +1217,8 @@ public static class MeshBuilder
 	/// face, same as <see cref="AddFace"/>).
 	/// </summary>
 	private static void EmitBlendedFace(
-		Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2)> blended,
-		VoxelMaterialPalette palette, Vector3 origin, int face, float voxelSize, byte m, byte neighbor)
+		Dictionary<ShaderMaterial, (List<Vector3> pos, List<Vector3> norm, List<Vector2> uv, List<Vector2> uv2, List<float> lights)> blended,
+		VoxelMaterialPalette palette, Vector3 origin, int face, float voxelSize, byte m, byte neighbor, float light)
 	{
 		int idA = m < neighbor ? m : neighbor; // lower id
 		int idB = m < neighbor ? neighbor : m; // higher id
@@ -706,7 +1227,7 @@ public static class MeshBuilder
 		ShaderMaterial bm = palette.GetBlendShaderMaterial(idA, idB);
 		if (!blended.TryGetValue(bm, out var bucket))
 		{
-			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>());
+			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<float>());
 			blended[bm] = bucket;
 		}
 
@@ -733,7 +1254,7 @@ public static class MeshBuilder
 		// Same winding + UV table as AddFace (c[0],c[1],c[2] then c[0],c[2],c[3]).
 		bucket.pos.Add(a); bucket.pos.Add(b); bucket.pos.Add(d);
 		bucket.pos.Add(a); bucket.pos.Add(d); bucket.pos.Add(e);
-		for (int i = 0; i < 6; i++) bucket.norm.Add(n);
+		for (int i = 0; i < 6; i++) { bucket.norm.Add(n); bucket.lights.Add(light); }
 		bucket.uv.Add(QuadUv[0] * uvScale); bucket.uv.Add(QuadUv[1] * uvScale); bucket.uv.Add(QuadUv[2] * uvScale);
 		bucket.uv.Add(QuadUv[0] * uvScale); bucket.uv.Add(QuadUv[2] * uvScale); bucket.uv.Add(QuadUv[3] * uvScale);
 		bucket.uv2.Add(new Vector2(fa, 0f)); bucket.uv2.Add(new Vector2(fb, 0f)); bucket.uv2.Add(new Vector2(fd, 0f));
@@ -750,8 +1271,9 @@ public static class MeshBuilder
 	/// id, matching <see cref="VoxelMaterialPalette.GetBlendShaderMaterial"/>).
 	/// </summary>
 	private static void EmitBlendedTriangle(
-		Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s)> blended,
-		VoxelMaterialPalette palette, Vector3 pa, Vector3 pb, Vector3 pc, Vector3 n, int ma, int mb, int mc)
+		Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<float> lights)> blended,
+		VoxelMaterialPalette palette, Vector3 pa, Vector3 pb, Vector3 pc, Vector3 n, int ma, int mb, int mc,
+		float la, float lb, float lc)
 	{
 		// The interface is the pair of the two most common vertex materials
 		// (a triangle spans 2 or 3 distinct materials; the 3rd, if any, is a
@@ -773,7 +1295,7 @@ public static class MeshBuilder
 		ShaderMaterial bm = palette.GetBlendShaderMaterial(idA, idB);
 		if (!blended.TryGetValue(bm, out var bucket))
 		{
-			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>());
+			bucket = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<Vector2>(), new List<float>());
 			blended[bm] = bucket;
 		}
 
@@ -787,11 +1309,11 @@ public static class MeshBuilder
 		float uvScale = palette.TextureScales[idA - 1];
 
 		bucket.verts.Add(pa); bucket.norms.Add(n);
-		bucket.uvs.Add(PlanarUv(pa, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(ma), 0f));
+		bucket.uvs.Add(PlanarUv(pa, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(ma), 0f)); bucket.lights.Add(la);
 		bucket.verts.Add(pb); bucket.norms.Add(n);
-		bucket.uvs.Add(PlanarUv(pb, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mb), 0f));
+		bucket.uvs.Add(PlanarUv(pb, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mb), 0f)); bucket.lights.Add(lb);
 		bucket.verts.Add(pc); bucket.norms.Add(n);
-		bucket.uvs.Add(PlanarUv(pc, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mc), 0f));
+		bucket.uvs.Add(PlanarUv(pc, n, uvScale)); bucket.uv2s.Add(new Vector2(Factor(mc), 0f)); bucket.lights.Add(lc);
 	}
 
 	/// <summary>

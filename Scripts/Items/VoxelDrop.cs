@@ -58,6 +58,14 @@ public partial class VoxelDrop : CharacterBody3D
 	public void Initialize(int materialId, int count)
 	{
 		_stack = ItemStack.From(materialId, count);
+		// A torch's LightLevel is an intrinsic item property (always
+		// TorchLightLevel), not per-instance state, so it is not carried by the
+		// drop's (id, count) form — reconstruct it here so a dropped torch still
+		// emits block light when picked up and re-placed.
+		if (materialId == FactorySim.Voxel.VoxelMaterialIds.Torch)
+		{
+			_stack.LightLevel = FactorySim.Items.ItemRegistry.TorchLightLevel;
+		}
 		_restPosition = GlobalPosition;
 		BuildMesh();
 	}
@@ -157,7 +165,9 @@ public partial class VoxelDrop : CharacterBody3D
 			if (space > 0)
 			{
 				int moved = Mathf.Min(space, other.Count);
+				byte myLevel = _stack.LightLevel; // From() below resets it
 				_stack = ItemStack.From(_stack.MaterialId, _stack.Count + moved);
+				_stack.LightLevel = myLevel;
 				other._stack = ItemStack.From(other.MaterialId, other.Count - moved);
 			}
 
@@ -200,8 +210,10 @@ public partial class VoxelDrop : CharacterBody3D
 
 		if (collected < _stack.Count)
 		{
-			// Partial pickup: keep the remainder.
+			// Partial pickup: keep the remainder (preserve the light level).
+			byte level = _stack.LightLevel;
 			_stack = ItemStack.From(_stack.MaterialId, _stack.Count - collected);
+			_stack.LightLevel = level;
 		}
 		else
 		{
@@ -237,15 +249,9 @@ public partial class VoxelDrop : CharacterBody3D
 	private Color LookUpColor(int materialId)
 	{
 		var world = GetTree() != null ? GetTree().GetFirstNodeInGroup("voxel_world") as Voxel.VoxelWorld : null;
-		if (world != null && world.Palette != null
-			&& world.Palette.Materials.Length > 0
-			&& materialId > 0 && materialId - 1 < world.Palette.Materials.Length)
+		if (world != null && world.Palette != null)
 		{
-			var mat = world.Palette.Materials[materialId - 1];
-			if (mat != null)
-			{
-				return mat.AlbedoColor;
-			}
+			return world.Palette.GetAlbedoColor(materialId);
 		}
 		return new Color(0.5f, 0.5f, 0.5f);
 	}

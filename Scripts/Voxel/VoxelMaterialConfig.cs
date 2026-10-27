@@ -243,6 +243,11 @@ public partial class VoxelMaterialConfig : Resource
 				"Cut stone bricks. A sturdier building block."),
 			MakeCrafted(22, "Machine Frame", new Color(0.45f, 0.48f, 0.55f),
 				"A rigid frame for mounting machines. A preview of the coming machine system."),
+			// Torch: a small solid light source (id 23). Emission level is an
+			// ITEM property (carried by the torch item, not this def) — see
+			// ItemRegistry.AllLightSources. Warm amber so it reads as a flame.
+			MakeCrafted(23, "Torch", new Color(1.00f, 0.78f, 0.30f),
+				"A handheld light source. Place it to illuminate dark caves."),
 		};
 
 		foreach (var def in defs)

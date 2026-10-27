@@ -194,6 +194,10 @@ inventory_toggle={
 
 joypads/ignore_joypad_on_unfocused_application=true
 
+[layer_names]
+
+3d_render/layer_1="Non Voxel"
+
 [physics]
 
 common/physics_ticks_per_second=120

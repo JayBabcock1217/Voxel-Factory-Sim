@@ -195,6 +195,12 @@ public static class LodChunkGenerator
 			{
 				tool.SetNormal(normals[m - 1][i]);
 				tool.SetUV(uvs[m - 1][i]);
+				// UV2.x = per-vertex sky light. LOD is distant, open terrain
+				// (a heightfield of surface voxels) — it is never a cave
+				// interior, so it always gets full sky light (1.0). Without this
+				// the light-aware material shader would read UV2.x = 0 and
+				// render the LOD fully black.
+				tool.SetUV2(new Vector2(1f, 0f));
 				tool.AddVertex(positions[m - 1][i]);
 			}
 			tool.Commit(mesh);

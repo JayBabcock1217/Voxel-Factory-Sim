@@ -1331,8 +1331,12 @@ public partial class InventoryUI : CanvasLayer
 
 		// Materials: grant a full stack (the dev pane's "give 1" is really "give
 		// a usable amount"; a single block is hard to work with). Use CollectItem
-		// so it fills existing stacks first, then empty slots.
-		_inventory.CollectItem(FactorySim.Items.ItemStack.From(item.MaterialId, FactorySim.Items.ItemStack.StackLimit));
+		// so it fills existing stacks first, then empty slots. A light-source
+		// material (item.LightLevel > 0) must carry its level onto the stack so
+		// the placed voxel emits block light.
+		var granted = FactorySim.Items.ItemStack.From(item.MaterialId, FactorySim.Items.ItemStack.StackLimit);
+		granted.LightLevel = item.LightLevel;
+		_inventory.CollectItem(granted);
 	}
 
 	/// <summary>Builds the recipe info tooltip (name + description + ingredient list).</summary>
@@ -1550,15 +1554,9 @@ public partial class InventoryUI : CanvasLayer
 			return new Color(0.6f, 0.6f, 0.6f);
 		}
 
-		if (_world != null && _world.Palette != null
-			&& _world.Palette.Materials.Length > 0
-			&& materialId > 0 && materialId - 1 < _world.Palette.Materials.Length)
+		if (_world != null && _world.Palette != null)
 		{
-			var mat = _world.Palette.Materials[materialId - 1];
-			if (mat != null)
-			{
-				return mat.AlbedoColor;
-			}
+			return _world.Palette.GetAlbedoColor(materialId);
 		}
 		return new Color(0.5f, 0.5f, 0.5f);
 	}

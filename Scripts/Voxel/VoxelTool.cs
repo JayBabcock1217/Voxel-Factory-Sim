@@ -736,12 +736,13 @@ public partial class VoxelTool : Node3D
 		}
 		else
 		{
-			// Material: place a voxel.
+			// Material: place a voxel. A light-source item (LightLevel > 0)
+			// marks the placed voxel as a block-light source of that level.
 			if (!VoxelMaterialIds.IsPlaceableMaterialId(held.MaterialId))
 			{
 				return;
 			}
-			placed = _world.PlaceVoxel(place, held.MaterialId);
+			placed = _world.PlaceVoxel(place, held.MaterialId, held.LightLevel);
 		}
 
 		if (!placed)
@@ -1251,7 +1252,16 @@ public partial class VoxelTool : Node3D
 		float vs = _world.VoxelSize;
 		_highlightPivotWorld = new Vector3(voxel.X, voxel.Y, voxel.Z) * vs
 			+ new Vector3(0.5f, 0.5f, 0.5f) * vs;
-		var faces = MeshBuilder.BuildVisual(data, voxel.X, voxel.Y, 1f, _world.Palette, solidQuery);
+		// The 1×1×1 chunk's (0,0,0) maps to the targeted world voxel, so its
+		// world origin is (voxel.X, voxel.Y). Pass a neighborChunkQuery that
+		// returns null for every neighbor: BuildLightFieldWide handles that by
+		// reading air inside the 1-voxel shell and solid beyond it — the correct
+		// behavior for a highlight that only needs its own voxel's surface (the
+		// solid/air culling is already driven by the solidQuery closure above).
+		System.Func<Vector2I, ChunkData> noNeighbors = _ => null;
+		var faces = MeshBuilder.BuildVisual(
+			data, voxel.X, voxel.Y, 1f, _world.Palette, solidQuery,
+			neighborChunkQuery: noNeighbors);
 		var wire = BuildEdgeMesh(faces, _highlightPivotWorld);
 		_meshedTarget = voxel;
 

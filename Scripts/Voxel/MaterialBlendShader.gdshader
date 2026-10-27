@@ -36,11 +36,14 @@ uniform vec4 TintA;
 uniform vec4 TintB;
 
 varying float vFactor;
+varying float vLight;
 
 void vertex() {
 	// UV2.x carries the per-vertex blend factor (0 = pure A / lower id,
-	// 1 = pure B / higher id).
+	// 1 = pure B / higher id). UV2.y carries the per-vertex sky light (0..1)
+	// — the mesh builder stores it there so the blend factor (UV2.x) is free.
 	vFactor = UV2.x;
+	vLight = UV2.y;
 }
 
 void fragment() {
@@ -54,7 +57,10 @@ void fragment() {
 	// so each side is EXACTLY what StandardMaterial3D produces for that
 	// material's ALBEDO — mixing them gives a crossfade that matches the
 	// plain materials at f=0 and f=1 and reads the same brightness in between.
-	ALBEDO = mix(ta.rgb, tb.rgb, f);
+	vec3 albedo = mix(ta.rgb, tb.rgb, f);
+	// Sky light darkens enclosed geometry (caves): scale the crossfade by the
+	// per-vertex light (0..1), same as the plain-surface shader.
+	ALBEDO = albedo * clamp(vLight, 0.0, 1.0);
 	// Match the standard materials' PBR response EXACTLY. The plain materials
 	// (VoxelMaterialEntry defaults) are: Roughness 1.0, Metallic 0.0, and
 	// SchlickGgx specular with MetallicSpecular 0.05. In a raw spatial shader
