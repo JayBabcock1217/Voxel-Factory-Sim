@@ -56,6 +56,14 @@ public partial class VoxelChunk : Node3D
 	public bool MeshBuildInFlight => _meshBuild != null;
 
 	/// <summary>
+	/// True once this chunk has a live concave collision shape (built by
+	/// <see cref="Rebuild"/>/apply). The spawn gate requires this in addition to
+	/// the mesh being built, so the player never gets physics (and can't fall
+	/// through) before the ground under it can actually collide.
+	/// </summary>
+	public bool CollisionReady => _collisionReady;
+
+	/// <summary>
 	/// The mesh/collision build currently in flight on the thread pool, or
 	/// <c>null</c> when idle. Set and cleared only on the main thread; the
 	/// worker task writes only to the pending-result fields below and marshals

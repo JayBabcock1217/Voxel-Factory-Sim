@@ -336,13 +336,13 @@ public partial class VoxelWorld : Node3D
 	/// gentle. Changing it rebuilds all loaded chunks (the light is baked into
 	/// the mesh UVs).
 	/// </summary>
-	[Export(PropertyHint.Range, "1.0,6.0,0.1")]
+	[Export(PropertyHint.Range, "1.0,15.0,0.1")]
 	public float LightFalloff
 	{
 		get => _lightFalloff;
 		set
 		{
-			float v = Mathf.Clamp(value, 1f, 6f);
+			float v = Mathf.Clamp(value, 1f, 15f);
 			if (Mathf.Abs(v - _lightFalloff) < 0.0001f)
 			{
 				return;
@@ -550,6 +550,11 @@ public partial class VoxelWorld : Node3D
 	private Node3D _chunkRoot;
 	private readonly Dictionary<Vector2I, VoxelChunk> _chunks = new();
 	private bool _playerSpawned;
+	// Millisecond tick when the player was (re)spawned, for the post-spawn
+	// safety net that re-seats the player if the first physics step missed the
+	// floor (the ground's collision may not have been registered with the
+	// physics server by the time physics is enabled).
+	private ulong _spawnedAtMs;
 
 	/// <summary>
 	/// Every voxel the player has edited this session, keyed by world voxel
@@ -1126,8 +1131,28 @@ public partial class VoxelWorld : Node3D
 				&& SpawnOrRestorePlayer(playerNode))
 			{
 				_playerSpawned = true;
+				_spawnedAtMs = Time.GetTicksMsec();
 				playerNode.SetPhysicsProcess(true);
 			}
+		}
+		else if (Time.GetTicksMsec() - _spawnedAtMs < 1000
+			&& playerNode is CharacterBody3D body
+			&& !body.IsOnFloor())
+		{
+			// Safety net: for the first second after spawn, if the player's
+			// capsule has not found the floor, it fell through the ground (the
+			// chunk's collision shape was assigned but not yet registered with
+			// the physics server when physics was enabled, so the first
+			// MoveAndSlide passed through). Re-seat it on the terrain and keep
+			// watching until it settles.
+			int vx = Mathf.FloorToInt(playerNode.GlobalPosition.X / VoxelSize);
+			int vz = Mathf.FloorToInt(playerNode.GlobalPosition.Z / VoxelSize);
+			int surfaceY = ResolveSurfaceY(vx, vz);
+			playerNode.GlobalPosition = new Vector3(
+				playerNode.GlobalPosition.X,
+				(surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f,
+				playerNode.GlobalPosition.Z);
+			body.Velocity = Vector3.Zero;
 		}
 
 		// Unload chunks well out of range.
@@ -1862,9 +1887,26 @@ public partial class VoxelWorld : Node3D
 		Vector3 pos = player.GlobalPosition;
 		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
 		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		int surfaceY = ResolveSurfaceY(vx, vz);
 
-		// Scan the loaded chunk top-down: accounts for caves (surface may be
-		// lower) and rocks/trees (surface may be higher).
+		// A small extra lift (0.25) above the surface so the player's capsule
+		// settles cleanly onto the ground rather than starting in contact.
+		player.GlobalPosition = new Vector3(pos.X, (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f, pos.Z);
+		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition} (surface voxel y={surfaceY}).");
+		return true;
+	}
+
+	/// <summary>
+	/// Resolves the Y of the highest solid voxel in the column at world voxel
+	/// (vx, vz): scans the loaded chunk top-down (accounts for caves lowering
+	/// the surface and rocks/trees raising it), falling back to the heightmap
+	/// surface (always solid by construction) when the column has no solid
+	/// voxel or the chunk is gone. Used by the terrain spawn and by the
+	/// post-spawn safety net (which re-seats the player if the first physics
+	/// step missed the floor).
+	/// </summary>
+	private int ResolveSurfaceY(int vx, int vz)
+	{
 		int surfaceY = -1;
 		if (_chunks.TryGetValue(ChunkCoordOf(vx, vz), out VoxelChunk chunk))
 		{
@@ -1880,17 +1922,11 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
-		// Fallback: the heightmap surface (always solid by construction).
 		if (surfaceY < 0)
 		{
 			surfaceY = TerrainGenerator.SurfaceHeight(vx, vz, _config);
 		}
-
-		// A small extra lift (0.25) above the surface so the player's capsule
-		// settles cleanly onto the ground rather than starting in contact.
-		player.GlobalPosition = new Vector3(pos.X, (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f, pos.Z);
-		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition} (surface voxel y={surfaceY}).");
-		return true;
+		return surfaceY;
 	}
 
 	/// <summary>
@@ -3138,12 +3174,14 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// True when the chunk at <paramref name="coord"/> AND its full 3x3
 	/// neighbourhood (the single first ring) are all present and solid: data
-	/// generated (DataReady), mesh built (NeedsMesh clear), and no build in
-	/// flight. Used to gate the one-time player spawn: the player must not get
-	/// physics (or become visible) until the ground under and around it is
-	/// solid, visible geometry with a live collision shape — otherwise it would
-	/// fall through the world. See the spawn gate in <c>_Process</c> for the
-	/// full rationale.
+	/// generated (DataReady), mesh built (NeedsMesh clear), a live collision
+	/// shape present (CollisionReady), and no build in flight. Used to gate the
+	/// one-time player spawn: the player must not get physics (or become
+	/// visible) until the ground under and around it is solid, visible geometry
+	/// WITH a live collision shape — otherwise it would fall through the world.
+	/// Requiring CollisionReady (not just the mesh) is what guarantees the
+	/// initial chunks can actually collide before the player is dropped in.
+	/// See the spawn gate in <c>_Process</c> for the full rationale.
 	/// </summary>
 	private bool SpawnNeighbourhoodReady(Vector2I coord)
 	{
@@ -3152,7 +3190,7 @@ public partial class VoxelWorld : Node3D
 			for (int dz = -1; dz <= 1; dz++)
 			{
 				if (!_chunks.TryGetValue(coord + new Vector2I(dx, dz), out VoxelChunk c)
-					|| !c.DataReady || c.NeedsMesh || c.MeshBuildInFlight)
+					|| !c.DataReady || c.NeedsMesh || !c.CollisionReady || c.MeshBuildInFlight)
 				{
 					return false;
 				}
