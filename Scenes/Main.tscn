@@ -60,7 +60,6 @@ MeshMode = 1
 MinLight = 0.01
 MaxLightLevel = 30
 LightFalloff = 2.0
-DebugVertexLight = true
 LodRenderDistanceChunks = 128
 LodDistanceBase = 1.5
 MaterialConfig = ExtResource("11_materialconfig")

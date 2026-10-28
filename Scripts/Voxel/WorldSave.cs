@@ -887,6 +887,18 @@ public partial class WorldSave : Node
 		position = PendingEdits.PlayerPos;
 		yaw = PendingEdits.PlayerYaw;
 		pitch = PendingEdits.PlayerPitch;
+
+		// Sanity guard: a player position BELOW the world floor (Y < 0) is
+		// corrupt — the world has solid bedrock at y 0..1 and nothing exists
+		// below it. This happens when a save was written while the player was
+		// stuck underground (e.g. before the mesh-gated spawn fix). Treating it
+		// as "no player" makes the caller fall back to the terrain spawn at the
+		// origin instead of restoring the player into the void.
+		if (position.Y < 0f)
+		{
+			GD.PushWarning($"[WorldSave] Saved player position {position} is below the world floor (y<0); ignoring it and terrain-spawning instead.");
+			return false;
+		}
 		// Mark the player consumed so a later (re)run of the gate does not
 		// re-teleport; the chunk-level sections stay until their chunks load.
 		PendingEdits.PlayerPos = Vector3.Zero;

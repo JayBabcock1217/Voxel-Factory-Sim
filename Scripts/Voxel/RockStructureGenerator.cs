@@ -75,19 +75,24 @@ public sealed class RockStructureGenerator : IStructureGenerator
 		Task.WaitAll(tasks.ToArray());
 	}
 
-	/// <summary>Asynchronously applies this structure generator (for multithreaded use).<br/>
-	/// Implementations should use Task.Run or similar for CPU-bound work.</summary>
+	/// <summary>
+	/// Asynchronously applies this structure generator (for multithreaded use).
+	/// Collects every boulder for the chunk and processes them on a SINGLE worker
+	/// (instead of the old one-Task.Run-per-boulder). Writes go straight to the
+	/// data array. Output is identical.
+	/// </summary>
 	public async Task ApplyAsync(ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz)
 	{
 		int sy = chunk.SizeY;
+		var data = chunk.Data;
 
 		int cellMinX = FloorDiv(wx0, CellSize);
 		int cellMaxX = FloorDiv(wx0 + sx - 1, CellSize);
 		int cellMinZ = FloorDiv(wz0, CellSize);
 		int cellMaxZ = FloorDiv(wz0 + sz - 1, CellSize);
 
-		var cellTasks = new List<Task>();
-
+		// Gather all boulders for this chunk.
+		var boulders = new List<(int wx, int wz, int cy, int r, float invR2, float invRy2, byte mat)>();
 		for (int cx = cellMinX; cx <= cellMaxX; cx++)
 		{
 			for (int cz = cellMinZ; cz <= cellMaxZ; cz++)
@@ -110,29 +115,39 @@ public sealed class RockStructureGenerator : IStructureGenerator
 				var rockBiome = TerrainGenerator.DominantBiome(wx, wz, cfg);
 				byte rockMat = (byte)(rockBiome != null && rockBiome.RockMaterial > 0 ? rockBiome.RockMaterial : VoxelMaterialIds.Rock);
 
-				cellTasks.Add(Task.Run(() => {
-					for (int dx = -r; dx <= r; dx++)
-					{
-						for (int dy = -r; dy <= r; dy++)
-						{
-							for (int dz = -r; dz <= r; dz++)
-							{
-								if (dx * dx * invR2 + dy * dy * invRy2 + dz * dz * invR2 > 1f) continue;
-
-								int nx = wx + dx - wx0;
-								int ny = cy + dy;
-								int nz = wz + dz - wz0;
-								if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
-
-								chunk.Set(nx, ny, nz, rockMat);
-							}
-						}
-					}
-				}));
+				boulders.Add((wx, wz, cy, r, invR2, invRy2, rockMat));
 			}
 		}
 
-		await Task.WhenAll(cellTasks);
+		if (boulders.Count == 0)
+		{
+			return;
+		}
+
+		await Task.Run(() =>
+		{
+			for (int b = 0; b < boulders.Count; b++)
+			{
+				var (wx, wz, cy, r, invR2, invRy2, rockMat) = boulders[b];
+				for (int dx = -r; dx <= r; dx++)
+				{
+					for (int dy = -r; dy <= r; dy++)
+					{
+						for (int dz = -r; dz <= r; dz++)
+						{
+							if (dx * dx * invR2 + dy * dy * invRy2 + dz * dz * invR2 > 1f) continue;
+
+							int nx = wx + dx - wx0;
+							int ny = cy + dy;
+							int nz = wz + dz - wz0;
+							if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
+
+							data[nx + sx * (ny + sy * nz)] = rockMat;
+						}
+					}
+				}
+			}
+		});
 	}
 
 	/// <summary>Floor division (C# integer division truncates toward zero).</summary>

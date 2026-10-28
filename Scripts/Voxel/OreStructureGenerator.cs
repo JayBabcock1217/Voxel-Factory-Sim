@@ -134,12 +134,20 @@ public sealed class OreStructureGenerator : IStructureGenerator
 		}
 	}
 
-	/// <summary>Asynchronously applies this structure generator (for multithreaded use).</summary>
+	/// <summary>
+	/// Asynchronously applies this structure generator (for multithreaded use).
+	/// Collects every vein for the chunk and processes them on a SINGLE worker
+	/// (instead of the old one-Task.Run-per-vein, which spawned a thread-pool task
+	/// per vein and thrashed the pool). Writes go straight to the data array and
+	/// reads use a direct index. Output is identical.
+	/// </summary>
 	public async Task ApplyAsync(ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz)
 	{
 		int sy = chunk.SizeY;
+		var data = chunk.Data;
 
-		var veinTasks = new List<Task>();
+		// Gather all veins for this chunk.
+		var veins = new List<(int wx, int wy, int wz, int r, float invR2, float invRy2, byte mat)>();
 		foreach (var ore in _ores)
 		{
 			int cellMinX = FloorDiv(wx0, ore.CellSize);
@@ -169,45 +177,55 @@ public sealed class OreStructureGenerator : IStructureGenerator
 					float invRy2 = 1f / (r * r * ore.Squash * ore.Squash);
 					byte oreMat = (byte)ore.MaterialId;
 
-					veinTasks.Add(Task.Run(() => {
-						for (int dx = -r; dx <= r; dx++)
-						{
-							for (int dy = -r; dy <= r; dy++)
-							{
-								for (int dz = -r; dz <= r; dz++)
-								{
-									if (dx * dx * invR2 + dy * dy * invRy2 + dz * dz * invR2 > 1f) continue;
-
-									int wxv = wx + dx;
-									int ny = wy + dy;
-									int wzv = wz + dz;
-									int nx = wxv - wx0;
-									int nz = wzv - wz0;
-									if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
-
-									// Only replace real rock: never fill air (caves).
-									byte existing = chunk.Get(nx, ny, nz);
-									if (existing == VoxelMaterialIds.Air) continue;
-
-									// Per-voxel surface check: the ore must be at least
-									// 2 voxels below THIS column's surface, not just
-									// the vein center's. This prevents veins from
-									// poking through on slopes/hills.
-									int colGround = (wxv >= wx0 && wxv < wx0 + sx && wzv >= wz0 && wzv < wz0 + sz)
-										? heights[nx + sx * nz]
-										: TerrainGenerator.SurfaceHeight(wxv, wzv, cfg);
-									if (ny >= colGround - 2) continue;
-
-									chunk.Set(nx, ny, nz, oreMat);
-								}
-							}
-						}
-					}));
+					veins.Add((wx, wy, wz, r, invR2, invRy2, oreMat));
 				}
 			}
 		}
 
-		await Task.WhenAll(veinTasks);
+		if (veins.Count == 0)
+		{
+			return;
+		}
+
+		await Task.Run(() =>
+		{
+			for (int v = 0; v < veins.Count; v++)
+			{
+				var (wx, wy, wz, r, invR2, invRy2, oreMat) = veins[v];
+				for (int dx = -r; dx <= r; dx++)
+				{
+					for (int dy = -r; dy <= r; dy++)
+					{
+						for (int dz = -r; dz <= r; dz++)
+						{
+							if (dx * dx * invR2 + dy * dy * invRy2 + dz * dz * invR2 > 1f) continue;
+
+							int wxv = wx + dx;
+							int ny = wy + dy;
+							int wzv = wz + dz;
+							int nx = wxv - wx0;
+							int nz = wzv - wz0;
+							if (nx < 0 || nx >= sx || ny < 0 || ny >= sy || nz < 0 || nz >= sz) continue;
+
+							// Only replace real rock: never fill air (caves).
+							byte existing = data[nx + sx * (ny + sy * nz)];
+							if (existing == VoxelMaterialIds.Air) continue;
+
+							// Per-voxel surface check: the ore must be at least
+							// 2 voxels below THIS column's surface, not just
+							// the vein center's. This prevents veins from
+							// poking through on slopes/hills.
+							int colGround = (wxv >= wx0 && wxv < wx0 + sx && wzv >= wz0 && wzv < wz0 + sz)
+								? heights[nx + sx * nz]
+								: TerrainGenerator.SurfaceHeight(wxv, wzv, cfg);
+							if (ny >= colGround - 2) continue;
+
+							data[nx + sx * (ny + sy * nz)] = oreMat;
+						}
+					}
+				}
+			}
+		});
 	}
 
 	/// <summary>Floor division (C# integer division truncates toward zero).</summary>

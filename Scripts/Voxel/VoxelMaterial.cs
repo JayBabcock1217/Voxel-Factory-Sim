@@ -189,8 +189,11 @@ public sealed class VoxelMaterialPalette
 
 	// Blended shader materials cached per (idA, idB) pair. Cleared in Resize(),
 	// where the Materials/Textures arrays are rebuilt (cached materials would then
-	// reference stale textures).
-	private readonly System.Collections.Generic.Dictionary<int, ShaderMaterial> _blendShaderCache = new();
+	// reference stale textures). ConcurrentDictionary because GetBlendShaderMaterial
+	// is called from multiple concurrent mesh-build threads (VoxelChunk.Rebuild runs
+	// on the thread pool for several chunks at once), and a plain Dictionary would
+	// be corrupted by concurrent TryGetValue + indexer writes.
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<int, ShaderMaterial> _blendShaderCache = new();
 
 	/// <summary>
 	/// A <see cref="ShaderMaterial"/> that crossfades the two given materials'
@@ -210,33 +213,33 @@ public sealed class VoxelMaterialPalette
 			idB = t;
 		}
 		int key = idA * 256 + idB;
-		if (_blendShaderCache.TryGetValue(key, out var cached))
+		// GetOrAdd is the atomic check-then-insert: concurrent first-time
+		// requests for the same pair all get the SAME material (the first
+		// winner's), and losers discard their extras. No lock needed.
+		return _blendShaderCache.GetOrAdd(key, k =>
 		{
-			return cached;
-		}
+			if (_blendShader == null)
+			{
+				_blendShader = new Shader { Code = BlendShaderCode };
+			}
 
-		if (_blendShader == null)
-		{
-			_blendShader = new Shader { Code = BlendShaderCode };
-		}
-
-		var sm = new ShaderMaterial();
-		sm.SetShader(_blendShader);
-		// A voxel can hold any id up to 255 (the mesh builder passes raw
-		// material ids); guard the slot index so an id above the palette's
-		// MaxId() degrades to the white fallback texture instead of crashing
-		// the whole chunk's mesh build.
-		int slotA = idA - 1;
-		int slotB = idB - 1;
-		sm.SetShaderParameter(new StringName("TextureA"), slotA >= 0 && slotA < Textures.Length ? (Textures[slotA] ?? FallbackTexture) : FallbackTexture);
-		sm.SetShaderParameter(new StringName("TextureB"), slotB >= 0 && slotB < Textures.Length ? (Textures[slotB] ?? FallbackTexture) : FallbackTexture);
-		// Each material's AlbedoColor tint, applied in the shader exactly like
-		// StandardMaterial3D (ALBEDO = tint * texture) so the blend reads the
-		// same brightness as the plain materials. Out-of-range = white tint.
-		sm.SetShaderParameter(new StringName("TintA"), slotA >= 0 && slotA < Tints.Length ? Tints[slotA] : Colors.White);
-		sm.SetShaderParameter(new StringName("TintB"), slotB >= 0 && slotB < Tints.Length ? Tints[slotB] : Colors.White);
-		_blendShaderCache[key] = sm;
-		return sm;
+			var sm = new ShaderMaterial();
+			sm.SetShader(_blendShader);
+			// A voxel can hold any id up to 255 (the mesh builder passes raw
+			// material ids); guard the slot index so an id above the palette's
+			// MaxId() degrades to the white fallback texture instead of crashing
+			// the whole chunk's mesh build.
+			int slotA = idA - 1;
+			int slotB = idB - 1;
+			sm.SetShaderParameter(new StringName("TextureA"), slotA >= 0 && slotA < Textures.Length ? (Textures[slotA] ?? FallbackTexture) : FallbackTexture);
+			sm.SetShaderParameter(new StringName("TextureB"), slotB >= 0 && slotB < Textures.Length ? (Textures[slotB] ?? FallbackTexture) : FallbackTexture);
+			// Each material's AlbedoColor tint, applied in the shader exactly like
+			// StandardMaterial3D (ALBEDO = tint * texture) so the blend reads the
+			// same brightness as the plain materials. Out-of-range = white tint.
+			sm.SetShaderParameter(new StringName("TintA"), slotA >= 0 && slotA < Tints.Length ? Tints[slotA] : Colors.White);
+			sm.SetShaderParameter(new StringName("TintB"), slotB >= 0 && slotB < Tints.Length ? Tints[slotB] : Colors.White);
+			return sm;
+		});
 	}
 
 	/// <summary>

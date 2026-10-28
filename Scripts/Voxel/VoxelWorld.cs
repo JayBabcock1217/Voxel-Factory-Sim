@@ -264,7 +264,7 @@ public partial class VoxelWorld : Node3D
 	/// it (in the inspector or in code) rebuilds all loaded chunks, because the
 	/// light is baked into the mesh UVs.
 	/// </summary>
-	[Export(PropertyHint.Range, "0.0,1.0,0.01")]
+	[Export(PropertyHint.Range, "0.0,1.0,0.001")]
 	public float MinLight
 	{
 		get => _minLight;
@@ -466,6 +466,13 @@ public partial class VoxelWorld : Node3D
 	public bool EnableRegenerateShortcut { get; set; } = true;
 	[Export]
 	public Key RegenerateKey { get; set; } = Key.F;
+	/// <summary>
+	/// When enabled, logs the elapsed milliseconds of each terrain-generation
+	/// stage (heightmap / caves / structures / foliage) per chunk to the console
+	/// as <c>[GenTiming]</c> lines. Off by default; purely diagnostic.
+	/// </summary>
+	[Export]
+	public bool DebugGenTiming { get; set; } = false;
 
 	// ------------------------------------------------------------------
 
@@ -1493,6 +1500,9 @@ public partial class VoxelWorld : Node3D
 			return false;
 		}
 
+		// A small extra lift (0.25) above the saved position so the player
+		// settles cleanly onto the ground rather than starting in contact.
+		pos += new Vector3(0f, 0.25f, 0f);
 		if (player is Player p)
 		{
 			p.RestoreFromSave(pos, yaw, pitch);
@@ -1876,7 +1886,9 @@ public partial class VoxelWorld : Node3D
 			surfaceY = TerrainGenerator.SurfaceHeight(vx, vz, _config);
 		}
 
-		player.GlobalPosition = new Vector3(pos.X, (surfaceY + 1) * VoxelSize + SpawnOffset, pos.Z);
+		// A small extra lift (0.25) above the surface so the player's capsule
+		// settles cleanly onto the ground rather than starting in contact.
+		player.GlobalPosition = new Vector3(pos.X, (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f, pos.Z);
 		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition} (surface voxel y={surfaceY}).");
 		return true;
 	}
@@ -1912,7 +1924,21 @@ public partial class VoxelWorld : Node3D
 			// re-spawned from the ON-DISK snapshot (the authoritative copy), not
 			// the in-memory Snapshot, so a fresh world with a pending player
 			// still restores the drops that were on disk.
-			RestorePlayerFromSave(player);
+			//
+			// RestorePlayerFromSave returns false when the save has no usable
+			// player (e.g. a corrupt below-floor position rejected by
+			// ConsumePendingPlayer's guard) — in that case we MUST terrain-spawn,
+			// not report success (which would leave the player unplaced).
+			bool restored = RestorePlayerFromSave(player);
+			if (!restored)
+			{
+				// The save had no usable player position: terrain-spawn instead.
+				// Inventory/drops/machines still restore from the snapshot.
+				RestoreInventoryFromSave(save.Snapshot);
+				save.ApplyDrops(save.Snapshot);
+				save.ApplyMachines(save.Snapshot);
+				return SpawnPlayerOnTerrain(player);
+			}
 			RestoreInventoryFromSave(save.Snapshot);
 			save.ApplyDrops(save.Snapshot);
 			save.ApplyMachines(save.Snapshot);
@@ -2384,7 +2410,7 @@ public partial class VoxelWorld : Node3D
 
 		int wx0 = coord.X * ChunkSizeXZ;
 		int wz0 = coord.Y * ChunkSizeXZ;
-		TerrainGenerator.GenerateAsync(data, wx0, wz0, _config, _chunks).ContinueWith(t =>
+		TerrainGenerator.GenerateAsync(data, wx0, wz0, _config, _chunks, DebugGenTiming).ContinueWith(t =>
 		{
 			if (t.IsFaulted)
 			{
@@ -3151,6 +3177,16 @@ public partial class VoxelWorld : Node3D
 	/// Raise-only: a chunk already carrying a higher priority (a player edit)
 	/// is never lowered, so the boost can't steal the budget away from a region
 	/// the player is actively editing. It is a no-op once the player has spawned.
+	///
+	/// IMPORTANT: a chunk that is ALREADY clean (NeedsMesh == false — its mesh
+	/// is built and up to date) is NOT re-flagged. This boost fires from
+	/// OnGenerationComplete, which runs ~MaxConcurrentGenerations times per
+	/// frame at a large render distance; re-flagging an already-meshed spawn
+	/// chunk on every one of those completions keeps the spawn 3x3 perpetually
+	/// NeedsMesh, so the spawn gate (which requires all 9 to be NeedsMesh-clear)
+	/// never opens. Once a chunk is clean it stays clean here; it is only
+	/// re-flagged later if real work dirties it (a player edit, a neighbour's
+	/// seam via MarkNeighboursForRebuild, or a queued overhang).
 	/// </summary>
 	private void BoostSpawnNeighbourhoodPriority()
 	{
@@ -3164,14 +3200,20 @@ public partial class VoxelWorld : Node3D
 		{
 			for (int dz = -1; dz <= 1; dz++)
 			{
-				if (_chunks.TryGetValue(anchor + new Vector2I(dx, dz), out VoxelChunk c))
+				if (!_chunks.TryGetValue(anchor + new Vector2I(dx, dz), out VoxelChunk c))
 				{
-					int stamp = ++_editPriorityCounter;
-					if (c.EditPriority < stamp)
-					{
-						c.EditPriority = stamp;
-					}
-					c.NeedsMesh = true;
+					continue;
+				}
+				// Only boost chunks that still need work. A clean chunk (mesh
+				// already built) must stay clean, or the spawn gate starves.
+				if (!c.DataReady || !c.NeedsMesh)
+				{
+					continue;
+				}
+				int stamp = ++_editPriorityCounter;
+				if (c.EditPriority < stamp)
+				{
+					c.EditPriority = stamp;
 				}
 			}
 		}
