@@ -362,6 +362,49 @@ public partial class VoxelWorld : Node3D
 	private float _lightFalloff = 1.0f;
 
 	/// <summary>
+	/// The DARK-SIDE GAMMA: how the per-voxel light's dark half (0..1) is
+	/// curved before the <see cref="MinLight"/> floor is applied. This is what
+	/// makes <see cref="MinLight"/> perceptually FINE-GRAINED instead of jumping.
+	///
+	/// The raw flood-filled light is a coarse 0..maxLevel integer field, so
+	/// only a handful of distinct brightness steps exist in the dark range.
+	/// A linear floor (gamma 1.0) maps those few steps onto a few output values,
+	/// so nudging MinLight by 0.001 can flip a whole band of voxels to a new
+	/// step — the "granular jump" from 0.016 to 0.017. Raising this exponent
+	/// (&gt;1) applies <c>x^gamma</c> to the normalized light on the dark side
+	/// BEFORE the floor, spreading the sparse input steps across a denser set of
+	/// output values so the darkness-to-light transition is smooth and the floor
+	/// is adjustable in fine increments. 1.0 = linear (no extra shaping),
+	/// ~1.5 = gentle smoothing, 2.0+ = strong smoothing (dark side eased, the
+	/// gradient reads finer near the floor). Changing it rebuilds all loaded
+	/// chunks (the light is baked into the mesh UVs).
+	/// </summary>
+	[Export(PropertyHint.Range, "1.0,4.0,0.05")]
+	public float DarknessGamma
+	{
+		get => _darknessGamma;
+		set
+		{
+			float v = Mathf.Clamp(value, 1f, 4f);
+			if (Mathf.Abs(v - _darknessGamma) < 0.0001f)
+			{
+				return;
+			}
+			_darknessGamma = v;
+			// The light is baked into the mesh UVs, so a curve change requires
+			// every loaded chunk to re-mesh.
+			if (IsInsideTree())
+			{
+				foreach (VoxelChunk chunk in _chunks.Values)
+				{
+					chunk.NeedsMesh = true;
+				}
+			}
+		}
+	}
+	private float _darknessGamma = 1.0f;
+
+	/// <summary>
 	/// DEBUG: when true, the FIRST chunk to build logs a histogram of the
 	/// per-vertex light the Marching-Cubes mesh actually emits (so we can see
 	/// whether the cave surface carries a light gradient or a uniform value).
@@ -555,6 +598,59 @@ public partial class VoxelWorld : Node3D
 	// floor (the ground's collision may not have been registered with the
 	// physics server by the time physics is enabled).
 	private ulong _spawnedAtMs;
+
+	// ------------------------------------------------------------------
+	// Spawn load progress (for the loading screen)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Emitted every frame while the player has not spawned yet, carrying the
+	/// current 0..1 progress of the spawn neighbourhood (the 3x3 of chunks the
+	/// spawn gate waits on). The loading screen binds to this to fill its
+	/// progress bar; it is silent once the player has spawned.
+	/// </summary>
+	public event Action<float> SpawnProgressChanged;
+
+	/// <summary>
+	/// 0..1 progress of the spawn neighbourhood (the 3x3 of chunks the spawn
+	/// gate waits on), computed as the fraction of the 9 slots that are fully
+	/// ready (data generated, mesh built, collision ready, not mid-build).
+	/// 1.0 once the gate has opened (player spawned). The loading screen reads
+	/// this for its bar; it is the same value the spawn gate gates on.
+	/// </summary>
+	public float SpawnLoadProgress
+	{
+		get
+		{
+			if (_playerSpawned)
+			{
+				return 1f;
+			}
+			// Anchor on the spawn chunk (the player's scene position, not the
+			// live position — the player has no physics yet, so they haven't
+			// moved). Count how many of the 3x3 are fully ready.
+			Vector2I pc = ChunkCoordOf(_spawnAnchor);
+			int ready = 0;
+			for (int dx = -1; dx <= 1; dx++)
+			{
+				for (int dz = -1; dz <= 1; dz++)
+				{
+					Vector2I c = pc + new Vector2I(dx, dz);
+					if (_chunks.TryGetValue(c, out VoxelChunk ch)
+						&& ch.DataReady && !ch.NeedsMesh && ch.CollisionReady && !ch.MeshBuildInFlight)
+					{
+						ready++;
+					}
+				}
+			}
+			return ready / 9f;
+		}
+	}
+
+	// The spawn ANCHOR: the player's scene position (the spawn point), frozen at
+	// _Ready so the progress bar and the spawn gate always agree on which 3x3
+	// is "the" neighbourhood, even before the first chunk loads.
+	private Vector3 _spawnAnchor = Vector3.Zero;
 
 	/// <summary>
 	/// Every voxel the player has edited this session, keyed by world voxel
@@ -1085,6 +1181,15 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
+		// Freeze the spawn anchor on first sight: the player's scene position
+		// (the spawn point) before they have any physics. The loading-screen
+		// progress bar and the spawn gate both anchor on this 3x3, so they
+		// always agree on which neighbourhood is being waited on.
+		if (_spawnAnchor == Vector3.Zero)
+		{
+			_spawnAnchor = playerNode.GlobalPosition;
+		}
+
 		Vector2I playerChunk = ChunkCoordOf(playerNode.GlobalPosition);
 
 		// Enqueue every in-range chunk that isn't already loaded or queued, in
@@ -1134,6 +1239,10 @@ public partial class VoxelWorld : Node3D
 				_spawnedAtMs = Time.GetTicksMsec();
 				playerNode.SetPhysicsProcess(true);
 			}
+			// Feed the loading screen: publish how much of the spawn 3x3 is
+			// ready every frame while the gate is closed (and once at 1.0 when
+			// it opens). The bar is driven off this, not a separate counter.
+			SpawnProgressChanged?.Invoke(SpawnLoadProgress);
 		}
 		else if (Time.GetTicksMsec() - _spawnedAtMs < 1000
 			&& playerNode is CharacterBody3D body

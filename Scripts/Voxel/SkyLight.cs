@@ -71,19 +71,25 @@ public static class SkyLight
 	/// deeper caves); the Minecraft default is 15.
 	/// </param>
 	/// <returns>
-	/// A byte light field at the same padded dimensions, 0..maxLevel per voxel.
-	/// Solid voxels are 0. Air voxels that see open sky (a solid-free column to
-	/// the top) are maxLevel; enclosed air fades from maxLevel toward 0 over the
-	/// 3D distance from the nearest lit air; air near a block source is lit by
-	/// the source (max with sky); enclosed air far from any source is 0.
+	/// A NORMALIZED light field at the same padded dimensions, a continuous
+	/// 0..1 float per voxel (level / maxLevel). Storing the field as floats
+	/// (not bytes) is what makes the downstream light-response curve
+	/// (falloff / dark-gamma / floor) able to produce FINE-GRAINED values: a
+	/// byte field would re-quantize the curve's continuous output back onto the
+	/// coarse integer light levels, so a small floor change could flip a whole
+	/// band of voxels to the next level. Solid voxels are 0. Air voxels that
+	/// see open sky (a solid-free column to the top) are 1.0; enclosed air
+	/// fades from 1.0 toward 0 over the 3D distance from the nearest lit air;
+	/// air near a block source is lit by the source (max with sky); enclosed
+	/// air far from any source is 0.
 	/// </returns>
-	public static byte[] Compute(byte[] solid, int nx, int ny, int nz, byte[] blockLight = null, int maxLevel = 15)
+	public static float[] Compute(byte[] solid, int nx, int ny, int nz, byte[] blockLight = null, int maxLevel = 15)
 	{
-		// Clamp the max level: the light is a byte (0..255) and must be >= 1.
+		// Clamp the max level (it indexes the 0..1 normalization; must be >= 1).
 		if (maxLevel < 1) maxLevel = 1;
 		else if (maxLevel > 255) maxLevel = 255;
 		int total = nx * ny * nz;
-		var light = new byte[total];
+		var light = new float[total];
 
 		// ------------------------------------------------------------------
 		// SEED 1 — SKY: every air voxel with a SOLID-FREE vertical column
@@ -113,7 +119,7 @@ public static class SkyLight
 					{
 						break; // hit solid; below is enclosed (seeded only by the BFS)
 					}
-					light[idx] = (byte)maxLevel;
+					light[idx] = 1f; // open-sky air: full light (normalized)
 				}
 			}
 		}
@@ -151,8 +157,8 @@ public static class SkyLight
 				{
 					continue; // not a source, or not solid (sources are solid blocks)
 				}
-				byte nl = (byte)(src > maxLevel ? maxLevel : (src >= 1 ? src - 1 : 0)); // level just outside the source
-				if (nl <= 0)
+				float nl = (src > maxLevel ? maxLevel : (src >= 1 ? src - 1 : 0)) / (float)maxLevel; // normalized level just outside the source
+				if (nl <= 0f)
 				{
 					continue;
 				}
@@ -171,7 +177,7 @@ public static class SkyLight
 			}
 		}
 
-		void SeedAir(int nidx, bool inBounds, byte nl)
+		void SeedAir(int nidx, bool inBounds, float nl)
 		{
 			if (!inBounds || solid[nidx] != 0 || nl <= light[nidx])
 			{
@@ -200,11 +206,11 @@ public static class SkyLight
 		// the values hand off across the border. The neighbour-rebuild (see
 		// VoxelWorld.MarkNeighboursForRebuild) re-meshes a chunk when its
 		// neighbour generates, so the hand-off is always up to date.
-		// Enqueue every sky-seeded (15) voxel to start the propagation. (Block
-		// sources were already enqueued via SeedAir when they exceeded 0.)
+		// Enqueue every sky-seeded (full-light) voxel to start the propagation.
+		// (Block sources were already enqueued via SeedAir when they exceeded 0.)
 		for (int idx = 0; idx < total; idx++)
 		{
-			if (light[idx] >= maxLevel)
+			if (light[idx] >= 1f)
 			{
 				Enqueue(idx);
 			}
@@ -217,12 +223,23 @@ public static class SkyLight
 			{
 				continue;
 			}
-			byte lv = light[idx];
-			if (lv <= 1)
+			float lv = light[idx];
+			if (lv <= 1f / maxLevel)
 			{
 				continue; // can't propagate further (would saturate to 0)
 			}
-			byte nl = (byte)(lv - 1);
+			// Decay by one level and SNAP to the exact level grid (k/maxLevel).
+			// The stored value is still a continuous float (so the response
+			// curve can be fine-grained), but snapping to the grid makes the BFS
+			// deterministic and SEAM-SAFE: two adjacent chunks reaching the same
+			// air voxel compute the same integer level k, so they produce
+			// bit-identical values (no hairline brightness seam from FP drift).
+			int k = (int)System.Math.Round(lv * maxLevel) - 1;
+			if (k < 0)
+			{
+				continue;
+			}
+			float nl = k / (float)maxLevel;
 
 			int ix = idx % nx;
 			int rem = idx / nx;
@@ -239,7 +256,7 @@ public static class SkyLight
 			Propagate(idx + nx * ny,   iz < nz - 1,    nl);
 		}
 
-		void Propagate(int nidx, bool inBounds, byte nl)
+		void Propagate(int nidx, bool inBounds, float nl)
 		{
 			if (!inBounds || solid[nidx] != 0 || nl <= light[nidx])
 			{

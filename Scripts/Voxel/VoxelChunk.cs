@@ -175,6 +175,9 @@ public partial class VoxelChunk : Node3D
 		// The falloff curve: stretches the visible brightness gradient so cave
 		// interiors stay readable instead of hard-black beyond the light range.
 		float lightFalloff = world.LightFalloff;
+		// The dark-side gamma: spreads the sparse integer light steps so the
+		// MinLight floor is perceptually fine-grained instead of jumping.
+		float darknessGamma = world.DarknessGamma;
 		// Debug: one-shot vertex-light histogram (auto-clears after first dump).
 		bool debugVertexLight = world.DebugVertexLight && VoxelWorld.VertexLightDumpPending;
 		if (debugVertexLight)
@@ -195,7 +198,7 @@ public partial class VoxelChunk : Node3D
 				// emits the visual triangles (face quads in Faces mode, the MC
 				// isosurface in MarchingCubes mode) into the collision soup, so
 				// the player stands on exactly what is drawn.
-				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight);
+				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma);
 
 				// Store the prebuilt results for the main thread. Written here,
 				// read only in ApplyBuildResult after the task completes (happens-
