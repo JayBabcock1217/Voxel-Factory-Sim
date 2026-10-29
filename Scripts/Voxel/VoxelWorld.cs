@@ -431,6 +431,14 @@ public partial class VoxelWorld : Node3D
 	private bool _debugVertexLight = false;
 	internal static bool VertexLightDumpPending;
 
+	// TEMP (Path 1 diagnosis): when true, the synchronous INSTANT edit path
+	// (VoxelChunk.RebuildSynchronous) times its surface build and prints the
+	// per-edit cost — so we can see the cost now that the light flood fill is
+	// skipped (vs the old ~200ms). Auto-clears after a few prints. Off by
+	// default; flip on in the editor to measure one edit session.
+	internal static bool InstantBuildProfile = true;
+	internal static int InstantBuildProfileCount = 0;
+
 	/// <summary>
 	/// Applies the <see cref="MinLight"/> floor to a normalized (0..1) light
 	/// value: <c>floor + light * (1 - floor)</c>. This maps 0 -> MinLight and

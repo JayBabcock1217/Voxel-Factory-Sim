@@ -332,6 +332,13 @@ public partial class VoxelChunk : Node3D
 			_cachedBlockLit = blockLit;
 		}
 
+		// TEMP (Path 1 diagnosis): time the synchronous surface build so we can
+		// see the per-edit cost now that the flood fill is skipped. Gated on a
+		// static one-shot flag so it prints only a few times. Removed once we
+		// know the number.
+		bool profileInstant = VoxelWorld.InstantBuildProfile;
+		var sw = profileInstant ? System.Diagnostics.Stopwatch.StartNew() : null;
+
 		// The heavy voxel math, on the main thread (synchronous fast path). The
 		// precomputed lightField is passed so the internal flood fill is skipped
 		// (Path 1). Output is identical to the full build modulo the light value.
@@ -340,6 +347,21 @@ public partial class VoxelChunk : Node3D
 			neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery,
 			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma,
 			lightField, blockLit);
+
+		if (profileInstant)
+		{
+			sw.Stop();
+			GD.Print($"[InstantBuild] chunk ({Coord.X},{Coord.Y}) cachedLight={hasCachedLight}: " +
+				$"build={sw.ElapsedMilliseconds} ms — {collision.Count / 3} tris");
+			if (VoxelWorld.InstantBuildProfileCount < 12)
+			{
+				VoxelWorld.InstantBuildProfileCount++;
+			}
+			else
+			{
+				VoxelWorld.InstantBuildProfile = false;
+			}
+		}
 
 		// Apply the result NOW (same frame). The same wiring ApplyBuildResult
 		// does, but inline so there is no deferred hop.
