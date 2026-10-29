@@ -61,6 +61,56 @@ public static class MeshBuilder
 		int maxLight = 15,
 		float lightFalloff = 1f,
 		float darknessGamma = 1f)
+		=> BuildVisualCore(chunk, wx0, wz0, voxelSize, palette, solidQuery, collisionOut,
+			materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, darknessGamma, null, null);
+
+	/// <summary>
+	/// Like <see cref="BuildVisual"/>, but reuses a precomputed wide light field
+	/// (<paramref name="cachedLight"/>, the RAW 0..maxLight field, plus its
+	/// <paramref name="cachedBlockLit"/> mask) instead of running the expensive
+	/// flood fill. The response curve is still applied to the cached field (so
+	/// the output is identical to the non-cached path). This is the Path 1
+	/// "mesh-only" fast path: geometry + collision rebuild without the light
+	/// flood fill. When <paramref name="cachedLight"/> is null it falls back to
+	/// computing the field inline (the default path).
+	/// </summary>
+	public static ArrayMesh BuildVisual(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		System.Func<int, int, int, bool> solidQuery,
+		System.Collections.Generic.List<Vector3> collisionOut,
+		System.Func<int, int, int, byte> materialQuery,
+		System.Func<int, int, int, byte> blockLightQuery,
+		System.Func<Vector2I, ChunkData> neighborChunkQuery,
+		float minLight,
+		int maxLight,
+		float lightFalloff,
+		float darknessGamma,
+		float[] cachedLight,
+		byte[] cachedBlockLit)
+		=> BuildVisualCore(chunk, wx0, wz0, voxelSize, palette, solidQuery, collisionOut,
+			materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, darknessGamma, cachedLight, cachedBlockLit);
+
+	private static ArrayMesh BuildVisualCore(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		System.Func<int, int, int, bool> solidQuery,
+		System.Collections.Generic.List<Vector3> collisionOut,
+		System.Func<int, int, int, byte> materialQuery,
+		System.Func<int, int, int, byte> blockLightQuery,
+		System.Func<Vector2I, ChunkData> neighborChunkQuery,
+		float minLight,
+		int maxLight,
+		float lightFalloff,
+		float darknessGamma,
+		float[] cachedLight,
+		byte[] cachedBlockLit)
 	{
 		int lastMaterial = palette.MaterialCount;
 
@@ -84,10 +134,24 @@ public static class MeshBuilder
 		// Sky light darkens caves; block light illuminates around placed
 		// light-source voxels.
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
-		// WIDE 3x3-chunk light field so sky light spans seams (see
-		// BuildLightFieldWide). solidQuery / blockLightQuery no longer feed the
-		// light; they still drive face culling further down.
-		float[] lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight, out byte[] blockLitF);
+		// Light: either REUSE a precomputed wide field (Path 1 cached-light fast
+		// path — no flood fill) or compute it (default). The response curve is
+		// applied to whichever field is used, so the output is identical either
+		// way. solidQuery / blockLightQuery still drive face culling below.
+		float[] lightFieldF;
+		byte[] blockLitF;
+		if (cachedLight != null)
+		{
+			// The cached field is the RAW 0..maxLight field (the response curve
+			// has NOT been applied yet, matching the freshly-computed field), so
+			// apply it here exactly as the inline path does.
+			lightFieldF = cachedLight;
+			blockLitF = cachedBlockLit;
+		}
+		else
+		{
+			lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight, out blockLitF);
+		}
 		// The wide field extends maxLight voxels beyond the chunk on every side
 		// (see BuildLightFieldWide), so its X/Z extent is 2*cs+2*maxLight+2.
 		int lpx = 2 * sx + 2 * maxLight + 2, lpy = sy + 2, lpz = 2 * sz + 2 * maxLight + 2;
@@ -271,6 +335,54 @@ public static class MeshBuilder
 		float lightFalloff = 1f,
 		bool debugVertexLight = false,
 		float darknessGamma = 1f)
+		=> BuildVisualMarchingCubesCore(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery,
+			collisionOut, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, null, null);
+
+	/// <summary>
+	/// Like <see cref="BuildVisualMarchingCubes"/>, but reuses a precomputed wide
+	/// light field (<paramref name="cachedLight"/>, RAW 0..maxLight, plus its
+	/// <paramref name="cachedBlockLit"/> mask) instead of running the flood fill.
+	/// The response curve is still applied to the cached field (output identical
+	/// to the non-cached path). Path 1 "mesh-only" fast path. Null = compute
+	/// inline (default).
+	/// </summary>
+	public static ArrayMesh BuildVisualMarchingCubes(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		Vector2I coord,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		System.Collections.Generic.List<Vector3> collisionOut,
+		System.Func<int, int, int, byte> materialQuery,
+		float minLight,
+		int maxLight,
+		float lightFalloff,
+		bool debugVertexLight,
+		float darknessGamma,
+		float[] cachedLight,
+		byte[] cachedBlockLit)
+		=> BuildVisualMarchingCubesCore(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery,
+			collisionOut, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, cachedLight, cachedBlockLit);
+
+	private static ArrayMesh BuildVisualMarchingCubesCore(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		Vector2I coord,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		System.Collections.Generic.List<Vector3> collisionOut,
+		System.Func<int, int, int, byte> materialQuery,
+		float minLight,
+		int maxLight,
+		float lightFalloff,
+		bool debugVertexLight,
+		float darknessGamma,
+		float[] cachedLight,
+		byte[] cachedBlockLit)
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int px = sx + 2, py = sy + 2, pz = sz + 2; // padded lattice dims
@@ -313,7 +425,20 @@ public static class MeshBuilder
 		//     it in UV2.x; the material shader multiplies ALBEDO by it. The
 		//     1-voxel padded `solid`/`blockLight` fields above are still used
 		//     for the MC isosurface and for the (now-legacy) debug dump below.
-		float[] wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight, out byte[] blockLitW);
+		// Light: reuse a precomputed wide field (Path 1 cached-light fast path —
+		// no flood fill) or compute it (default). The response curve is applied
+		// to whichever field is used below, so the output is identical either way.
+		float[] wideLight;
+		byte[] blockLitW;
+		if (cachedLight != null)
+		{
+			wideLight = cachedLight;
+			blockLitW = cachedBlockLit;
+		}
+		else
+		{
+			wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight, out blockLitW);
+		}
 		int wx0w = wx0;
 		int wz0w = wz0;
 		// The wide field extends maxLight voxels beyond the chunk on every side
@@ -931,7 +1056,15 @@ public static class MeshBuilder
 	/// / <c>lpz</c> computations (2*cs + 2*maxLight + 2) and with
 	/// <see cref="VertexWideLight"/>'s <c>lpx/2 - 1</c> offset.
 	/// </summary>
-	private static float[] BuildLightFieldWide(
+	/// <summary>
+	/// Public wrapper so <c>VoxelWorld</c> can compute (and cache) the wide light
+	/// field OUTSIDE the mesh build (Path 1: light is computed separately and can
+	/// lag behind the mesh). The returned field is the raw 0..maxLight value; the
+	/// response curve is applied by the caller (or by <see cref="BuildVisual"/> /
+	/// <see cref="BuildVisualMarchingCubes"/> when a precomputed field is passed
+	/// to them — see the cached-light overloads).
+	/// </summary>
+	public static float[] BuildLightFieldWide(
 		ChunkData chunk,
 		int wx0,
 		int wz0,
@@ -1108,23 +1241,67 @@ public static class MeshBuilder
 		bool debugVertexLight = false,
 		float darknessGamma = 1f)
 	{
-		// The collision surface is ALWAYS the visual surface, exactly: in both
-		// mesh modes the triangles emitted into the visual mesh are also
-		// collected (via the collisionOut sink) into the collision soup. The
-		// player therefore always stands on what they see — no seam gap in
-		// Faces mode, and in MarchingCubes mode the collision follows the
-		// beveled isosurface (including its open chunk edges) rather than the
-		// separate blocky face soup that used to leave a gap under the inset
-		// visual surface.
+		return Build(chunk, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery,
+			materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff,
+			debugVertexLight, darknessGamma, null, null);
+	}
+
+	/// <summary>
+	/// Same as <see cref="Build"/>, but with an optional precomputed
+	/// <paramref name="lightField"/> (a 0..1, response-curve-applied wide light
+	/// field, plus its <paramref name="blockLit"/> mask). When supplied, the
+	/// expensive wide light-field flood fill is SKIPPED and the cached field is
+	/// reused — this is the Path 1 decoupling: light is computed separately and
+	/// can lag behind the mesh, so a mesh-only rebuild (geometry/collision) no
+	/// longer pays the flood-fill cost. When null, the field is computed inline
+	/// exactly as before (the default/safe path).
+	/// </summary>
+	public static (ArrayMesh visual, List<Vector3> collision) Build(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		VoxelMeshMode mode,
+		Vector2I coord,
+		System.Func<int, int, int, bool> solidQuery,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		System.Func<int, int, int, byte> materialQuery,
+		System.Func<int, int, int, byte> blockLightQuery,
+		System.Func<Vector2I, ChunkData> neighborChunkQuery,
+		float minLight,
+		int maxLight,
+		float lightFalloff,
+		bool debugVertexLight,
+		float darknessGamma,
+		float[] lightField,
+		byte[] blockLit)
+	{
 		var collision = new List<Vector3>();
-		// Blending: when a material query is supplied, material-interface faces
-		// (Faces mode) and mixed triangles (MarchingCubes mode) crossfade via
-		// the blend shader; null = no blending (every face/triangle snaps to a
-		// single material).
-		ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-			? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma)
-			: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma);
-		return (visual, collision);
+		if (lightField == null)
+		{
+			// DEFAULT / SAFE PATH: compute the wide light field inline (the
+			// expensive flood fill) exactly as before, then build the surface.
+			// The collision surface is ALWAYS the visual surface, exactly: in
+			// both mesh modes the triangles emitted into the visual mesh are
+			// also collected (via the collisionOut sink) into the collision soup.
+			ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
+				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma)
+				: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma);
+			return (visual, collision);
+		}
+		else
+		{
+			// PATH 1 (decoupled): light was already computed and is being reused
+			// (cached), so only the surface build runs here — no flood fill. This
+			// is what makes a geometry/collision rebuild cheap. The cached field
+			// is the RAW 0..maxLight field (curve applied inside the sub-builder),
+			// matching the freshly-computed path.
+			ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
+				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, lightField, blockLit)
+				: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma, lightField, blockLit);
+			return (visual, collision);
+		}
 	}
 
 	// ------------------------------------------------------------------
