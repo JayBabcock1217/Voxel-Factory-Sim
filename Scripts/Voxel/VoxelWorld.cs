@@ -252,6 +252,18 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public VoxelMeshMode MeshMode { get; set; } = VoxelMeshMode.Faces;
 
+	/// <summary>
+	/// Enable SUB-CELL (dirty-region) meshing (Option B): instead of rebuilding
+	/// a whole chunk's mesh whenever a voxel changes, the chunk's mesh is kept as
+	/// a grid of small sub-cells and an edit rebuilds ONLY the sub-cell(s) it
+	/// touches. This makes single-voxel and torch edits fast (a sub-cell is a
+	/// small fraction of a 16×256×16 chunk). OFF by default: when off, the
+	/// existing whole-chunk rebuild path is used exactly as before (the safe
+	/// fallback). Toggling it on rebuilds all loaded chunks into the sub-cell
+	/// layout.
+	/// </summary>
+	[Export] public bool SubCellMeshing { get; set; } = false;
+
 	[ExportGroup("Lighting")]
 	/// <summary>
 	/// The brightest the DARKEST spots get: a floor (0..1) applied to the
@@ -588,6 +600,79 @@ public partial class VoxelWorld : Node3D
 	/// finishes in a frame or two).
 	/// </summary>
 	private const double MaxPendingDropAgeSeconds = 5.0;
+
+	// ------------------------------------------------------------------
+	// Sub-cell (dirty-region) meshing — Option B (see the SubCellMeshing
+	// export). A chunk's mesh is kept as a grid of small sub-cells; an edit
+	// rebuilds only the sub-cell(s) it touches instead of the whole chunk.
+	// The cell size is chosen so a 16×256×16 chunk divides evenly (XZ 8×2, Y
+	// 32×8 = 256 cells), and each cell samples a 1-voxel padding of its
+	// neighbours (via the same frozen neighbour snapshot the whole-chunk path
+	// uses) so seams stay identical.
+	// ------------------------------------------------------------------
+	public const int CellSizeX = 8;
+	public const int CellSizeY = 32;
+	public const int CellSizeZ = 8;
+	public const int CellsPerChunkX = 2;
+	public const int CellsPerChunkY = 8;
+	public const int CellsPerChunkZ = 2;
+	public const int CellsPerChunk = CellsPerChunkX * CellsPerChunkY * CellsPerChunkZ;
+
+	/// <summary>A sub-cell's local voxel origin inside its chunk (0..ChunkSize-1 per axis).</summary>
+	public readonly struct VoxelCell
+	{
+		public readonly int X, Y, Z;
+		public VoxelCell(int x, int y, int z) { X = x; Y = y; Z = z; }
+		public override bool Equals(object o) => o is VoxelCell c && X == c.X && Y == c.Y && Z == c.Z;
+		public override int GetHashCode() => HashCode.Combine(X, Y, Z);
+	}
+
+	/// <summary>Local origin (chunk-local voxel coords) of the sub-cell containing local voxel <c>(lx,ly,lz)</c>.</summary>
+	public static VoxelCell CellOf(int lx, int ly, int lz)
+		=> new VoxelCell(lx - lx % CellSizeX, ly - ly % CellSizeY, lz - lz % CellSizeZ);
+
+	/// <summary>The sub-cell index (0..CellsPerChunk-1) for a sub-cell's local origin.</summary>
+	public static int CellIndex(int cx, int cy, int cz)
+		=> (cx / CellSizeX) + CellsPerChunkX * ((cy / CellSizeY) + CellsPerChunkY * (cz / CellSizeZ));
+
+	/// <summary>The sub-cell (cx,cy,cz) local extents (clamped to the chunk): the cell spans [cx..cx+CellSizeX-1] etc., clamped to the chunk's real size (so the last cell is short if the chunk isn't an exact multiple).</summary>
+	public (int x0, int x1, int y0, int y1, int z0, int z1) CellBounds(int cx, int cy, int cz)
+		=> (
+			cx, Mathf.Min(cx + CellSizeX - 1, ChunkSizeXZ - 1),
+			cy, Mathf.Min(cy + CellSizeY - 1, ChunkHeight - 1),
+			cz, Mathf.Min(cz + CellSizeZ - 1, ChunkSizeXZ - 1));
+
+	/// <summary>
+	/// All sub-cells whose geometry can change when the region <c>[min..max]</c>
+	/// (chunk-local voxel coords, inclusive) is edited: the cells the region
+	/// touches PLUS the cells adjacent across a cell border (border faces are
+	/// culled against the neighbour cell's state, so they re-cull too). Each
+	/// result is the cell's local origin. Deduplicated. Instance method: it uses
+	/// the chunk's real XZ/height to clamp the cell grid.
+	/// </summary>
+	public VoxelCell[] DirtyCellsForRegion(int minX, int minY, int minZ, int maxX, int maxY, int maxZ)
+	{
+		var set = new HashSet<VoxelCell>();
+		int cMinX = CellOf(minX, 0, 0).X, cMaxX = CellOf(maxX, 0, 0).X;
+		int cMinY = CellOf(0, minY, 0).Y, cMaxY = CellOf(0, maxY, 0).Y;
+		int cMinZ = CellOf(0, 0, minZ).Z, cMaxZ = CellOf(0, 0, maxZ).Z;
+		for (int cx = cMinX - CellSizeX; cx <= cMaxX + CellSizeX; cx += CellSizeX)
+		{
+			for (int cy = cMinY - CellSizeY; cy <= cMaxY + CellSizeY; cy += CellSizeY)
+			{
+				for (int cz = cMinZ - CellSizeZ; cz <= cMaxZ + CellSizeZ; cz += CellSizeZ)
+				{
+					if (cx < 0 || cy < 0 || cz < 0
+						|| cx >= ChunkSizeXZ || cy >= ChunkHeight || cz >= ChunkSizeXZ)
+					{
+						continue; // outside this chunk (a cross-chunk border is the neighbour's problem)
+					}
+					set.Add(new VoxelCell(cx, cy, cz));
+				}
+			}
+		}
+		return set.ToArray();
+	}
 
 	private GenConfig _config;
 	private Node3D _chunkRoot;
