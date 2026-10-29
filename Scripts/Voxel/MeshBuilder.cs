@@ -144,8 +144,10 @@ public static class MeshBuilder
 		{
 			// The cached field is the RAW 0..maxLight field (the response curve
 			// has NOT been applied yet, matching the freshly-computed field), so
-			// apply it here exactly as the inline path does.
-			lightFieldF = cachedLight;
+			// it is curved below exactly as the inline path is. Clone it so the
+			// in-place curve (ApplyLightResponse) does NOT corrupt the chunk's
+			// cached field for the next instant edit.
+			lightFieldF = (float[])cachedLight.Clone();
 			blockLitF = cachedBlockLit;
 		}
 		else
@@ -432,7 +434,11 @@ public static class MeshBuilder
 		byte[] blockLitW;
 		if (cachedLight != null)
 		{
-			wideLight = cachedLight;
+			// The cached field is the RAW 0..maxLight field (response curve NOT
+			// yet applied). Clone it so the in-place curve (ApplyLightResponse)
+			// below does NOT corrupt the chunk's cached field for the next
+			// instant edit.
+			wideLight = (float[])cachedLight.Clone();
 			blockLitW = cachedBlockLit;
 		}
 		else

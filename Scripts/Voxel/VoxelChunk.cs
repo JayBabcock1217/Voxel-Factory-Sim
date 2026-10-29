@@ -78,6 +78,21 @@ public partial class VoxelChunk : Node3D
 	// this is safe without a lock.
 	private ArrayMesh _pendingMesh;
 	private List<Vector3> _pendingCollision;
+	// Pending light field produced by the in-flight full build (written by the
+	// worker, committed to _cachedLightField in ApplyBuildResult on the main
+	// thread — same happens-before safety as _pendingMesh).
+	private float[] _pendingLight;
+	private byte[] _pendingBlockLit;
+
+	// Path 1 (light decoupling): the last COMPUTED wide light field for this
+	// chunk (RAW 0..maxLight, response curve NOT yet applied — it is applied at
+	// mesh-build time), plus its blockLit mask. The full (async) build computes
+	// this and stores it; the synchronous INSTANT edit path reuses it to skip
+	// the expensive flood fill, so a placed/broken voxel appears immediately
+	// with its (possibly one-edit-stale) lighting, and the fresh light catches
+	// up on the next full rebuild. Written on the main thread only.
+	private float[] _cachedLightField;
+	private byte[] _cachedBlockLit;
 
 	public void Initialize(Vector2I coord, ChunkData data)
 	{
@@ -193,19 +208,34 @@ public partial class VoxelChunk : Node3D
 		{
 			try
 			{
+				// Path 1 (light decoupling): compute the wide light field HERE
+				// (the expensive flood fill, off the main thread) and expose it
+				// to the mesh build via the cached-light overload, instead of
+				// letting MeshBuilder.Build compute it internally. The result is
+				// identical (same field, same response curve), but now the field
+				// is available to cache on the main thread for the instant edit
+				// path to reuse without re-running the flood fill.
+				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out byte[] blockLit);
+				float[] pendingLight = lightField;
+				byte[] pendingBlockLit = blockLit;
+
 				// All the heavy voxel math happens here, off the main thread.
 				// Collision is the visual surface exactly: MeshBuilder.Build
 				// emits the visual triangles (face quads in Faces mode, the MC
 				// isosurface in MarchingCubes mode) into the collision soup, so
-				// the player stands on exactly what is drawn.
-				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma);
+				// the player stands on exactly what is drawn. The precomputed
+				// lightField is passed so the internal flood fill is skipped.
+				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, pendingLight, pendingBlockLit);
 
 				// Store the prebuilt results for the main thread. Written here,
 				// read only in ApplyBuildResult after the task completes (happens-
 				// before via the task completion + the deferred call on a later
-				// frame). No lock needed.
+				// frame). No lock needed. The light field is cached the same way
+				// so the instant edit path can reuse it (Path 1).
 				_pendingMesh = visual;
 				_pendingCollision = collision;
+				_pendingLight = pendingLight;
+				_pendingBlockLit = pendingBlockLit;
 
 				// Marshal the cheap engine wiring back to the main thread.
 				// CallDeferred resolves the method on THIS object (the chunk,
@@ -281,11 +311,35 @@ public partial class VoxelChunk : Node3D
 			VoxelWorld.VertexLightDumpPending = false;
 		}
 
-		// The heavy voxel math, on the main thread (synchronous fast path).
+		// Path 1 (light decoupling): if this chunk already has a cached wide
+		// light field (from a previous full build), reuse it so the expensive
+		// flood fill is SKIPPED — the surface + collision build is the only work
+		// done here, which is what makes the click instant. The cached field is
+		// (possibly one-edit-stale) light: the voxel appears immediately with its
+		// previous lighting, and a fresh full rebuild (which recomputes the light
+		// and refreshes the cache) is scheduled right below. If there is NO
+		// cached field yet (the very first build of this chunk), compute it now
+		// (unavoidable) and cache it.
+		bool hasCachedLight = _cachedLightField != null;
+		float[] lightField = _cachedLightField;
+		byte[] blockLit = _cachedBlockLit;
+		if (!hasCachedLight)
+		{
+			// First build: compute the field on the main thread (the synchronous
+			// path has no worker) and cache it for future instant edits.
+			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out blockLit);
+			_cachedLightField = lightField;
+			_cachedBlockLit = blockLit;
+		}
+
+		// The heavy voxel math, on the main thread (synchronous fast path). The
+		// precomputed lightField is passed so the internal flood fill is skipped
+		// (Path 1). Output is identical to the full build modulo the light value.
 		var (visual, collision) = MeshBuilder.Build(
 			data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery,
 			neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery,
-			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma);
+			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma,
+			lightField, blockLit);
 
 		// Apply the result NOW (same frame). The same wiring ApplyBuildResult
 		// does, but inline so there is no deferred hop.
@@ -302,10 +356,24 @@ public partial class VoxelChunk : Node3D
 			_shape.Shape = _builtShape;
 		}
 
-		// Mark the chunk meshed (the budget loop won't re-rebuild it this frame
-		// or next). A successful synchronous build always produces a mesh, so
-		// clearing NeedsMesh is unconditional here.
-		NeedsMesh = false;
+		// Geometry + collision are applied (the instant part). Now decide
+		// whether a fresh full rebuild (to recompute the LIGHT with the new
+		// solid state) is needed. An edit changes the solid state, which changes
+		// the light field, so when we reused a cached (stale) field we MUST
+		// schedule a fresh full rebuild to refresh the lighting — that is the
+		// "light lags behind" behaviour: the mesh is instant, the light catches
+		// up on the next budgeted full build. When we just computed the field
+		// (first build), the light is already fresh, so clear the flag.
+		if (hasCachedLight)
+		{
+			// Keep NeedsMesh true so the budgeted async path runs a fresh full
+			// build (recomputing light + refreshing the cache) shortly.
+			NeedsMesh = true;
+		}
+		else
+		{
+			NeedsMesh = false;
+		}
 		_meshBuild = null;
 	}
 
@@ -335,6 +403,18 @@ public partial class VoxelChunk : Node3D
 			_builtShape = shape;
 			_collisionReady = true;
 			_shape.Shape = _builtShape;
+		}
+
+		// Commit the freshly-computed wide light field to the chunk's cache
+		// (Path 1). This is what the synchronous INSTANT edit path reuses to
+		// skip the flood fill. Only when a full build produced a field (a
+		// failed build leaves the previous cache in place).
+		if (_pendingLight != null)
+		{
+			_cachedLightField = _pendingLight;
+			_cachedBlockLit = _pendingBlockLit;
+			_pendingLight = null;
+			_pendingBlockLit = null;
 		}
 
 		// Only clear the dirty flag when a mesh was actually applied. If the
