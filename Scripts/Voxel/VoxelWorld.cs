@@ -593,6 +593,15 @@ public partial class VoxelWorld : Node3D
 	private Node3D _chunkRoot;
 	private readonly Dictionary<Vector2I, VoxelChunk> _chunks = new();
 	private bool _playerSpawned;
+	// The single chunk the player most recently EDITED (set by SetVoxel on every
+	// place/break). On the very next _Process frame this chunk is rebuilt
+	// SYNCHRONOUSLY on the main thread and applied in the SAME frame (see the
+	// budget loop) instead of waiting for the async ChunksPerFrame queue — so a
+	// placed/broken voxel is visible the frame the player clicks, which is what
+	// makes editing feel instant. Only the edited chunk gets this treatment; its
+	// 1-ring neighbours keep using the normal async budget. Cleared after it is
+	// applied. Null until the first edit.
+	private VoxelChunk _instantRebuildChunk;
 	// Millisecond tick when the spawn neighbourhood FIRST reported ready. The
 	// player is not actually spawned until SpawnSettleDelayMs has elapsed since
 	// this — a settling grace period that lets the physics server register the
@@ -1342,6 +1351,32 @@ public partial class VoxelWorld : Node3D
 			{
 				FreeChunk(chunk);
 			}
+		}
+
+		// INSTANT EDIT: the chunk the player most recently edited is rebuilt
+		// SYNCHRONOUSLY on the main thread and applied in THIS frame, so a
+		// placed/broken voxel is visible the frame the player clicks (Minecraft-
+		// style responsiveness). Without this, the edit waits for the async
+		// ChunksPerFrame budget below (a few frames) plus the worker-thread build
+		// plus a CallDeferred apply — several frames of visible lag. Only the
+		// edited chunk is synchronous (a 16×256×16 mesh is ~1–3 ms); its 1-ring
+		// neighbours still use the async budget. A no-op when there is no pending
+		// edit, or the chunk isn't ready to mesh yet (still generating).
+		if (_instantRebuildChunk is VoxelChunk instantChunk
+			&& instantChunk.DataReady
+			&& !instantChunk.MeshBuildInFlight)
+		{
+			instantChunk.RebuildSynchronous(this);
+			_instantRebuildChunk = null;
+		}
+		else if (!(_instantRebuildChunk is { } pendingInstant && !pendingInstant.DataReady))
+		{
+			// Clear the pending chunk UNLESS its data simply isn't generated yet
+			// (rare: editing the very edge of the world) — in that case keep it
+			// so it rebuilds synchronously as soon as generation completes. An
+			// in-flight async build self-clears here; a freed chunk just falls
+			// through to the normal budget path.
+			_instantRebuildChunk = null;
 		}
 
 		// Build/rebuild meshes within a per-frame budget. Order: edited
@@ -2682,6 +2717,13 @@ public partial class VoxelWorld : Node3D
 		// voxel is at full health again, so drop any stale damaged entry.
 		_edits[v] = (byte)material;
 		_damagedHealth.Remove(v);
+
+		// Remember the edited chunk so the NEXT _Process frame rebuilds it
+		// synchronously (same-frame apply). Every edit funnels through here, so
+		// the last write of a frame wins — which is the chunk the player is
+		// actually looking at. (Multi-voxel edits like a torch touch a region;
+		// the chunk the player clicked is the one that must appear instantly.)
+		_instantRebuildChunk = chunk;
 	}
 
 	/// <summary>

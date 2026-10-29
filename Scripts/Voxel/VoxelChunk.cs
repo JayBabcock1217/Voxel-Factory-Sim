@@ -227,6 +227,89 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
+	/// Rebuilds this chunk's mesh + collision SYNCHRONOUSLY on the main thread
+	/// and applies the result immediately (no worker thread, no
+	/// <c>CallDeferred</c> hop). This is the fast path for a freshly-edited
+	/// chunk: a 16×256×16 hidden-face mesh is only ~1–3 ms of C# work, well
+	/// within a frame, and applying it in the SAME frame the player clicked is
+	/// what makes editing feel instant (the async <see cref="Rebuild"/> would
+	/// cost a few extra frames: budget queue + worker build + deferred apply).
+	///
+	/// The mesh math is IDENTICAL to the async path (the same
+	/// <c>MeshBuilder.Build</c> call over the same frozen neighbour snapshot),
+	/// so the produced geometry is byte-for-byte the same as <see
+	/// cref="Rebuild"/> — only the threading/apply timing differs. No-ops when
+	/// the data isn't ready or an async build is already in flight (the caller
+	/// checks, but this re-guards for safety).
+	/// </summary>
+	public void RebuildSynchronous(VoxelWorld world)
+	{
+		if (!DataReady || _meshBuild != null)
+		{
+			return;
+		}
+
+		int cs = world.ChunkSizeXZ;
+		int wx0 = Coord.X * cs;
+		int wz0 = Coord.Y * cs;
+
+		var data = Data;
+		var palette = world.Palette;
+		float voxelSize = world.VoxelSize;
+		VoxelMeshMode mode = world.MeshMode;
+		Vector2I coord = Coord;
+		System.Func<int, int, int, bool> solidQuery = world.VoxelSolidForMesh;
+
+		// The same frozen neighbour snapshot the async path uses (centre
+		// included), so the wide light field and border culling compute from
+		// exactly the same neighbour state — identical geometry to Rebuild.
+		var neighbourSnapshot = world.SnapshotNeighbours(Coord, includeCentre: true);
+		System.Func<Vector2I, ChunkData> neighborQuery = c =>
+			neighbourSnapshot.TryGetValue(c, out ChunkData d) ? d : null;
+		System.Func<int, int, int, byte> materialQuery = world.Palette.BlendEnabled
+			? world.VoxelMaterialForMesh
+			: null;
+		System.Func<int, int, int, byte> blockLightQuery = world.VoxelBlockLightForMesh;
+		System.Func<Vector2I, ChunkData> neighborChunkQuery = neighborQuery;
+		float minLight = world.MinLight;
+		int maxLight = world.MaxLightLevel;
+		float lightFalloff = world.LightFalloff;
+		float darknessGamma = world.DarknessGamma;
+		bool debugVertexLight = world.DebugVertexLight && VoxelWorld.VertexLightDumpPending;
+		if (debugVertexLight)
+		{
+			VoxelWorld.VertexLightDumpPending = false;
+		}
+
+		// The heavy voxel math, on the main thread (synchronous fast path).
+		var (visual, collision) = MeshBuilder.Build(
+			data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery,
+			neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery,
+			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma);
+
+		// Apply the result NOW (same frame). The same wiring ApplyBuildResult
+		// does, but inline so there is no deferred hop.
+		if (visual != null)
+		{
+			_meshInstance.Mesh = visual;
+		}
+		if (collision != null)
+		{
+			var shape = new ConcavePolygonShape3D();
+			shape.SetFaces(collision.ToArray());
+			_builtShape = shape;
+			_collisionReady = true;
+			_shape.Shape = _builtShape;
+		}
+
+		// Mark the chunk meshed (the budget loop won't re-rebuild it this frame
+		// or next). A successful synchronous build always produces a mesh, so
+		// clearing NeedsMesh is unconditional here.
+		NeedsMesh = false;
+		_meshBuild = null;
+	}
+
+	/// <summary>
 	/// Called on the main thread (via <c>CallDeferred</c>) when this chunk's
 	/// async CPU build finishes. Assigns the prebuilt mesh + collision shape
 	/// into the node and marks the chunk solid. Cheap: a couple of reference
