@@ -31,6 +31,7 @@ public partial class McRewriteTest : Node
 		TestSeamHole();
 		TestCorner();
 		TestOreAndHealth();
+		TestTorchLightsAir();
 		GD.Print(_failures == 0 ? "MC_REWRITE_TEST: ALL PASS" : $"MC_REWRITE_TEST: {_failures} FAILURE(S)");
 		GetTree().Quit(_failures == 0 ? 0 : 1);
 	}
@@ -710,4 +711,97 @@ public partial class McRewriteTest : Node
 	}
 
 	private static float C(Vector3 v, int i) => i == 0 ? v.X : i == 1 ? v.Y : v.Z;
+
+	// ------------------------------------------------------------------
+	// TEST 5: a torch (block light source) must actually LIGHT its
+	// surrounding air. This is the end-to-end regression for "torch renders
+	// but doesn't light the cave": it builds a sealed solid box with one torch
+	// voxel inside, runs the REAL SkyLight.Compute (flood fill seeded from the
+	// torch's stored block-light) followed by the REAL MeshBuilder.
+	// ApplyLightResponse (the falloff/gamma/floor curve the mesh applies), and
+	// asserts the air next to the torch comes out clearly brighter than the
+	// far interior. If the response curve annihilates torch light (the bug),
+	// this fails.
+	// ------------------------------------------------------------------
+	private void TestTorchLightsAir()
+	{
+		// 8x8x8 box, fully solid (stone), with the center voxel (3..4) air and a
+		// torch at the center. The torch is the ONLY light source; everything is
+		// enclosed (no sky). maxLight=15 (the code default / scene uses 30 but
+		// 15 is the canonical torch scale).
+		const int S = 8;
+		var box = new ChunkData(S, S, S);
+		for (int z = 0; z < S; z++)
+		for (int y = 0; y < S; y++)
+		for (int x = 0; x < S; x++)
+		{
+			box.Set(x, y, z, 3); // stone
+		}
+		// Carve a 3x3x3 air cavity in the center, torch at its middle.
+		for (int z = 2; z <= 4; z++)
+		for (int y = 2; y <= 4; y++)
+		for (int x = 2; x <= 4; x++)
+		{
+			box.Set(x, y, z, 0); // air
+		}
+		box.Set(3, 3, 3, 23);            // torch (material id 23)
+		box.SetBlockLight(3, 3, 3, 14);   // torch light level 14
+
+		const int maxLight = 15;
+
+		// 1) Raw flood fill: the torch's immediate air neighbours must be lit.
+		var solid = new byte[S * S * S];
+		var block = new byte[S * S * S];
+		for (int i = 0; i < S * S * S; i++)
+		{
+			solid[i] = (byte)(box.Get(i % S, (i / S) % S, i / (S * S)) != 0 ? 1 : 0);
+			block[i] = box.GetBlockLight(i % S, (i / S) % S, i / (S * S));
+		}
+		float[] raw = SkyLight.Compute(solid, S, S, S, block, maxLight, out byte[] blockLit);
+		// Robust sampling (independent of the index layout): the torch's
+		// immediate air neighbours are the brightest cavity voxels; the far
+		// cavity corner is the dimmest lit one.
+		float maxAir = 0f, minLitAir = float.MaxValue;
+		for (int z = 2; z <= 4; z++)
+		for (int y = 2; y <= 4; y++)
+		for (int x = 2; x <= 4; x++)
+		{
+			if (box.Get(x, y, z) != 0) continue; // skip the torch voxel itself
+			int i = x + S * (y + S * z);
+			if (raw[i] > maxAir) maxAir = raw[i];
+			if (raw[i] > 0f && raw[i] < minLitAir) minLitAir = raw[i];
+		}
+		if (minLitAir == float.MaxValue) minLitAir = 0f;
+		GD.Print($"[TorchLightTest] raw: torchAir={maxAir:0.000} farAir={minLitAir:0.000}");
+		Check("raw: torch lights its immediate air (>0)", maxAir > 0f);
+		Check("raw: light decays with distance (torchAir > farAir)", maxAir > minLitAir);
+
+		// 2) Responded field (the value the MESH actually uses): apply the REAL
+		//    ApplyLightResponse with the scene's current curve (falloff 15, dark
+		//    gamma 4, floor 0.015). The torch air must come out CLEARLY above the
+		//    far-air floor, not collapsed to the floor. This is the regression
+		//    guard: if the curve annihilates torch light, this fails.
+		float[] near = (float[])raw.Clone();
+		float[] far = (float[])raw.Clone();
+		// Pass the block-lit mask so the torch's light is exempt from the
+		// falloff/gamma (the real code path does the same). Without the mask
+		// this test would fail — which is exactly the bug it guards against.
+		MeshBuilder.ApplyLightResponse(near, minLight: 0.015f, exponent: 15f, darkGamma: 4f, blockLit: blockLit);
+		MeshBuilder.ApplyLightResponse(far, minLight: 0.015f, exponent: 15f, darkGamma: 4f, blockLit: blockLit);
+		// Re-scan the responded fields the same way.
+		float maxAirR = 0f, minLitAirR = float.MaxValue;
+		for (int z = 2; z <= 4; z++)
+		for (int y = 2; y <= 4; y++)
+		for (int x = 2; x <= 4; x++)
+		{
+			if (box.Get(x, y, z) != 0) continue;
+			int i = x + S * (y + S * z);
+			if (near[i] > maxAirR) maxAirR = near[i];
+			if (far[i] > 0f && far[i] < minLitAirR) minLitAirR = far[i];
+		}
+		if (minLitAirR == float.MaxValue) minLitAirR = 0f;
+		GD.Print($"[TorchLightTest] responded(scene curve): near={maxAirR:0.0000} far={minLitAirR:0.0000}");
+		Check("responded: torch air is clearly above the dark floor (visible light)",
+			maxAirR > minLitAirR + 0.02f);
+	}
 }

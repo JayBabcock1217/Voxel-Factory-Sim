@@ -87,7 +87,7 @@ public static class MeshBuilder
 		// WIDE 3x3-chunk light field so sky light spans seams (see
 		// BuildLightFieldWide). solidQuery / blockLightQuery no longer feed the
 		// light; they still drive face culling further down.
-		float[] lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight);
+		float[] lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight, out byte[] blockLitF);
 		// The wide field extends maxLight voxels beyond the chunk on every side
 		// (see BuildLightFieldWide), so its X/Z extent is 2*cs+2*maxLight+2.
 		int lpx = 2 * sx + 2 * maxLight + 2, lpy = sy + 2, lpz = 2 * sz + 2 * maxLight + 2;
@@ -96,8 +96,9 @@ public static class MeshBuilder
 		// to the whole field once (before any consumer reads it), so every
 		// per-vertex light read gets it. The field is already normalized 0..1,
 		// so the result stays continuous (no re-quantization). Full-light voxels
-		// (1.0) are unaffected by the curves.
-		ApplyLightResponse(lightFieldF, minLight, lightFalloff, darknessGamma);
+		// (1.0) are unaffected by the curves. The block-lit mask exempts torch
+		// light from the falloff/gamma (see ApplyLightResponse).
+		ApplyLightResponse(lightFieldF, minLight, lightFalloff, darknessGamma, blockLitF);
 		System.Func<int, int, int, float> lightQuery = (x, y, z) =>
 		{
 			int ix = x - wx0 + wideHalf;
@@ -312,7 +313,7 @@ public static class MeshBuilder
 		//     it in UV2.x; the material shader multiplies ALBEDO by it. The
 		//     1-voxel padded `solid`/`blockLight` fields above are still used
 		//     for the MC isosurface and for the (now-legacy) debug dump below.
-		float[] wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight);
+		float[] wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight, out byte[] blockLitW);
 		int wx0w = wx0;
 		int wz0w = wz0;
 		// The wide field extends maxLight voxels beyond the chunk on every side
@@ -335,8 +336,9 @@ public static class MeshBuilder
 		// to the wide field once (before any consumer reads it), so every
 		// per-vertex light read gets it. The field is already normalized 0..1,
 		// so the result stays continuous (no re-quantization). Full-light voxels
-		// (1.0) are unaffected by the curves.
-		ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma);
+		// (1.0) are unaffected by the curves. The block-lit mask exempts torch
+		// light from the falloff/gamma (see ApplyLightResponse).
+		ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma, blockLitW);
 
 		// 2) Extract the single air|solid isosurface.
 		//    Ownership: each chunk draws only its +X/+Z side boundary cells
@@ -427,9 +429,9 @@ public static class MeshBuilder
 			// Light comes from the WIDE 3x3-chunk field so it spans seams. The
 			// field is already normalized 0..1 (continuous, curve applied), so it
 			// is read directly with no further scaling.
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, out _, out la);
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out _, out lb);
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out _, out lc);
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, blockLight, out _, out la);
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, blockLight, out _, out lb);
+			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, blockLight, out _, out lc);
 			if (dbgLight != null)
 			{
 				dbgLight.Add((pa, la));
@@ -632,6 +634,7 @@ public static class MeshBuilder
 		int cy,
 		int cz,
 		int edge,
+		byte[] paddedBlockLight,
 		out Vector3 position,
 		out float light)
 	{
@@ -644,6 +647,18 @@ public static class MeshBuilder
 		int slidx = ax + nx * (ay + ny * az);
 		if (solidField[slidx] != 0f)
 		{
+			// The surface vertex borders a SOLID voxel. Normally that means the
+			// vertex is hidden under the solid (light 0). But a SOLID voxel that
+			// is itself a light source (a torch) must render at FULL brightness:
+			// the material shader does ALBEDO = tint * light, so light 0 would
+			// make the torch's own faces black (and, being a bright emissive
+			// material, visually transparent — the "see-through" hole). Give the
+			// emitter's own surface full light so it reads as a glowing block.
+			if (paddedBlockLight != null && paddedBlockLight[slidx] > 0)
+			{
+				light = 1f;
+				return;
+			}
 			light = 0f;
 			return;
 		}
@@ -923,7 +938,8 @@ public static class MeshBuilder
 		int cs,
 		int sy,
 		System.Func<Vector2I, ChunkData> neighborQuery,
-		int maxLight = 15)
+		int maxLight,
+		out byte[] blockLit)
 	{
 		// Clamp the range exactly as SkyLight.Compute does (normalized level, >= 1).
 		int range = maxLight;
@@ -987,7 +1003,7 @@ public static class MeshBuilder
 				}
 			}
 		}
-		return SkyLight.Compute(solid, px, py, pz, block, maxLight);
+		return SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
 	}
 
 	/// <summary>
@@ -1015,7 +1031,7 @@ public static class MeshBuilder
 	/// </list>
 	/// Full-light voxels (level maxLight) are unaffected by either curve stage.
 	/// </summary>
-	private static void ApplyLightResponse(float[] light, float minLight, float exponent, float darkGamma = 1f)
+	internal static void ApplyLightResponse(float[] light, float minLight, float exponent, float darkGamma = 1f, byte[] blockLit = null)
 	{
 		// The field is already NORMALIZED 0..1 (SkyLight.Compute divides by
 		// maxLevel), so the curve operates directly on the normalized value and
@@ -1023,24 +1039,39 @@ public static class MeshBuilder
 		// light levels. That continuous storage is what makes the floor
 		// fine-grained: a small minLight change shifts every value smoothly
 		// instead of flipping a band of voxels to the next byte level.
+		//
+		// BLOCK LIGHT is exempt from the falloff + dark-gamma curves. Those two
+		// curves are tuned for SKY light, which sits at high raw values (0.8–1.0)
+		// near cave openings and needs shaping on its dark side. BLOCK light
+		// (a torch) sits at MID-range raw values (e.g. 0.43 just outside a
+		// level-14 torch); running it through x^15 * x^4 collapses it to the
+		// dark floor, so a torch "lights" nothing. Block-lit voxels therefore
+		// pass straight to the floor stage (which only lifts values BELOW the
+		// floor, leaving the torch's real brightness intact). Sky-lit and dark
+		// voxels keep the full curve.
 		float exp = exponent >= 1f ? exponent : 1f;
 		float dg = darkGamma >= 1f ? darkGamma : 1f;
 		bool hasFloor = minLight > 0f;
 		for (int i = 0; i < light.Length; i++)
 		{
 			float norm = light[i];
-			// Stage 1 — falloff curve (no-op when exp == 1).
-			if (exp > 1.0001f)
+			bool isBlock = blockLit != null && blockLit[i] == 1;
+			// Stages 1+2 apply ONLY to sky-lit / dark voxels, never to block
+			// light (see summary).
+			if (!isBlock)
 			{
-				norm = (float)Math.Pow(norm, exp);
+				if (exp > 1.0001f)
+				{
+					norm = (float)Math.Pow(norm, exp);
+				}
+				if (dg > 1.0001f)
+				{
+					norm = (float)Math.Pow(norm, dg);
+				}
 			}
-			// Stage 2 — dark-side gamma (no-op when darkGamma == 1). Eases the
-			// dark side so the floor below reads as a smooth gradient.
-			if (dg > 1.0001f)
-			{
-				norm = (float)Math.Pow(norm, dg);
-			}
-			// Stage 3 — dark-side floor (no-op when minLight == 0).
+			// Stage 3 — dark-side floor (no-op when minLight == 0). Applied to
+			// BOTH sky and block light: it only raises values below the floor,
+			// so a bright torch voxel is untouched and a dim one gets a floor.
 			if (hasFloor)
 			{
 				norm = VoxelWorld.ApplyMinLight(norm, minLight);

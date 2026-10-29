@@ -4,7 +4,7 @@
 [ext_resource type="Script" uid="uid://dlym8abq0owo0" path="res://Scripts/Voxel/VoxelTool.cs" id="2_voxeltool"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_body"]
-radius = 0.4
+radius = 0.3
 height = 1.8
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_body"]
@@ -13,7 +13,7 @@ roughness = 0.6
 
 [sub_resource type="CapsuleMesh" id="CapsuleMesh_body"]
 material = SubResource("StandardMaterial3D_body")
-radius = 0.4
+radius = 0.3
 height = 1.8
 
 [sub_resource type="SphereShape3D" id="SphereShape_pickup"]

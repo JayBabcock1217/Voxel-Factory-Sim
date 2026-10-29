@@ -87,6 +87,14 @@ public partial class Inventory : Node
 			int space = ItemStack.StackLimit - slot.Count;
 			int take = Math.Min(space, remaining);
 			slot.Count += take;
+			// Carry the incoming light level onto the existing stack. A torch's
+			// LightLevel is intrinsic (always TorchLightLevel), so the incoming
+			// stack is the authority; OR the two so a 0-level stack can never
+			// wipe out a real light source's level on a merge.
+			if (stack.LightLevel > 0)
+			{
+				slot.LightLevel = stack.LightLevel;
+			}
 			remaining -= take;
 		}
 

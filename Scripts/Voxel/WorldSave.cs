@@ -869,6 +869,33 @@ public partial class WorldSave : Node
 		&& (PendingEdits.Edits.Count > 0 || PendingEdits.Health.Count > 0);
 
 	/// <summary>
+	/// Peeks the saved player position from the snapshot WITHOUT consuming it.
+	/// Used by the world to anchor the spawn neighbourhood (the 3x3 of chunks
+	/// the gate waits on) on the saved XZ before the player is actually
+	/// restored, so the chunks around where the player will land generate
+	/// first. Returns false when there is no saved player (fresh world) or the
+	/// saved position is corrupt (below the world floor — the same guard
+	/// <see cref="ConsumePendingPlayer"/> applies).
+	/// </summary>
+	public bool TryGetSavedPlayerPosition(out Vector3 position)
+	{
+		position = Vector3.Zero;
+		var data = Snapshot;
+		if (data == null || data.PlayerPos == Vector3.Zero)
+		{
+			return false;
+		}
+		// Same below-floor guard as ConsumePendingPlayer: a corrupt position
+		// must not anchor the spawn at the void.
+		if (data.PlayerPos.Y < 0f)
+		{
+			return false;
+		}
+		position = data.PlayerPos;
+		return true;
+	}
+
+	/// <summary>
 	/// Returns the saved player transform from <see cref="PendingEdits"/> (and
 	/// marks it consumed) so the world can restore the player instead of
 	/// <c>SpawnPlayerOnTerrain</c>. Returns false when there is no saved

@@ -125,7 +125,12 @@ public partial class Player : CharacterBody3D
 	/// <summary>
 	/// The player's world position for saving. The <c>WorldSave</c> service
 	/// reads this (with <see cref="LookForSave"/>) when collecting a snapshot;
-	/// it is the authoritative position the world restores on load.
+	/// it is the authoritative position the world restores on load. NOTE: this
+	/// is the CharacterBody3D's ORIGIN, which is the CENTER of the collision
+	/// capsule (the capsule is a direct child with no offset). So a player
+	/// standing on the ground has its origin about 0.9 ABOVE the surface top,
+	/// not AT it. The world restores this exact value on load (no re-clamp), so
+	/// the save/restore is symmetric and the player resumes at their saved spot.
 	/// </summary>
 	public Vector3 PositionForSave => GlobalPosition;
 

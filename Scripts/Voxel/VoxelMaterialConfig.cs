@@ -170,6 +170,42 @@ public partial class VoxelMaterialConfig : Resource
 	}
 
 	/// <summary>
+	/// Ensures the known "special" materials that are NOT part of the editable
+	/// terrain-material list — but MUST always have a palette slot to render —
+	/// are present in <see cref="Materials"/>. A saved <c>.tres</c> that was
+	/// created before one of these existed (e.g. the torch, id 23) will be
+	/// missing it; loading such a config leaves the material with no slot, so
+	/// a placed voxel of that id has no mesh (a see-through hole) and no
+	/// light. Backfilling adds any missing special material with its canonical
+	/// color so it always renders. Called by the world after the config is
+	/// loaded, before the palette is sized/applied. Returns true when at least
+	/// one material was added (so the caller can persist the config).
+	/// </summary>
+	public bool BackfillKnownMaterials()
+	{
+		bool added = false;
+		// The torch (and any future special light-source materials) must always
+		// have a slot. Their LightLevel is an ITEM property, but the material
+		// itself still needs a palette entry to be drawn as a solid block.
+		if (GetDef(VoxelMaterialIds.Torch) == null)
+		{
+			var torch = new VoxelMaterialDef
+			{
+				Id = VoxelMaterialIds.Torch,
+				Name = "Torch",
+				Entry = new VoxelMaterialEntry
+				{
+					AlbedoColor = new Color(1.00f, 0.78f, 0.30f),
+					Description = "A handheld light source. Place it to illuminate dark caves.",
+				},
+			};
+			AppendMaterial(torch);
+			added = true;
+		}
+		return added;
+	}
+
+	/// <summary>
 	/// Appends a material def, wires its change event so live inspector edits
 	/// propagate to <see cref="PropertyChanged"/>, and notifies listeners.
 	/// </summary>

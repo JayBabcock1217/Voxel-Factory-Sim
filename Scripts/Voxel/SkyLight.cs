@@ -84,12 +84,34 @@ public static class SkyLight
 	/// air far from any source is 0.
 	/// </returns>
 	public static float[] Compute(byte[] solid, int nx, int ny, int nz, byte[] blockLight = null, int maxLevel = 15)
+		=> Compute(solid, nx, ny, nz, blockLight, maxLevel, out _);
+
+	/// <summary>
+	/// Like <see cref="Compute(byte[], int, int, int, byte[], int)"/> but also
+	/// reports, in <paramref name="blockLit"/>, which air voxels carry their
+	/// light from a BLOCK source (a torch/glowstone) rather than (only) from
+	/// the sky. A voxel is block-lit when a block-source seed reached it with a
+	/// value at least as high as any sky seed. The downstream light-response
+	/// curve (falloff / dark-gamma) is tuned for SKY light (which sits at high
+	/// raw values near openings); applying those same curves to BLOCK light
+	/// (which sits at mid-range raw values near a torch) crushes torch light to
+	/// the dark floor, so the mesh builder uses this mask to give block-lit
+	/// voxels a gentler response. <paramref name="blockLit"/> is a 0/1 byte
+	/// field at the same padded dimensions (1 = block-lit, 0 = sky-lit or dark).
+	/// </summary>
+	public static float[] Compute(
+		byte[] solid, int nx, int ny, int nz,
+		byte[] blockLight, int maxLevel,
+		out byte[] blockLit)
 	{
 		// Clamp the max level (it indexes the 0..1 normalization; must be >= 1).
 		if (maxLevel < 1) maxLevel = 1;
 		else if (maxLevel > 255) maxLevel = 255;
 		int total = nx * ny * nz;
 		var light = new float[total];
+		// Assign to a local the local functions (SeedAir / Propagate) can
+		// capture; an `out` parameter cannot be used inside a local function.
+		var lit = blockLit = new byte[total];
 
 		// ------------------------------------------------------------------
 		// SEED 1 — SKY: every air voxel with a SOLID-FREE vertical column
@@ -168,22 +190,26 @@ public static class SkyLight
 				int iz = rem / ny;
 				// Index layout: idx = ix + nx*(iy + ny*iz). So the neighbour
 				// offsets are: ±X -> ±1, ±Y -> ±nx, ±Z -> ±nx*ny.
-				SeedAir(idx - 1,         ix > 0,         nl);
-				SeedAir(idx + 1,         ix < nx - 1,    nl);
-				SeedAir(idx - nx,        iy > 0,         nl);
-				SeedAir(idx + nx,        iy < ny - 1,    nl);
-				SeedAir(idx - nx * ny,   iz > 0,         nl);
-				SeedAir(idx + nx * ny,   iz < nz - 1,    nl);
+				SeedAir(idx - 1,         ix > 0,         nl, fromBlock: true);
+				SeedAir(idx + 1,         ix < nx - 1,    nl, fromBlock: true);
+				SeedAir(idx - nx,        iy > 0,         nl, fromBlock: true);
+				SeedAir(idx + nx,        iy < ny - 1,    nl, fromBlock: true);
+				SeedAir(idx - nx * ny,   iz > 0,         nl, fromBlock: true);
+				SeedAir(idx + nx * ny,   iz < nz - 1,    nl, fromBlock: true);
 			}
 		}
 
-		void SeedAir(int nidx, bool inBounds, float nl)
+		void SeedAir(int nidx, bool inBounds, float nl, bool fromBlock = false)
 		{
 			if (!inBounds || solid[nidx] != 0 || nl <= light[nidx])
 			{
 				return;
 			}
 			light[nidx] = nl;
+			if (fromBlock)
+			{
+				lit[nidx] = 1;
+			}
 			Enqueue(nidx);
 		}
 
@@ -245,24 +271,31 @@ public static class SkyLight
 			int rem = idx / nx;
 			int iy = rem % ny;
 			int iz = rem / ny;
+			// Carry the source voxel's block-lit status forward: light that
+			// originated from a block source stays block-lit as it propagates.
+			bool srcBlock = blockLit[idx] == 1;
 
 			// Index layout: idx = ix + nx*(iy + ny*iz). Neighbour offsets:
 			// ±X -> ±1, ±Y -> ±nx, ±Z -> ±nx*ny.
-			Propagate(idx - 1,         ix > 0,         nl);
-			Propagate(idx + 1,         ix < nx - 1,    nl);
-			Propagate(idx - nx,        iy > 0,         nl);
-			Propagate(idx + nx,        iy < ny - 1,    nl);
-			Propagate(idx - nx * ny,   iz > 0,         nl);
-			Propagate(idx + nx * ny,   iz < nz - 1,    nl);
+			Propagate(idx - 1,         ix > 0,         nl, srcBlock);
+			Propagate(idx + 1,         ix < nx - 1,    nl, srcBlock);
+			Propagate(idx - nx,        iy > 0,         nl, srcBlock);
+			Propagate(idx + nx,        iy < ny - 1,    nl, srcBlock);
+			Propagate(idx - nx * ny,   iz > 0,         nl, srcBlock);
+			Propagate(idx + nx * ny,   iz < nz - 1,    nl, srcBlock);
 		}
 
-		void Propagate(int nidx, bool inBounds, float nl)
+		void Propagate(int nidx, bool inBounds, float nl, bool fromBlock)
 		{
 			if (!inBounds || solid[nidx] != 0 || nl <= light[nidx])
 			{
 				return;
 			}
 			light[nidx] = nl;
+			if (fromBlock)
+			{
+				lit[nidx] = 1;
+			}
 			Enqueue(nidx);
 		}
 

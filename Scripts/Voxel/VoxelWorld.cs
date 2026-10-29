@@ -593,11 +593,23 @@ public partial class VoxelWorld : Node3D
 	private Node3D _chunkRoot;
 	private readonly Dictionary<Vector2I, VoxelChunk> _chunks = new();
 	private bool _playerSpawned;
-	// Millisecond tick when the player was (re)spawned, for the post-spawn
-	// safety net that re-seats the player if the first physics step missed the
-	// floor (the ground's collision may not have been registered with the
-	// physics server by the time physics is enabled).
-	private ulong _spawnedAtMs;
+	// Millisecond tick when the spawn neighbourhood FIRST reported ready. The
+	// player is not actually spawned until SpawnSettleDelayMs has elapsed since
+	// this — a settling grace period that lets the physics server register the
+	// freshly-built collision shapes before the player's capsule is dropped
+	// onto them. 0 = the neighbourhood has not (yet) reported ready this
+	// session. The spawn gate in _Process is the only consumer.
+	private ulong _spawnNeighbourhoodReadyAtMs;
+
+	/// <summary>
+	/// How long (ms) to wait AFTER the spawn neighbourhood reports ready before
+	/// actually spawning the player. This settling delay lets the physics server
+	/// register the freshly-built chunk collision shapes so the player's capsule
+	/// lands on solid ground on its very first physics step instead of falling
+	/// through and being re-seated. Tuned to 500ms (well past the first physics
+	/// tick, short enough not to stall the loading screen).
+	/// </summary>
+	private const ulong SpawnSettleDelayMs = 500;
 
 	// ------------------------------------------------------------------
 	// Spawn load progress (for the loading screen)
@@ -833,6 +845,18 @@ public partial class VoxelWorld : Node3D
 
 		_lodRoot = new Node3D { Name = "LodChunks" };
 		AddChild(_lodRoot);
+
+		// Backfill any known "special" materials (e.g. the torch) that a saved
+		// .tres created before they existed would be missing. Without this, a
+		// placed torch has no palette slot -> no mesh (a see-through hole) and
+		// no light. Must run BEFORE ApplyMaterials so the palette is sized to
+		// include the backfilled material's id. If we added a missing material,
+		// persist the config so the fix survives future runs (the file is
+		// already saved, so writing it is safe and idempotent).
+		if (MaterialConfig != null && MaterialConfig.BackfillKnownMaterials())
+		{
+			SaveMaterialConfig();
+		}
 
 		// Apply the material config once, then follow live inspector edits.
 		ApplyMaterials();
@@ -1181,13 +1205,43 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
-		// Freeze the spawn anchor on first sight: the player's scene position
-		// (the spawn point) before they have any physics. The loading-screen
-		// progress bar and the spawn gate both anchor on this 3x3, so they
-		// always agree on which neighbourhood is being waited on.
+		// Freeze the spawn anchor on first sight. The loading-screen progress
+		// bar and the spawn gate both anchor on this 3x3, so they always agree
+		// on which neighbourhood is being waited on.
+		//
+		// When a save exists, anchor on the SAVED position's XZ (not the scene
+		// position): the player will be restored there, so the chunks around
+		// the saved spot must generate + mesh first (the spiral generation
+		// order and the spawn-gate 3x3 both key off this anchor). The scene
+		// position (usually the origin) is used only for a fresh world with no
+		// saved player. The saved Y is kept for the anchor (it does not affect
+		// the chunk neighbourhood, which is XZ-based); the player's actual
+		// height is resolved against the terrain at spawn time.
 		if (_spawnAnchor == Vector3.Zero)
 		{
-			_spawnAnchor = playerNode.GlobalPosition;
+			var save = GetSaveService();
+			if (save != null)
+			{
+				if (save.Snapshot == null)
+				{
+					save.EnsureLoadedForSession();
+				}
+				if (save.TryGetSavedPlayerPosition(out Vector3 savedPos))
+				{
+					// Keep the scene Y (the player's pre-physics height) but
+					// anchor the XZ on the saved spot. The chunk neighbourhood
+					// is XZ-only, so the Y is irrelevant to the gate.
+					_spawnAnchor = new Vector3(savedPos.X, playerNode.GlobalPosition.Y, savedPos.Z);
+				}
+				else
+				{
+					_spawnAnchor = playerNode.GlobalPosition;
+				}
+			}
+			else
+			{
+				_spawnAnchor = playerNode.GlobalPosition;
+			}
 		}
 
 		Vector2I playerChunk = ChunkCoordOf(playerNode.GlobalPosition);
@@ -1231,37 +1285,53 @@ public partial class VoxelWorld : Node3D
 		// load order completes.
 		if (!_playerSpawned)
 		{
+			// The player is frozen (no physics) until the spawn gate opens. The
+			// gate has two phases, both required:
+			//
+			//   PHASE 1 — wait for the spawn chunk to report DONE: the 3x3
+			//   neighbourhood (the chunk the player lands in plus its ring) must
+			//   all be present, data-generated, meshed, and have a live
+			//   collision shape (SpawnNeighbourhoodReady), AND no saved edits
+			//   may still be pending (the saved world must be re-applied so the
+			//   ground under the player is the SAVED ground, not the fresh one).
+			//
+			//   PHASE 2 — wait an EXTRA 0.5s after phase 1 completes. This
+			//   settle delay lets the physics server finish registering the
+			//   freshly-built collision shapes, so the player's capsule lands
+			//   on solid ground on its very first physics step instead of
+			//   falling through. It also keeps the loading screen up long
+			//   enough that the world is visibly settled before the player
+			//   appears.
+			//
+			// Only AFTER both phases does SpawnOrRestorePlayer run, which places
+			// the player at the EXACT saved coordinates (no clamp / re-seat).
 			playerNode.SetPhysicsProcess(false);
-			if (SpawnNeighbourhoodReady(playerChunk) && !HasPendingEdits
-				&& SpawnOrRestorePlayer(playerNode))
+			bool neighbourhoodReady = SpawnNeighbourhoodReady(playerChunk) && !HasPendingEdits;
+			if (neighbourhoodReady)
 			{
-				_playerSpawned = true;
-				_spawnedAtMs = Time.GetTicksMsec();
-				playerNode.SetPhysicsProcess(true);
+				// Latch the first frame the neighbourhood reported ready. The
+				// 0.5s settle delay is measured from this latch. (The latch is
+				// not cleared if the neighbourhood momentarily flaps — the
+				// chunks are built and stay built, so a one-frame flap during
+				// load-in should not restart the settle timer.)
+				if (_spawnNeighbourhoodReadyAtMs == 0)
+				{
+					_spawnNeighbourhoodReadyAtMs = Time.GetTicksMsec();
+				}
+				if (Time.GetTicksMsec() - _spawnNeighbourhoodReadyAtMs >= SpawnSettleDelayMs)
+				{
+					// Both phases done: spawn the player at the exact saved spot.
+					if (SpawnOrRestorePlayer(playerNode))
+					{
+						_playerSpawned = true;
+						playerNode.SetPhysicsProcess(true);
+					}
+				}
 			}
 			// Feed the loading screen: publish how much of the spawn 3x3 is
 			// ready every frame while the gate is closed (and once at 1.0 when
 			// it opens). The bar is driven off this, not a separate counter.
 			SpawnProgressChanged?.Invoke(SpawnLoadProgress);
-		}
-		else if (Time.GetTicksMsec() - _spawnedAtMs < 1000
-			&& playerNode is CharacterBody3D body
-			&& !body.IsOnFloor())
-		{
-			// Safety net: for the first second after spawn, if the player's
-			// capsule has not found the floor, it fell through the ground (the
-			// chunk's collision shape was assigned but not yet registered with
-			// the physics server when physics was enabled, so the first
-			// MoveAndSlide passed through). Re-seat it on the terrain and keep
-			// watching until it settles.
-			int vx = Mathf.FloorToInt(playerNode.GlobalPosition.X / VoxelSize);
-			int vz = Mathf.FloorToInt(playerNode.GlobalPosition.Z / VoxelSize);
-			int surfaceY = ResolveSurfaceY(vx, vz);
-			playerNode.GlobalPosition = new Vector3(
-				playerNode.GlobalPosition.X,
-				(surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f,
-				playerNode.GlobalPosition.Z);
-			body.Velocity = Vector3.Zero;
 		}
 
 		// Unload chunks well out of range.
@@ -1634,13 +1704,20 @@ public partial class VoxelWorld : Node3D
 			return false;
 		}
 
-		// A small extra lift (0.25) above the saved position so the player
-		// settles cleanly onto the ground rather than starting in contact.
-		pos += new Vector3(0f, 0.25f, 0f);
+		// Spawn the player at the EXACT coordinates they were saved at. No
+		// clamping, no terrain re-resolution, no re-seating: the saved position
+		// is authoritative. By the time this runs the spawn gate has already
+		// (a) waited for the spawn chunk's data + mesh + collision to be fully
+		// built, and (b) waited an extra 0.5s settle delay, so the ground's
+		// collision shape is registered with the physics server. The player is
+		// dropped at the exact saved spot and physics settles them naturally —
+		// if they saved standing on the ground they stay put; if they saved
+		// mid-air they fall and land. This is what fixes the "teleports up"
+		// bug: nothing re-writes the saved Y.
 		if (player is Player p)
 		{
 			p.RestoreFromSave(pos, yaw, pitch);
-			GD.Print($"[VoxelWorld] Restored player from save at {pos} (yaw={yaw:F2}, pitch={pitch:F2}).");
+			GD.Print($"[VoxelWorld] Restored player from save at exact position {pos} (yaw={yaw:F2}, pitch={pitch:F2}).");
 		}
 		else
 		{
@@ -1937,8 +2014,11 @@ public partial class VoxelWorld : Node3D
 		{
 			return;
 		}
+		// A broken light source removes its light: re-mesh the full light radius
+		// (not just the 1-voxel edit) so the surrounding air darkens again.
+		byte level = GetBlockLightLevel(v.X, v.Y, v.Z);
 		SetVoxel(v, VoxelMaterialIds.Air);
-		MarkChunkDirty(v, 0);
+		MarkChunkDirty(v, LightRadiusFor(level));
 		VoxelBroken?.Invoke(v, material);
 	}
 
@@ -1964,6 +2044,16 @@ public partial class VoxelWorld : Node3D
 	/// voxel as a block-light source of level <paramref name="lightLevel"/>
 	/// (0-15) when non-zero. This is how a light-source item (torch/glowstone)
 	/// lights its neighbourhood on placement.
+	///
+	/// The light level for a KNOWN light-source material is intrinsic to the
+	/// material (the torch is always <c>TorchLightLevel</c>), NOT per-instance
+	/// state on the held stack. A stack's stored level can be 0 (a save that
+	/// predates the light feature, a merge that dropped it, an old grant), so
+	/// trusting it would place a dead torch. Here we resolve the authoritative
+	/// level: if the material is a registered light source, use its intrinsic
+	/// level; otherwise fall back to the caller-supplied <paramref name="lightLevel"/>
+	/// (lets future per-instance light sources work). This makes placement the
+	/// single choke point that can never place a light source with level 0.
 	/// </summary>
 	public bool PlaceVoxel(Vector3I v, int material, byte lightLevel)
 	{
@@ -1981,9 +2071,43 @@ public partial class VoxelWorld : Node3D
 			return false;
 		}
 
-		SetVoxel(v, material, lightLevel);
-		MarkChunkDirty(v, 0);
+		// Resolve the authoritative block-light level for this material (see
+		// summary). A registered light source always emits its intrinsic level,
+		// even when the held stack carried 0.
+		byte effectiveLevel = ResolveLightLevelForMaterial(material, lightLevel);
+		SetVoxel(v, material, effectiveLevel);
+		// A light source's light reaches LightRadius voxels in every direction,
+		// so every chunk inside that radius must be re-meshed: the mesh builder
+		// only re-samples block light from chunks it actually rebuilds, so a
+		// neighbour that isn't rebuilt never picks up the torch's light. A plain
+		// material edit only needs radius 0 (its faces + the 1-chunk ring).
+		int r = LightRadiusFor(effectiveLevel);
+		MarkChunkDirty(v, r);
 		return true;
+	}
+
+	/// <summary>
+	/// Resolves the authoritative block-light level to store when placing
+	/// <paramref name="material"/>. A material that is a registered light source
+	/// (see <see cref="ItemRegistry.AllLightSources"/>) always emits its
+	/// INTRINSIC level — the level is a property of the material, not of the
+	/// particular stack that placed it. This guards against a held stack whose
+	/// <c>LightLevel</c> is 0 (a save that predates the light feature, a merge
+	/// that dropped it, or an old grant) silently placing a dead torch. When the
+	/// material is not a registered light source, the caller-supplied
+	/// <paramref name="fallback"/> is used (so a future per-instance light source
+	/// can still work).
+	/// </summary>
+	private static byte ResolveLightLevelForMaterial(int material, byte fallback)
+	{
+		foreach (var entry in ItemRegistry.AllLightSources)
+		{
+			if (entry.MaterialId == material && entry.LightLevel > 0)
+			{
+				return entry.LightLevel;
+			}
+		}
+		return fallback;
 	}
 
 	/// <summary>
@@ -2010,9 +2134,7 @@ public partial class VoxelWorld : Node3D
 	/// (vx, vz): scans the loaded chunk top-down (accounts for caves lowering
 	/// the surface and rocks/trees raising it), falling back to the heightmap
 	/// surface (always solid by construction) when the column has no solid
-	/// voxel or the chunk is gone. Used by the terrain spawn and by the
-	/// post-spawn safety net (which re-seats the player if the first physics
-	/// step missed the floor).
+	/// voxel or the chunk is gone. Used by the terrain spawn.
 	/// </summary>
 	private int ResolveSurfaceY(int vx, int vz)
 	{
@@ -2289,6 +2411,31 @@ public partial class VoxelWorld : Node3D
 			return 0;
 		}
 		return chunk.Data.GetBlockLight(lx, y, lz);
+	}
+
+	/// <summary>
+	/// The block-light source level (0..15) stored on the voxel at world
+	/// (x, y, z), or 0 when it is out of range, unloaded, or not a light source.
+	/// Used to size the re-mesh radius when a light source is broken.
+	/// </summary>
+	public byte GetBlockLightLevel(int x, int y, int z) => VoxelBlockLightForMesh(x, y, z);
+
+	/// <summary>
+	/// The re-mesh radius (in voxels) needed to cover the light a light source
+	/// of <paramref name="level"/> emits: block light reaches (level - 1) voxels
+	/// before it saturates to 0, so a radius of (level - 1) (clamped to
+	/// <see cref="MaxLightLevel"/>) covers every voxel whose light can change.
+	/// 0 for a non-source (plain material edits only need the 1-chunk ring).
+	/// </summary>
+	private int LightRadiusFor(byte level)
+	{
+		if (level <= 1)
+		{
+			return 0;
+		}
+		int r = level - 1;
+		int max = Mathf.Max(1, MaxLightLevel);
+		return r > max ? max : r;
 	}
 
 	/// <summary>

@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="VoxelMaterialConfig" format=3 uid="uid://bnmqi2watluht"]
+[gd_resource type="Resource" script_class="VoxelMaterialConfig" format=3 uid="uid://dv1s7pwp7lilk"]
 
 [ext_resource type="Script" uid="uid://mb6etibithmm" path="res://Scripts/Voxel/VoxelMaterialConfig.cs" id="1_cfg"]
 [ext_resource type="Texture2D" uid="uid://cxohq1jg5d1ew" path="res://Textures/SBS - Tiny Texture Pack - 128x128/128x128/Grass/Grass_04-128x128.png" id="1_dtx1w"]
@@ -247,6 +247,17 @@ Id = 22
 Name = "Machine Frame"
 Entry = SubResource("entry22")
 
+[sub_resource type="Resource" id="Resource_ke2uw"]
+script = ExtResource("3_entry")
+AlbedoColor = Color(1, 0.78, 0.3, 1)
+Description = "A handheld light source. Place it to illuminate dark caves."
+
+[sub_resource type="Resource" id="Resource_4enur"]
+script = ExtResource("2_def")
+Id = 23
+Name = "Torch"
+Entry = SubResource("Resource_ke2uw")
+
 [resource]
 script = ExtResource("1_cfg")
-Materials = [SubResource("def1"), SubResource("def2"), SubResource("def3"), SubResource("def4"), SubResource("def5"), SubResource("def6"), SubResource("def7"), SubResource("def8"), SubResource("def9"), SubResource("def10"), SubResource("def11"), SubResource("def12"), SubResource("def13"), SubResource("def14"), SubResource("def15"), SubResource("def16"), SubResource("def17"), SubResource("def18"), SubResource("def19"), SubResource("def20"), SubResource("def21"), SubResource("def22")]
+Materials = [SubResource("def1"), SubResource("def2"), SubResource("def3"), SubResource("def4"), SubResource("def5"), SubResource("def6"), SubResource("def7"), SubResource("def8"), SubResource("def9"), SubResource("def10"), SubResource("def11"), SubResource("def12"), SubResource("def13"), SubResource("def14"), SubResource("def15"), SubResource("def16"), SubResource("def17"), SubResource("def18"), SubResource("def19"), SubResource("def20"), SubResource("def21"), SubResource("def22"), SubResource("Resource_4enur")]
