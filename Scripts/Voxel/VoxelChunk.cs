@@ -817,11 +817,13 @@ public partial class VoxelChunk : Node3D
 		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
 
 		// The small MC build (single-digit ms).
+		var _t0 = VoxelWorld.InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
 		var (visual, collision) = MeshBuilder.BuildSubCell(
 			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 			x0, y0, z0, x1, y1, z1,
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
+		long _buildMs = _t0 != null ? _t0.ElapsedMilliseconds : 0;
 
 		// Apply to the sub-cell's nodes. The visual mesh is always set. The
 		// collision shape is stashed (BuiltShape) and the body/shape wiring is
@@ -829,6 +831,7 @@ public partial class VoxelChunk : Node3D
 		// to a live body when the chunk is within the player's collision radius.
 		// This keeps the instant edit from creating a Jolt body for a far sub-cell
 		// (the per-frame radius gate handles the attach when the player is near).
+		long _t1 = VoxelWorld.InstantBuildProfile ? _t0.ElapsedMilliseconds : 0;
 		var node = GetOrCreateSubCell(cellX, cellY, cellZ);
 		node.Mesh.Mesh = visual;
 		if (visual != null && collision != null && collision.Count > 0)
@@ -847,6 +850,12 @@ public partial class VoxelChunk : Node3D
 			{
 				node.Shape.Shape = null;
 			}
+		}
+		long _applyMs = VoxelWorld.InstantBuildProfile ? _t0.ElapsedMilliseconds - _t1 : 0;
+		if (VoxelWorld.InstantBuildProfile && VoxelWorld.InstantBuildProfileCount < 12)
+		{
+			GD.Print($"[SubCellMesh] cell ({cellX},{cellY},{cellZ}) build={_buildMs}ms apply={_applyMs}ms " +
+				$"hasGeom={(visual != null)} collisionVerts={collision?.Count ?? 0}");
 		}
 	}
 
