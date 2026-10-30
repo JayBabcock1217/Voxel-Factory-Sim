@@ -1515,8 +1515,10 @@ public partial class VoxelWorld : Node3D
 							_dirty.Add(gc);
 						}
 
-				// TEMP (Option B diagnosis): time the whole instant sub-cell edit.
+				// TEMP (Option B diagnosis): stage-level timing of the instant
+				// sub-cell edit (light recompute vs re-mesh) to find the cost.
 				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
+				long _lightMs = 0, _remeshMs = 0;
 				int _lightCells = 0;
 
 				// The wide field dims (fixed for the session) + the edit's wide
@@ -1610,6 +1612,7 @@ public partial class VoxelWorld : Node3D
 				bool lightRecomputed = false;
 				if (anyLightRelevant && worldSettled)
 				{
+					long _lightStart = InstantBuildProfile ? _sw.ElapsedTicks : 0;
 					// (2) LIGHT: local recompute over a box around the edit.
 					//     The box radius is sized above (source radius when a
 					//     source is added, full field range otherwise), so the box
@@ -1626,6 +1629,7 @@ public partial class VoxelWorld : Node3D
 					if (InstantBuildProfile) _lightCells = _lightChanged.Count;
 					_dirty.UnionWith(_lightChanged);
 					lightRecomputed = true;
+					if (InstantBuildProfile) _lightMs += _sw.ElapsedTicks - _lightStart;
 				}
 
 				// Re-mesh the dirty sub-cells.
@@ -1636,6 +1640,8 @@ public partial class VoxelWorld : Node3D
 				// produced mesh is byte-identical, so the expensive MC build is
 				// skipped. This is what keeps a torch fast: only the few sub-cells
 				// whose vertices sit in the torch's lit region re-mesh.
+				long _remeshStart = InstantBuildProfile ? _sw.ElapsedTicks : 0;
+				int _remeshCells = 0;
 				foreach (var cell in _dirty)
 				{
 					if (!_geometryDirty.Contains(cell)
@@ -1645,7 +1651,9 @@ public partial class VoxelWorld : Node3D
 						continue; // light-only, and no sampled light changed -> no re-mesh
 					}
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
+					if (InstantBuildProfile) _remeshCells++;
 				}
+				if (InstantBuildProfile) _remeshMs += _sw.ElapsedTicks - _remeshStart;
 
 				// CROSS-CHUNK LIGHT: if the edit is a light source whose reach
 				// (LightRadiusFor) crosses a chunk border, the neighbouring chunk's
@@ -1714,8 +1722,12 @@ public partial class VoxelWorld : Node3D
 				if (InstantBuildProfile && InstantBuildProfileCount < 12)
 				{
 					InstantBuildProfileCount++;
+					long inv = System.TimeSpan.TicksPerMillisecond;
+					long otherMs = _sw.ElapsedMilliseconds - (_lightMs / inv) - (_remeshMs / inv);
 					GD.Print($"[SubCellEdit] chunk ({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
-						$"cells={_dirty.Count} (light={_lightCells}) total={_sw.ElapsedMilliseconds} ms");
+						$"cells={_dirty.Count} (light={_lightCells}) remesh={_remeshCells} " +
+						$"light={_lightMs / inv}ms remesh={_remeshMs / inv}ms other={otherMs}ms " +
+						$"total={_sw.ElapsedMilliseconds} ms");
 					if (InstantBuildProfileCount >= 12)
 					{
 						InstantBuildProfile = false;
