@@ -834,6 +834,7 @@ public static class MeshBuilder
 		int offX = rx0 - 1, offY = ry0 - 1, offZ = rz0 - 1;
 
 		// 1) Build the small padded field (material + solid + block light).
+		var _fsw = VoxelWorld.InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
 		var field = new float[px * py * pz];
 		var solid = new float[px * py * pz];
 		var blockLight = new byte[px * py * pz];
@@ -855,6 +856,7 @@ public static class MeshBuilder
 				}
 			}
 		}
+		long _fieldMs = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 
 		// 2) Generate the MC isosurface, limited to the region's cells. In the
 		//    local lattice, cell (cx,cy,cz) has corners at lattice (cx..cx+1) ->
@@ -877,6 +879,7 @@ public static class MeshBuilder
 		bool regionAtChunkEast = (rx1 >= sx - 1);
 		bool regionAtChunkSouth = (rz1 >= sz - 1);
 
+		long _mcStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		var tris = MarchingCubes.Generate(solid, px, py, pz, (cx, cy, cz) =>
 		{
 			// Only cells inside the region.
@@ -900,6 +903,7 @@ public static class MeshBuilder
 			}
 			return true;
 		});
+		long _mcMs = _fsw != null ? _fsw.ElapsedMilliseconds - _mcStart : 0;
 
 		// 3) Emit + assemble the small surface (same logic as the whole-chunk
 		//    path, but over the small triangle list). Per-vertex light comes
@@ -935,6 +939,7 @@ public static class MeshBuilder
 		Vector3 localOrigin = new Vector3(wx0 + offX, offY, wz0 + offZ);
 		Vector3 half = new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
 
+		long _emitStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
@@ -994,7 +999,9 @@ public static class MeshBuilder
 			collision.Add(pa); collision.Add(pb); collision.Add(pc);
 		}
 
+		long _emitMs = _fsw != null ? _fsw.ElapsedMilliseconds - _emitStart : 0;
 		// 4) Assemble the small ArrayMesh (one surface per material + blends).
+		long _asmStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		var mesh = new ArrayMesh();
 		for (int m = 1; m <= lastMaterial; m++)
 		{
@@ -1037,6 +1044,12 @@ public static class MeshBuilder
 			tool.Commit(mesh);
 		}
 
+		long _asmMs = _fsw != null ? _fsw.ElapsedMilliseconds - _asmStart : 0;
+		if (VoxelWorld.InstantBuildProfile && VoxelWorld.InstantBuildProfileCount < 12)
+		{
+			GD.Print($"[SubCellBuild] field={_fieldMs}ms mc={_mcMs}ms emit={_emitMs}ms assemble={_asmMs}ms " +
+				$"tris={tris.Count} verts={collision.Count / 3} region=({wX}x{wY}x{wZ})");
+		}
 		return (mesh, collision);
 	}
 
