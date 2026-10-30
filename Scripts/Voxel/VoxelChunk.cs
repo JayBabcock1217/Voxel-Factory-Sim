@@ -271,6 +271,129 @@ public partial class VoxelChunk : Node3D
 	public System.Collections.Generic.Dictionary<Vector2I, ChunkData> SnapshotForEdit(VoxelWorld world)
 		=> world.SnapshotNeighbours(Coord, includeCentre: true);
 
+	/// <summary>
+	/// LOCAL light recompute (Option B lighting): recompute the wide light field
+	/// only over a box around the edit (instead of the full 3×3-chunk flood fill),
+	/// re-applying the response curve, and return the sub-cells whose per-vertex
+	/// light changed (so the caller re-meshes exactly those). This is what makes
+	/// an edit's LIGHT update instant — the light no longer waits for the async
+	/// full rebuild. The box is clamped to the wide field; the boundary values are
+	/// reused as fixed conditions (see <see cref="SkyLight.ComputeLocal"/>).
+	///
+	/// The caller supplies the wide field's solid+blockLight volumes (built once
+	/// for the edit) and the box in WIDE-FIELD lattice coords. Returns the set of
+	/// sub-cells to re-mesh (may be empty if the light didn't actually change).
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightLocal(
+		VoxelWorld world,
+		byte[] wideSolid,
+		byte[] wideBlock,
+		int lpx, int lpy, int lpz,
+		int bx0, int by0, int bz0, int bx1, int by1, int bz1)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		if (_cachedLightField == null)
+		{
+			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+
+		// Snapshot the box before the recompute so we can diff which voxels
+		// actually changed (and thus which sub-cells need re-meshing).
+		int bx = bx1 - bx0 + 1, by = by1 - by0 + 1, bz = bz1 - bz0 + 1;
+		int total = bx * by * bz;
+		var before = new float[total];
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
+				}
+
+		// The local max-BFS recompute (writes the normalized 0..1 field in place
+		// over the box; boundary values are the fixed conditions).
+		SkyLight.ComputeLocal(wideSolid, wideBlock, _cachedLightField, _cachedBlockLit,
+			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
+
+		// Re-apply the response curve ONLY over the box (it's a pure per-voxel
+		// remap, so it's safe to apply to just the changed region).
+		ApplyLightResponseBox(world, before, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+
+		// Diff: a voxel changed if its light differs by more than a tiny epsilon.
+		// Map each changed voxel to the sub-cell(s) whose vertices sample it.
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int l = ix + bx * (iy + by * iz);
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
+					{
+						continue; // unchanged
+					}
+					// Wide voxel -> chunk-local voxel -> sub-cell. The wide field's
+					// center chunk origin maps to wide index (lpx/2 - 1, 1, lpz/2 - 1);
+					// a wide voxel (wx,wy,wz) is chunk-local (wx - (lpx/2-1), wy - 1,
+					// wz - (lpz/2-1)). Air-voxel light is what a vertex samples, so
+					// the sub-cell containing that chunk-local voxel (and any whose
+					// 1-voxel padding includes it) re-meshes.
+					int clx = (bx0 + ix) - (lpx / 2 - 1);
+					int cly = (by0 + iy) - 1;
+					int clz = (bz0 + iz) - (lpz / 2 - 1);
+					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
+				}
+
+		return changed;
+	}
+
+	/// <summary>Applies the response curve to a box of the light field in place.</summary>
+	private void ApplyLightResponseBox(
+		VoxelWorld world, float[] before, int total, int bx, int by, int bz,
+		int bx0, int by0, int bz0, int lpx, int lpy, int lpz)
+	{
+		float exp = world.LightFalloff >= 1f ? world.LightFalloff : 1f;
+		float dg = world.DarknessGamma >= 1f ? world.DarknessGamma : 1f;
+		float minL = world.MinLight;
+		bool hasFloor = minL > 0f;
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int l = ix + bx * (iy + by * iz);
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					float norm = _cachedLightField[g];
+					bool isBlock = _cachedBlockLit != null && _cachedBlockLit[g] == 1;
+					if (!isBlock)
+					{
+						if (exp > 1.0001f) norm = (float)Math.Pow(norm, exp);
+						if (dg > 1.0001f) norm = (float)Math.Pow(norm, dg);
+					}
+					if (hasFloor) norm = VoxelWorld.ApplyMinLight(norm, minL);
+					_cachedLightField[g] = norm;
+				}
+	}
+
+	/// <summary>
+	/// The sub-cells whose geometry/light can change when chunk-local voxel
+	/// (clx,cly,clz) changes: the cell containing it plus any cell whose 1-voxel
+	/// padding includes it (a vertex in a neighbouring cell can sample it).
+	/// </summary>
+	private System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> DirtyCellsForChunkLocal(
+		VoxelWorld world, int clx, int cly, int clz)
+	{
+		var set = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
+		for (int ox = -1; ox <= 1; ox++)
+			for (int oy = -1; oy <= 1; oy++)
+				for (int oz = -1; oz <= 1; oz++)
+				{
+					int px = clx + ox, py = cly + oy, pz = clz + oz;
+					if (px < 0 || py < 0 || pz < 0 || px >= cs || py >= ch || pz >= cs) continue;
+					set.Add(VoxelWorld.CellOf(px, py, pz));
+				}
+		return set;
+	}
+
 	public void RebuildSubCell(VoxelWorld world, int cellX, int cellY, int cellZ)
 		=> RebuildSubCell(world, cellX, cellY, cellZ, null);
 

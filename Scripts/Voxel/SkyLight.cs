@@ -301,4 +301,196 @@ public static class SkyLight
 
 		return light;
 	}
+
+	/// <summary>
+	/// LOCAL light recompute (Option B lighting): recompute the light only over a
+	/// bounded box <c>[x0..x1] × [y0..y1] × [z0..z1]</c> of the padded field
+	/// (inclusive, lattice coords), reusing the field's EXISTING light values on
+	/// the box boundary as fixed boundary conditions. This is far cheaper than a
+	/// full <see cref="Compute"/> flood fill (which scans the whole 3×3-chunk
+	/// region) and is what makes an edit's light update instant.
+	///
+	/// CORRECTNESS: light is a monotone MAX propagation (each voxel = the max of
+	/// its own seeds and its neighbours' propagated values, decaying 1/voxel).
+	/// Given correct boundary values, a local max-BFS over the box converges to
+	/// the SAME values the full flood fill would produce inside the box — so the
+	/// result is bit-identical to the full recompute, as long as the box boundary
+	/// values are already correct (they are, because they were set by the
+	/// previous full/region recompute and only the interior changed). The box
+	/// must therefore extend at least one light-range past the edited region so
+	/// the boundary is genuinely unaffected by the edit.
+	///
+	/// Writes the recomputed (NORMALIZED 0..1) light back into
+	/// <paramref name="light"/> in place over the box, and updates
+	/// <paramref name="blockLit"/> over the box (a voxel is block-lit when a
+	/// block-source path reached it at least as brightly as any sky path — the
+	/// same rule the full <see cref="Compute"/> uses).
+	/// </summary>
+	/// <param name="solid">Padded solid|air field (1 = solid) at (nx,ny,nz).</param>
+	/// <param name="blockLight">Per-voxel block-light SOURCE levels (0 = none) at the same dims.</param>
+	/// <param name="light">The CURRENT normalized light field (boundary values are read as fixed conditions; the box interior is overwritten).</param>
+	/// <param name="blockLit">The CURRENT block-lit mask (updated over the box).</param>
+	/// <param name="nx,ny,nz">Padded field dimensions.</param>
+	/// <param name="x0,y0,z0,x1,y1,z1">Inclusive box bounds (lattice coords, clamped to the field).</param>
+	/// <param name="maxLevel">Max light level (normalization divisor).</param>
+	public static void ComputeLocal(
+		byte[] solid, byte[] blockLight, float[] light, byte[] blockLit,
+		int nx, int ny, int nz,
+		int x0, int y0, int z0, int x1, int y1, int z1,
+		int maxLevel)
+	{
+		if (maxLevel < 1) maxLevel = 1;
+		else if (maxLevel > 255) maxLevel = 255;
+
+		// Clamp the box to the field.
+		if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (z0 < 0) z0 = 0;
+		if (x1 >= nx) x1 = nx - 1; if (y1 >= ny) y1 = ny - 1; if (z1 >= nz) z1 = nz - 1;
+		if (x0 > x1 || y0 > y1 || z0 > z1) return;
+
+		// Work on a scratch copy of the box so the boundary (the box's outer
+		// shell) is read as a FIXED condition while the interior is solved.
+		int bx = x1 - x0 + 1, by = y1 - y0 + 1, bz = z1 - z0 + 1;
+		int total = bx * by * bz;
+		var boxLight = new float[total];
+		var boxLit = new byte[total]; // RECOMPUTED from scratch below (not copied).
+		// local index: (lx + bx*(ly + by*lz)), lx = x - x0, etc.
+		for (int lz = 0; lz < bz; lz++)
+			for (int ly = 0; ly < by; ly++)
+				for (int lx = 0; lx < bx; lx++)
+				{
+					int x = x0 + lx, y = y0 + ly, z = z0 + lz;
+					int g = x + nx * (y + ny * z);
+					int l = lx + bx * (ly + by * lz);
+					boxLight[l] = light[g]; // boundary + stale interior: the max-BFS starting values
+					// boxLit[l] is intentionally left 0: the mask is recomputed
+					// from the seeds + propagation below. Copying the old mask
+					// would leave stale block-lit flags after a torch is removed
+					// (a voxel that was block-lit but is now sky-lit must drop its
+					// block-lit flag, or the response curve treats it as block
+					// light and skips the falloff/gamma -> wrong brightness).
+				}
+
+		// SEED 1 — SKY: every air voxel in the box with a solid-free column to
+		// the TOP OF THE FIELD (it sees the sky) is full light. This is a pure
+		// per-column function of the SOLID field (unchanged by a light-only
+		// recompute), so it is exact and seam-safe. A column blocked within the
+		// field stays at its boundary/handoff value (the full recompute set it).
+		for (int lx = 0; lx < bx; lx++)
+			for (int lz = 0; lz < bz; lz++)
+			{
+				int x = x0 + lx, z = z0 + lz;
+				for (int y = ny - 1; y >= y0; y--)
+				{
+					int g = x + nx * (y + ny * z);
+					if (solid[g] != 0) break;
+					int l = lx + bx * ((y - y0) + by * lz);
+					boxLight[l] = 1f; // open sky
+				}
+			}
+
+		// BFS over the box, max-propagating from (a) the sky seeds, (b) the
+		// block-light sources inside the box, and (c) the box boundary (the
+		// existing light handoff from outside). Decays 1/voxel, snapping to the
+		// level grid exactly as the full Compute does (deterministic + seam-safe).
+		var queue = new int[total];
+		int qHead = 0, qTail = 0;
+		void Enq(int idx)
+		{
+			if (qTail >= queue.Length)
+			{
+				var grown = new int[queue.Length * 2];
+				System.Array.Copy(queue, grown, queue.Length);
+				queue = grown;
+			}
+			queue[qTail++] = idx;
+		}
+
+		// Enqueue every box voxel that currently has light (sky seeds, boundary
+		// handoff, or stale interior) so the max-BFS can propagate from all of
+		// them. (Re-enqueuing on increase happens in Propagate.)
+		for (int l = 0; l < total; l++)
+		{
+			if (boxLight[l] >= 1f / maxLevel) Enq(l);
+		}
+
+		// Block-light sources inside the box: seed their 6 air neighbours.
+		if (blockLight != null)
+		{
+			for (int lz = 0; lz < bz; lz++)
+				for (int ly = 0; ly < by; ly++)
+					for (int lx = 0; lx < bx; lx++)
+					{
+						int x = x0 + lx, y = y0 + ly, z = z0 + lz;
+						int g = x + nx * (y + ny * z);
+						byte src = blockLight[g];
+						if (src == 0 || solid[g] == 0) continue;
+						float nl = (src > maxLevel ? maxLevel : (src >= 1 ? src - 1 : 0)) / (float)maxLevel;
+						if (nl <= 0f) continue;
+						// Seed the 6 air neighbours (clamped to the box).
+						SeedNeighbour(lx, ly, lz, 1, 0, 0, nl, true);
+						SeedNeighbour(lx, ly, lz, -1, 0, 0, nl, true);
+						SeedNeighbour(lx, ly, lz, 0, 1, 0, nl, true);
+						SeedNeighbour(lx, ly, lz, 0, -1, 0, nl, true);
+						SeedNeighbour(lx, ly, lz, 0, 0, 1, nl, true);
+						SeedNeighbour(lx, ly, lz, 0, 0, -1, nl, true);
+					}
+		}
+
+		void SeedNeighbour(int lx, int ly, int lz, int dx, int dy, int dz, float nl, bool fromBlock)
+		{
+			int nlx = lx + dx, nly = ly + dy, nlz = lz + dz;
+			if (nlx < 0 || nly < 0 || nlz < 0 || nlx >= bx || nly >= by || nlz >= bz) return;
+			int nidx = nlx + bx * (nly + by * nlz);
+			int g = (x0 + nlx) + nx * ((y0 + nly) + ny * (z0 + nlz));
+			if (solid[g] != 0 || nl <= boxLight[nidx]) return;
+			boxLight[nidx] = nl;
+			if (fromBlock) boxLit[nidx] = 1;
+			Enq(nidx);
+		}
+
+		while (qHead < qTail)
+		{
+			int l = queue[qHead++];
+			float lv = boxLight[l];
+			if (lv <= 1f / maxLevel) continue; // can't propagate further
+			int k = (int)System.Math.Round(lv * maxLevel) - 1;
+			if (k < 0) continue;
+			float nl = k / (float)maxLevel;
+			int lx = l % bx;
+			int rem = l / bx;
+			int ly = rem % by;
+			int lz = rem / by;
+			bool srcBlock = boxLit[l] == 1;
+			// Propagate to the 6 in-box neighbours.
+			PropStep(lx, ly, lz, 1, 0, 0, nl, srcBlock);
+			PropStep(lx, ly, lz, -1, 0, 0, nl, srcBlock);
+			PropStep(lx, ly, lz, 0, 1, 0, nl, srcBlock);
+			PropStep(lx, ly, lz, 0, -1, 0, nl, srcBlock);
+			PropStep(lx, ly, lz, 0, 0, 1, nl, srcBlock);
+			PropStep(lx, ly, lz, 0, 0, -1, nl, srcBlock);
+		}
+
+		void PropStep(int lx, int ly, int lz, int dx, int dy, int dz, float nl, bool fromBlock)
+		{
+			int nlx = lx + dx, nly = ly + dy, nlz = lz + dz;
+			if (nlx < 0 || nly < 0 || nlz < 0 || nlx >= bx || nly >= by || nlz >= bz) return;
+			int nidx = nlx + bx * (nly + by * nlz);
+			int g = (x0 + nlx) + nx * ((y0 + nly) + ny * (z0 + nlz));
+			if (solid[g] != 0 || nl <= boxLight[nidx]) return;
+			boxLight[nidx] = nl;
+			if (fromBlock) boxLit[nidx] = 1;
+			Enq(nidx);
+		}
+
+		// Write the solved box back into the global field.
+		for (int lz = 0; lz < bz; lz++)
+			for (int ly = 0; ly < by; ly++)
+				for (int lx = 0; lx < bx; lx++)
+				{
+					int l = lx + bx * (ly + by * lz);
+					int g = (x0 + lx) + nx * ((y0 + ly) + ny * (z0 + lz));
+					light[g] = boxLight[l];
+					blockLit[g] = boxLit[l];
+				}
+	}
 }

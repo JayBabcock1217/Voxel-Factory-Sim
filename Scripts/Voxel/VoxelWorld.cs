@@ -1481,20 +1481,19 @@ public partial class VoxelWorld : Node3D
 			if (SubCellMeshing)
 			{
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
-				// edit dirtied (the sub-cell containing the edited voxel + any
-				// sub-cell within 1 voxel of a sub-cell border, whose 1-voxel
-				// padding includes the edited voxel). Each is a tiny MC build
-				// (single-digit ms), so the whole edit is fast enough to run
-				// synchronously in this frame — instant. The chunk's wide light
-				// field is reused (cached), so no flood fill; a fresh full
-				// sub-cell-light refresh happens via the async budget (light
-				// lags, Path 1).
-				// Which sub-cell(s) the edited voxel dirties: the sub-cell that
-				// CONTAINS it, plus any sub-cell whose 1-voxel padding includes
-				// it (the padding samples the voxel's neighbours, so a voxel
-				// within 1 voxel of a sub-cell border also changes that
-				// neighbour's surface). A voxel deep inside a sub-cell dirties
-				// just ONE sub-cell — this is what keeps the edit under 10 ms.
+				// edit dirtied. Two kinds of sub-cells change:
+				//  (1) GEOMETRY — the sub-cell(s) whose solid/air state changed
+				//      (the edited voxel + any within 1 voxel of a border).
+				//  (2) LIGHT — the sub-cell(s) whose per-vertex light changed.
+				//      Instead of waiting for the async full flood fill (light
+				//      lag), we do a LOCAL light recompute over a box around the
+				//      edit (a small max-BFS, not the whole 3×3-chunk region),
+				//      update the cached wide field, and re-mesh the sub-cells
+				//      whose light actually changed. So the edit's light is
+				//      instant too (torches glow, caves brighten, in this frame).
+				var _snap = instantChunk.SnapshotForEdit(this);
+
+				// (1) Geometry-dirty sub-cells.
 				var _dirty = new HashSet<VoxelCell>();
 				for (int ox = -1; ox <= 1; ox++)
 					for (int oy = -1; oy <= 1; oy++)
@@ -1506,37 +1505,70 @@ public partial class VoxelWorld : Node3D
 							if (px < 0 || py < 0 || pz < 0
 								|| px >= ChunkSizeXZ || py >= ChunkHeight || pz >= ChunkSizeXZ)
 							{
-								continue; // outside this chunk (the neighbour's problem)
+								continue;
 							}
-							var pc = CellOf(px, py, pz);
-							_dirty.Add(pc);
+							_dirty.Add(CellOf(px, py, pz));
 						}
-				// One frozen neighbour snapshot serves every dirty sub-cell of
-				// this chunk (they all cull against the same neighbour state),
-				// so compute it once here instead of per sub-cell.
-				var _snap = instantChunk.SnapshotForEdit(this);
-				// TEMP (Option B diagnosis): time the whole instant sub-cell
-				// edit so we can confirm it lands under 10 ms. Gated on
-				// InstantBuildProfile (auto-clears). Removed once tuned.
+
+				// TEMP (Option B diagnosis): time the whole instant sub-cell edit.
 				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
+				long _tLight = 0;
+				int _lightCells = 0;
+
+				// (2) LIGHT: local recompute over a box around the edit. The box
+				//     radius is maxLight (a light source's reach) so the box
+				//     boundary is genuinely unaffected by the edit (the local
+				//     recompute's fixed-condition assumption holds). A plain
+				//     geometry edit (no light source) still needs a small box:
+				//     opening a sky column or blocking light changes light out to
+				//     the sky-line, so use maxLight to be safe.
+				int range = MaxLightLevel;
+				if (range < 1) range = 1;
+				int lpx = 2 * ChunkSizeXZ + 2 * range + 2;
+				int lpy = ChunkHeight + 2;
+				int lpz = 2 * ChunkSizeXZ + 2 * range + 2;
+				int half = lpx / 2 - 1; // center chunk origin -> wide index
+				// The edit's chunk-local (lx, ly, lz) -> wide field lattice.
+				int wx = _instantEditLocal.X + half;
+				int wy = _instantEditLocal.Y + 1;
+				int wz = _instantEditLocal.Z + half;
+				int bx0 = Mathf.Max(0, wx - range), bx1 = Mathf.Min(lpx - 1, wx + range);
+				int by0 = Mathf.Max(0, wy - range), by1 = Mathf.Min(lpy - 1, wy + range);
+				int bz0 = Mathf.Max(0, wz - range), bz1 = Mathf.Min(lpz - 1, wz + range);
+
+				// Build the wide solid+block volumes (cheap: a few hundred k voxel
+				// reads) and run the local recompute. The snapshot gives the
+				// neighbour data; the center chunk is instantChunk.Data.
+				MeshBuilder.BuildWideVolumes(instantChunk.Data, instantChunk.Coord.X * ChunkSizeXZ, instantChunk.Coord.Y * ChunkSizeXZ,
+					ChunkSizeXZ, ChunkHeight,
+					c => _snap.TryGetValue(c, out ChunkData d) ? d : null,
+					out byte[] wideSolid, out byte[] wideBlock, lpx, lpy, lpz);
+				var _lightChanged = instantChunk.RecomputeLightLocal(this, wideSolid, wideBlock,
+					lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1);
+				if (InstantBuildProfile) _lightCells = _lightChanged.Count;
+				_dirty.UnionWith(_lightChanged);
+
+				// Re-mesh the union of geometry + light dirty sub-cells.
 				foreach (var cell in _dirty)
 				{
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
+				if (InstantBuildProfile) _tLight = _sw.ElapsedMilliseconds;
 				if (InstantBuildProfile && InstantBuildProfileCount < 12)
 				{
 					InstantBuildProfileCount++;
 					GD.Print($"[SubCellEdit] chunk ({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
-						$"cells={_dirty.Count} build={_sw.ElapsedMilliseconds} ms");
+						$"cells={_dirty.Count} (light={_lightCells}) total={_sw.ElapsedMilliseconds} ms");
 					if (InstantBuildProfileCount >= 12)
 					{
 						InstantBuildProfile = false;
 					}
 				}
-				// The geometry is instant. Mark the chunk dirty so the async
-				// budget runs a fresh full rebuild (recomputing the wide light
-				// field with the new solid state, refreshing the cache) — the
-				// "light lags behind" behaviour.
+				// The geometry + light are instant. Mark the chunk dirty so the
+				// async budget runs a fresh full rebuild (recomputing the wide
+				// light field with the new solid state, refreshing the cache) — a
+				// safety net that converges the local recompute to the full
+				// flood-fill result (and handles any light the box didn't cover).
 				instantChunk.NeedsMesh = true;
 			}
 			else

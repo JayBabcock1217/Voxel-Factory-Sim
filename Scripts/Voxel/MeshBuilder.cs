@@ -1484,9 +1484,36 @@ public static class MeshBuilder
 		}
 		// Center chunk + one full light range per side + 1-voxel pad per side.
 		int px = 2 * cs + 2 * range + 2, py = sy + 2, pz = 2 * cs + 2 * range + 2;
+		BuildWideVolumes(chunk, wx0, wz0, cs, sy, neighborQuery, out byte[] solid, out byte[] block, px, py, pz);
+		return SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
+	}
+
+	/// <summary>
+	/// Builds the wide light field's SOLID|AIR and BLOCK-LIGHT volumes (the
+	/// inputs to <see cref="SkyLight.Compute"/> / <see cref="SkyLight.ComputeLocal"/>).
+	/// Center chunk + one full light range per side + 1-voxel pad per side. The
+	/// volumes are at (px, py, pz) = (2*cs+2*range+2, sy+2, 2*cs+2*range+2); the
+	/// center chunk origin maps to wide index (px/2-1, 1, pz/2-1). Unloaded
+	/// neighbours read as SOLID (see <see cref="BuildLightFieldWide"/>). Exposed
+	/// so the instant-edit local light recompute (Option B) can build the same
+	/// volumes without running the (expensive) flood fill.
+	/// </summary>
+	public static void BuildWideVolumes(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		int cs,
+		int sy,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		out byte[] solid,
+		out byte[] block,
+		int px,
+		int py,
+		int pz)
+	{
 		int half = px / 2 - 1; // = cs + range: world offset of lattice ix 0
-		var solid = new byte[px * py * pz];
-		var block = new byte[px * py * pz];
+		solid = new byte[px * py * pz];
+		block = new byte[px * py * pz];
 		for (int iz = 0; iz < pz; iz++)
 		{
 			for (int iy = 0; iy < py; iy++)
@@ -1511,20 +1538,11 @@ public static class MeshBuilder
 						: neighborQuery(new Vector2I(cxi, czi));
 					if (c == null)
 					{
-						// Neighbor is NOT ready (unloaded or still generating):
-						// read it as SOLID (opaque, dark) everywhere in the wide
-						// field. This matches the mesh-culling rule
-						// (VoxelSolidForMesh treats unloaded chunks as solid) and
-						// is conservative for the deep fill, so the frontier
-						// under-lights rather than falsely over-lighting a cave
-						// mouth that opens toward the frontier. It is also what
-						// stops sky light leaking in across an edge whose
-						// neighbour hasn't been generated yet (the "0 to 15
-						// across one voxel" seam). The old "read as air inside
-						// the 1-voxel shell" special case is no longer needed:
-						// every voxel a vertex can sample lies inside the center
-						// chunk (whose own data is always ready), so vertex
-						// light samples never hit the not-ready fallback.
+						// Neighbor NOT ready (unloaded / still generating): read
+						// as SOLID (opaque, dark) — matches the mesh-culling rule
+						// and is conservative for the deep fill (under-light a
+						// frontier cave mouth rather than over-light it; stops
+						// sky leaking across an ungenerated edge).
 						solid[idx] = 1;
 						continue;
 					}
@@ -1534,7 +1552,6 @@ public static class MeshBuilder
 				}
 			}
 		}
-		return SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
 	}
 
 	/// <summary>
