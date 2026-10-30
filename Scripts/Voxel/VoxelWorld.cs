@@ -1726,6 +1726,8 @@ public partial class VoxelWorld : Node3D
 					long otherMs = _sw.ElapsedMilliseconds - (_lightMs / inv) - (_remeshMs / inv);
 					GD.Print($"[SubCellEdit] chunk ({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
 						$"cells={_dirty.Count} (light={_lightCells}) remesh={_remeshCells} " +
+						$"settled={worldSettled} recompute={(lightSourceChanged || solidChanged)} " +
+						$"boxRange={boxRange} " +
 						$"light={_lightMs / inv}ms remesh={_remeshMs / inv}ms other={otherMs}ms " +
 						$"total={_sw.ElapsedMilliseconds} ms");
 					if (InstantBuildProfileCount >= 12)
