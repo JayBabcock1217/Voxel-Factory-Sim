@@ -582,20 +582,23 @@ public static class MeshBuilder
 		// or a uniform value. Gated on debugVertexLight.
 		var dbgLight = debugVertexLight ? new List<(Vector3 p, float l)>() : null;
 
+		// (wideHalf, the wide-field X/Z offset = cs + maxLight, is already
+		// computed above for the lightQuery lambda; reuse it here.)
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
 			int ma, mb, mc;
 			float la, lb, lc;
-			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, out pa, out ma);
-			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out pb, out mb);
-			Vertex(solid, field, px, py, pz, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out pc, out mc);
-			// Light comes from the WIDE 3x3-chunk field so it spans seams. The
-			// field is already normalized 0..1 (continuous, curve applied), so it
-			// is read directly with no further scaling.
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, blockLight, out _, out la);
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, blockLight, out _, out lb);
-			VertexWideLight(solid, px, py, pz, wx0w, wz0w, wideLight, lpx, lpy, lpz, sx, tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, blockLight, out _, out lc);
+			// Resolve each vertex ONCE (position + material + wide light),
+			// instead of the old two-pass Vertex + VertexWideLight that
+			// re-resolved each edge. The light comes from the WIDE 3x3-chunk
+			// field (already normalized 0..1, curve applied) so it spans seams.
+			ResolveVertex(solid, field, wideLight, blockLight, px, py, pz, lpx, lpy, lpz, wideHalf,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA, out pa, out ma, out la);
+			ResolveVertex(solid, field, wideLight, blockLight, px, py, pz, lpx, lpy, lpz, wideHalf,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out pb, out mb, out lb);
+			ResolveVertex(solid, field, wideLight, blockLight, px, py, pz, lpx, lpy, lpz, wideHalf,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out pc, out mc, out lc);
 			if (dbgLight != null)
 			{
 				dbgLight.Add((pa, la));
@@ -762,98 +765,86 @@ public static class MeshBuilder
 	}
 
 	/// <summary>
-	/// Resolves one MC triangle vertex: its lattice-space position (from
-	/// the binary solid field) and the material index of the solid voxel the
-	/// crossing came from (from the material field). (Per-vertex light is
-	/// sampled separately from the WIDE field by <see cref="VertexWideLight"/>.)
+	/// Resolves one MC triangle vertex in a SINGLE pass: its lattice-space
+	/// position, the material index of the solid voxel the crossing came from,
+	/// AND the per-vertex light sampled from the WIDE field (via the air-side
+	/// corner). This combines the old <c>Vertex</c> + <c>VertexWideLight</c>,
+	/// which each called <see cref="MarchingCubes.ResolveEdge"/> separately
+	/// (reading the field twice per vertex). Resolving the edge ONCE here
+	/// removes that redundancy — a meaningful fraction of the emit stage over
+	/// ~10k triangles × 3 vertices.
+	///
+	/// The light logic is identical to the old <c>VertexWideLight</c>: the air
+	/// corner's solid check (on the padded field the surface was built from),
+	/// the torch-emitter full-light exemption, and the wide-field sample
+	/// (open sky outside the field).
 	/// </summary>
-	private static void Vertex(
+	private static void ResolveVertex(
 		float[] solidField,
 		float[] materialField,
-		int nx,
-		int ny,
-		int nz,
-		int cx,
-		int cy,
-		int cz,
-		int edge,
-		out Vector3 position,
-		out int material)
-	{
-		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
-			out position, out int sx, out int sy, out int sz);
-		material = (int)materialField[sx + nx * (sy + ny * sz)];
-	}
-
-	/// <summary>
-	/// Resolves one MC triangle vertex's light from the WIDE light field
-	/// instead of the 1-voxel padded one. The air corner (ax,ay,az) is in the
-	/// padded lattice (1..nx-1 etc.); converting to world voxels (ax-1, ay-1,
-	/// az-1) and indexing the wide field lets the sample see a full
-	/// maxLight-voxel radius of neighbour light across chunk seams. The solid
-	/// check stays on the padded field (which is what the isosurface was built
-	/// from). The wide field's X/Z offset is <c>lpx/2 - 1</c> (= cs + maxLight):
-	/// it no longer coincides with the padded field's 1-voxel offset, so it is
-	/// derived from the field dimensions instead of the chunk size.
-	/// </summary>
-	private static void VertexWideLight(
-		float[] solidField,
-		int nx,
-		int ny,
-		int nz,
-		int wx0,
-		int wz0,
 		float[] wideLight,
+		byte[] paddedBlockLight,
+		int nx,
+		int ny,
+		int nz,
 		int lpx,
 		int lpy,
 		int lpz,
-		int cs,
+		int wideHalf,
 		int cx,
 		int cy,
 		int cz,
 		int edge,
-		byte[] paddedBlockLight,
 		out Vector3 position,
+		out int material,
 		out float light)
 	{
+		// Resolve the crossed edge ONCE: position + solid-side endpoint.
 		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
-			out position, out _, out _, out _);
-		MarchingCubes.ResolveEdgeAirCorner(solidField, nx, ny, nz, cx, cy, cz, edge,
-			out int ax, out int ay, out int az);
-		// Air voxel in the padded field (defensive solid check on the field the
-		// surface was built from), then its world-space light from the wide field.
-		int slidx = ax + nx * (ay + ny * az);
+			out position, out int solidX, out int solidY, out int solidZ);
+		material = (int)materialField[solidX + nx * (solidY + ny * solidZ)];
+
+		// Air-side corner = the edge endpoint OPPOSITE the solid endpoint.
+		// ResolveEdgeAirCorner re-reads the field to make the same solid
+		// decision; we already know which endpoint is solid (solidX/Y/Z), so
+		// derive the air corner directly from the edge's two corners.
+		MarchingCubes.EdgeCorners(edge, out int c0x, out int c0y, out int c0z, out int c1x, out int c1y, out int c1z);
+		int airX, airY, airZ;
+		if (solidX == cx + c0x && solidY == cy + c0y && solidZ == cz + c0z)
+		{
+			// c0 is solid -> c1 is air.
+			airX = cx + c1x; airY = cy + c1y; airZ = cz + c1z;
+		}
+		else
+		{
+			// c1 is solid -> c0 is air.
+			airX = cx + c0x; airY = cy + c0y; airZ = cz + c0z;
+		}
+
+		// Light: solid check on the padded field (the surface was built from
+		// it), torch-emitter exemption, then the wide-field sample.
+		int slidx = airX + nx * (airY + ny * airZ);
 		if (solidField[slidx] != 0f)
 		{
-			// The surface vertex borders a SOLID voxel. Normally that means the
-			// vertex is hidden under the solid (light 0). But a SOLID voxel that
-			// is itself a light source (a torch) must render at FULL brightness:
-			// the material shader does ALBEDO = tint * light, so light 0 would
-			// make the torch's own faces black (and, being a bright emissive
-			// material, visually transparent — the "see-through" hole). Give the
-			// emitter's own surface full light so it reads as a glowing block.
 			if (paddedBlockLight != null && paddedBlockLight[slidx] > 0)
 			{
-				light = 1f;
+				light = 1f; // the emitter's own surface renders at full brightness
 				return;
 			}
 			light = 0f;
 			return;
 		}
-		int wx = wx0 + ax - 1;
-		int wy = ay - 1;
-		int wz = wz0 + az - 1;
-		int half = lpx / 2 - 1; // wide field X offset = cs + maxLight
-		int ix = wx - wx0 + half;
+		int wx = airX - 1; // air voxel in chunk-local coords -> wide-field index
+		int wy = airY - 1;
+		int wz = airZ - 1;
+		int ix = wx + wideHalf;
 		int iy = wy + 1;
-		int iz = wz - wz0 + half;
+		int iz = wz + wideHalf;
 		if (ix < 0 || ix >= lpx || iy < 0 || iy >= lpy || iz < 0 || iz >= lpz)
 		{
 			light = 1f; // outside the wide field: open sky
 			return;
 		}
-		// The wide field is already normalized 0..1 and the response curve has
-		// already been applied, so the value is the final per-vertex light.
 		light = wideLight[ix + lpx * (iy + lpy * iz)];
 	}
 

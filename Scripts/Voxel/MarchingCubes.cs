@@ -544,4 +544,25 @@ public static class MarchingCubes
 		Vector3 solidEnd = values[c0] >= 0.5f ? Corners[c0] : Corners[c1];
 		return n.Dot(solidEnd - points[edge]);
 	}
+
+	/// <summary>
+	/// The two lattice-offset corner coordinates of a crossed edge (each corner
+	/// is one of the cell's 8 corners, expressed as 0/1 offsets from the cell
+	/// origin). Returned as plain ints so a caller can add them to the cell
+	/// origin without allocating <see cref="Vector3"/>s. Used by the combined
+	/// vertex resolver to derive the air-side corner from the already-known
+	/// solid-side corner without re-reading the field.
+	/// </summary>
+	public static void EdgeCorners(
+		int edge,
+		out int c0x, out int c0y, out int c0z,
+		out int c1x, out int c1y, out int c1z)
+	{
+		int i0 = Edges[edge][0];
+		int i1 = Edges[edge][1];
+		Vector3 p0 = Corners[i0];
+		Vector3 p1 = Corners[i1];
+		c0x = (int)p0.X; c0y = (int)p0.Y; c0z = (int)p0.Z;
+		c1x = (int)p1.X; c1y = (int)p1.Y; c1z = (int)p1.Z;
+	}
 }
