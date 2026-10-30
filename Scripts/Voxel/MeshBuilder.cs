@@ -66,13 +66,14 @@ public static class MeshBuilder
 
 	/// <summary>
 	/// Like <see cref="BuildVisual"/>, but reuses a precomputed wide light field
-	/// (<paramref name="cachedLight"/>, the RAW 0..maxLight field, plus its
+	/// (<paramref name="cachedLight"/>, the ALREADY-CURVED field — the response
+	/// curve was applied once when it was computed and cached — plus its
 	/// <paramref name="cachedBlockLit"/> mask) instead of running the expensive
-	/// flood fill. The response curve is still applied to the cached field (so
-	/// the output is identical to the non-cached path). This is the Path 1
-	/// "mesh-only" fast path: geometry + collision rebuild without the light
-	/// flood fill. When <paramref name="cachedLight"/> is null it falls back to
-	/// computing the field inline (the default path).
+	/// flood fill. The response curve is NOT re-applied (the field is already
+	/// curved), so this skips both the flood fill and the ~560k Math.Pow curve
+	/// calls — the Path 1 "mesh-only" fast path. When
+	/// <paramref name="cachedLight"/> is null it falls back to computing the
+	/// field inline and curving it (the default path).
 	/// </summary>
 	public static ArrayMesh BuildVisual(
 		ChunkData chunk,
@@ -140,19 +141,23 @@ public static class MeshBuilder
 		// way. solidQuery / blockLightQuery still drive face culling below.
 		float[] lightFieldF;
 		byte[] blockLitF;
+		bool lightAlreadyCurved;
 		if (cachedLight != null)
 		{
-			// The cached field is the RAW 0..maxLight field (the response curve
-			// has NOT been applied yet, matching the freshly-computed field), so
-			// it is curved below exactly as the inline path is. Clone it so the
-			// in-place curve (ApplyLightResponse) does NOT corrupt the chunk's
-			// cached field for the next instant edit.
-			lightFieldF = (float[])cachedLight.Clone();
+			// PATH 1 CACHED-LIGHT FAST PATH: the cached field is ALREADY the
+			// response-curved field (curve applied once when computed+cached).
+			// Use it directly — no clone, no ApplyLightResponse, no Math.Pow.
+			// The curve is deterministic from the field + session-constant curve
+			// params, so reusing it is correct; a param change rebuilds all
+			// chunks and re-caches with the new curve.
+			lightFieldF = cachedLight;
 			blockLitF = cachedBlockLit;
+			lightAlreadyCurved = true;
 		}
 		else
 		{
 			lightFieldF = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborChunkQuery, maxLight, out blockLitF);
+			lightAlreadyCurved = false;
 		}
 		// The wide field extends maxLight voxels beyond the chunk on every side
 		// (see BuildLightFieldWide), so its X/Z extent is 2*cs+2*maxLight+2.
@@ -163,8 +168,12 @@ public static class MeshBuilder
 		// per-vertex light read gets it. The field is already normalized 0..1,
 		// so the result stays continuous (no re-quantization). Full-light voxels
 		// (1.0) are unaffected by the curves. The block-lit mask exempts torch
-		// light from the falloff/gamma (see ApplyLightResponse).
-		ApplyLightResponse(lightFieldF, minLight, lightFalloff, darknessGamma, blockLitF);
+		// light from the falloff/gamma (see ApplyLightResponse). SKIPPED when the
+		// field is the cached already-curved field (Path 1 fast path).
+		if (!lightAlreadyCurved)
+		{
+			ApplyLightResponse(lightFieldF, minLight, lightFalloff, darknessGamma, blockLitF);
+		}
 		System.Func<int, int, int, float> lightQuery = (x, y, z) =>
 		{
 			int ix = x - wx0 + wideHalf;
@@ -341,12 +350,14 @@ public static class MeshBuilder
 			collisionOut, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, null, null);
 
 	/// <summary>
-	/// Like <see cref="BuildVisualMarchingCubes"/>, but reuses a precomputed wide
-	/// light field (<paramref name="cachedLight"/>, RAW 0..maxLight, plus its
-	/// <paramref name="cachedBlockLit"/> mask) instead of running the flood fill.
-	/// The response curve is still applied to the cached field (output identical
-	/// to the non-cached path). Path 1 "mesh-only" fast path. Null = compute
-	/// inline (default).
+	/// Like <see cref="BuildVisualMarchingCubes"/>, but reuses a precomputed
+	/// wide light field (<paramref name="cachedLight"/>, the ALREADY-CURVED
+	/// field — the response curve was applied once when it was computed and
+	/// cached — plus its <paramref name="cachedBlockLit"/> mask) instead of
+	/// running the flood fill. The response curve is NOT re-applied (the field
+	/// is already curved), so this skips both the flood fill and the ~560k
+	/// Math.Pow curve calls — the Path 1 "mesh-only" fast path. Null = compute
+	/// inline and curve it (default).
 	/// </summary>
 	public static ArrayMesh BuildVisualMarchingCubes(
 		ChunkData chunk,
@@ -440,18 +451,26 @@ public static class MeshBuilder
 		// to whichever field is used below, so the output is identical either way.
 		float[] wideLight;
 		byte[] blockLitW;
+		bool lightAlreadyCurved;
 		if (cachedLight != null)
 		{
-			// The cached field is the RAW 0..maxLight field (response curve NOT
-			// yet applied). Clone it so the in-place curve (ApplyLightResponse)
-			// below does NOT corrupt the chunk's cached field for the next
-			// instant edit.
-			wideLight = (float[])cachedLight.Clone();
+			// PATH 1 CACHED-LIGHT FAST PATH: the cached field is ALREADY the
+			// response-curved field (the curve was applied once when it was
+			// computed and cached). So we use it directly — NO clone, NO
+			// ApplyLightResponse, NO Math.Pow. This is what makes the instant
+			// edit path cheap: the light stage is just an array read, not
+			// ~560k transcendental calls. The curve is deterministic from the
+			// field + the (session-constant) curve params, so reusing it is
+			// correct. (Changing the curve params triggers a full rebuild of all
+			// chunks, which recomputes + re-caches the field with the new curve.)
+			wideLight = cachedLight;
 			blockLitW = cachedBlockLit;
+			lightAlreadyCurved = true;
 		}
 		else
 		{
 			wideLight = BuildLightFieldWide(chunk, wx0, wz0, sx, sy, neighborQuery, maxLight, out blockLitW);
+			lightAlreadyCurved = false;
 		}
 		int wx0w = wx0;
 		int wz0w = wz0;
@@ -476,8 +495,12 @@ public static class MeshBuilder
 		// per-vertex light read gets it. The field is already normalized 0..1,
 		// so the result stays continuous (no re-quantization). Full-light voxels
 		// (1.0) are unaffected by the curves. The block-lit mask exempts torch
-		// light from the falloff/gamma (see ApplyLightResponse).
-		ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma, blockLitW);
+		// light from the falloff/gamma (see ApplyLightResponse). SKIPPED when the
+		// field is the cached already-curved field (Path 1 fast path).
+		if (!lightAlreadyCurved)
+		{
+			ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma, blockLitW);
+		}
 		if (_prof) { _tLight = _sw.ElapsedMilliseconds; }
 
 		// 2) Extract the single air|solid isosurface.
@@ -1322,11 +1345,11 @@ public static class MeshBuilder
 		}
 		else
 		{
-			// PATH 1 (decoupled): light was already computed and is being reused
-			// (cached), so only the surface build runs here — no flood fill. This
-			// is what makes a geometry/collision rebuild cheap. The cached field
-			// is the RAW 0..maxLight field (curve applied inside the sub-builder),
-			// matching the freshly-computed path.
+			// PATH 1 (decoupled): light was already computed, curved, and cached,
+			// so only the surface build runs here — no flood fill AND no response
+			// curve (the cached field is already curved). This is what makes a
+			// geometry/collision rebuild cheap: the light stage is just an array
+			// read, not ~560k Math.Pow calls.
 			ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
 				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, lightField, blockLit)
 				: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma, lightField, blockLit);

@@ -209,13 +209,18 @@ public partial class VoxelChunk : Node3D
 			try
 			{
 				// Path 1 (light decoupling): compute the wide light field HERE
-				// (the expensive flood fill, off the main thread) and expose it
-				// to the mesh build via the cached-light overload, instead of
-				// letting MeshBuilder.Build compute it internally. The result is
-				// identical (same field, same response curve), but now the field
-				// is available to cache on the main thread for the instant edit
-				// path to reuse without re-running the flood fill.
+				// (the expensive flood fill, off the main thread), APPLY the
+				// response curve to it (in place — it's a freshly-computed array
+				// we own), and expose the ALREADY-CURVED field to the mesh build
+				// via the cached-light overload. The cached-light overload does
+				// NOT re-apply the curve (the field is already curved), so the
+				// instant edit path that reuses this cached field skips both the
+				// flood fill AND the ~560k Math.Pow curve calls. The curve is
+				// deterministic from the field + the session-constant curve
+				// params, so caching the curved result is correct; a curve-param
+				// change rebuilds all chunks and re-caches with the new curve.
 				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out byte[] blockLit);
+				MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 				float[] pendingLight = lightField;
 				byte[] pendingBlockLit = blockLit;
 
@@ -223,8 +228,9 @@ public partial class VoxelChunk : Node3D
 				// Collision is the visual surface exactly: MeshBuilder.Build
 				// emits the visual triangles (face quads in Faces mode, the MC
 				// isosurface in MarchingCubes mode) into the collision soup, so
-				// the player stands on exactly what is drawn. The precomputed
-				// lightField is passed so the internal flood fill is skipped.
+				// the player stands on exactly what is drawn. The precomputed,
+				// already-curved lightField is passed so the internal flood fill
+				// AND the response curve are both skipped (Path 1 fast path).
 				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, pendingLight, pendingBlockLit);
 
 				// Store the prebuilt results for the main thread. Written here,
@@ -326,8 +332,13 @@ public partial class VoxelChunk : Node3D
 		if (!hasCachedLight)
 		{
 			// First build: compute the field on the main thread (the synchronous
-			// path has no worker) and cache it for future instant edits.
+			// path has no worker), apply the response curve (in place), and cache
+			// the CURVED field for future instant edits (which reuse it without
+			// re-curving). The curve is deterministic from the field + the
+			// session-constant curve params, so caching the curved result is
+			// correct; a curve-param change rebuilds all chunks and re-caches.
 			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out blockLit);
+			MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 			_cachedLightField = lightField;
 			_cachedBlockLit = blockLit;
 		}
