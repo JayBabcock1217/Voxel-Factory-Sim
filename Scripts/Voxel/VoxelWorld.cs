@@ -435,7 +435,13 @@ public partial class VoxelWorld : Node3D
 	// edit, broken into every part of the process. Only the INSTANT-EDIT path
 	// records into it (the async chunk builds do NOT), so the log tracks edits
 	// only. Accumulates on the main thread (edits are main-thread); Flush()
-	// prints + clears. Auto-stops after N edits.
+	// prints + clears.
+	//
+	// Re-armable: it auto-stops after MaxEdits lines (so an old session's edits
+	// don't flood the log), but ANY later edit re-arms it (the "first edit after
+	// the budget ran out" prints the re-arm banner). So it never silently goes
+	// dead — if you're editing and see no [Edit] lines, the instant-edit path
+	// itself isn't running (check SubCellMeshing / the chunk gate).
 	internal sealed class EditProfile
 	{
 		public const int MaxEdits = 40;
@@ -445,10 +451,18 @@ public partial class VoxelWorld : Node3D
 		// Ticks per stage (accumulated across the sub-cells of one edit).
 		public static long TSnapshot, TLight, TRemeshMesh, TRemeshApply, TCross, TTotal;
 		public static int RemeshCells, LightCells, CrossChunks, CrossCells;
+		public static bool _pathEnteredLogged = false;
 		public static void Start() { TSnapshot = TLight = TRemeshMesh = TRemeshApply = TCross = 0; RemeshCells = LightCells = CrossChunks = CrossCells = 0; }
 		public static void Flush(string tag)
 		{
-			if (!Enabled) { return; }
+			if (!Enabled)
+			{
+				// Budget ran out in a previous session: re-arm, so the user
+				// always gets fresh [Edit] lines when they edit again.
+				Enabled = true;
+				Printed = 0;
+				GD.Print("[Edit] (profiler re-armed after budget)");
+			}
 			Printed++;
 			long inv = System.TimeSpan.TicksPerMillisecond;
 			long total = TTotal / inv, snap = TSnapshot / inv, light = TLight / inv,
@@ -1613,6 +1627,11 @@ public partial class VoxelWorld : Node3D
 				//      update the cached wide field, and re-mesh the sub-cells
 				//      whose light actually changed. So the edit's light is
 				//      instant too (torches glow, caves brighten, in this frame).
+				if (!EditProfile._pathEnteredLogged)
+				{
+					EditProfile._pathEnteredLogged = true;
+					GD.Print($"[Edit] (sub-cell instant path entered; SubCellMeshing={SubCellMeshing})");
+				}
 				EditProfile.Start();
 				long _e0 = EditProfile.Sw.ElapsedTicks;
 				var _snap = instantChunk.SnapshotForEdit(this);
