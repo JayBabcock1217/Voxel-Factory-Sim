@@ -3177,6 +3177,16 @@ public partial class VoxelWorld : Node3D
 				// flagged NeedsMesh (the player must never stand on invisible
 				// ground while its mesh/collision is in flight).
 				chunk.SetCollisionEnabled(true);
+
+				if (SubCellMeshing)
+				{
+					// Sub-cell mode: attach each sub-cell's built shape to a live
+					// body (created lazily, only for in-radius chunks) so the
+					// player collides with the sub-cell terrain. This is the
+					// per-frame body gate that keeps the total Jolt body count
+					// under the cap — far chunks' sub-cells stay body-less.
+					chunk.SetSubCellCollisionEnabled(true);
+				}
 			}
 		}
 	}

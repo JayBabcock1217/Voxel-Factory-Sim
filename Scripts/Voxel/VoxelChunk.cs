@@ -130,6 +130,12 @@ public partial class VoxelChunk : Node3D
 		public int CellIndex;
 		public int CellX, CellY, CellZ;
 		public MeshInstance3D Mesh;
+		// The physics body for this sub-cell. Created LAZILY and only while the
+		// chunk is within the player's collision radius (see
+		// SetSubCellCollisionEnabled): a 16-chunk render distance would otherwise
+		// create ~76k StaticBody3Ds (64/chunk), far past Jolt's 10240 body cap.
+		// The mesh node is always present (visual is always built).
+		public StaticBody3D Body;
 		public CollisionShape3D Shape;
 		public ConcavePolygonShape3D BuiltShape;
 		public bool HasGeometry;
@@ -161,9 +167,12 @@ public partial class VoxelChunk : Node3D
 
 	/// <summary>
 	/// Gets or lazily creates the sub-cell node for a sub-cell's local voxel
-	/// origin (cellX, cellY, cellZ). The node holds a MeshInstance3D + a
-	/// StaticBody3D/CollisionShape3D (per-sub-cell collision). Only created when
-	/// the sub-cell is about to get geometry, so empty sub-cells cost nothing.
+	/// origin (cellX, cellY, cellZ). The node always holds a MeshInstance3D
+	/// (visual, always built). The physics body + collision shape are created
+	/// LAZILY by <see cref="SetSubCellCollisionEnabled"/> and only while the
+	/// chunk is within the player's collision radius — a 16-chunk render
+	/// distance would otherwise create ~76k StaticBody3Ds (64 per chunk), far
+	/// past Jolt's 10240 body cap.
 	/// </summary>
 	private SubCellNode GetOrCreateSubCell(int cellX, int cellY, int cellZ)
 	{
@@ -183,13 +192,61 @@ public partial class VoxelChunk : Node3D
 		node.Mesh.Layers = VoxelWorld.TerrainRenderLayer;
 		AddChild(node.Mesh);
 
-		var body = new StaticBody3D { Name = $"Collision_{idx}" };
-		AddChild(body);
-		node.Shape = new CollisionShape3D { Name = "Shape" };
-		body.AddChild(node.Shape);
-
 		_subCells[idx] = node;
 		return node;
+	}
+
+	/// <summary>
+	/// Attaches (or detaches) the collision shape of EVERY sub-cell of this
+	/// chunk. Called every frame for chunks within the player's collision radius
+	/// (enabled = true); the rest are skipped, which is what keeps their far
+	/// sub-cells body-less and the total Jolt body count under the cap. When
+	/// enabled, each sub-cell's body is created lazily (only if it has geometry)
+	/// and its built shape is attached, so the player collides with the sub-cell
+	/// terrain. This is the sub-cell analogue of <see cref="SetCollisionEnabled"/>.
+	/// </summary>
+	public void SetSubCellCollisionEnabled(bool enabled)
+	{
+		foreach (var node in _subCells.Values)
+		{
+			SetSubCellCollisionEnabled(node.CellX, node.CellY, node.CellZ, enabled);
+		}
+	}
+
+	/// <summary>
+	/// Ensures one sub-cell's physics body exists when <paramref name="enabled"/>
+	/// is true (creating it lazily) and applies its built shape, or clears the
+	/// shape when disabled. Only in-radius chunks ever call this with enabled =
+	/// true, so only they pay for a Jolt body.
+	/// </summary>
+	private void SetSubCellCollisionEnabled(int cellX, int cellY, int cellZ, bool enabled)
+	{
+		if (!_subCells.TryGetValue(VoxelWorld.CellIndex(cellX, cellY, cellZ), out SubCellNode node))
+		{
+			return;
+		}
+		if (enabled)
+		{
+			if (node.Body == null && node.HasGeometry && node.BuiltShape != null)
+			{
+				// Create the body + shape lazily. Only in-radius chunks with
+				// geometry pay this, so the total body count stays under Jolt's cap.
+				node.Body = new StaticBody3D { Name = $"Collision_{node.CellIndex}" };
+				AddChild(node.Body);
+				node.Shape = new CollisionShape3D { Name = "Shape" };
+				node.Body.AddChild(node.Shape);
+			}
+			if (node.Body != null)
+			{
+				node.Shape.Shape = node.HasGeometry ? node.BuiltShape : null;
+			}
+		}
+		else if (node.Body != null)
+		{
+			// Far chunk: drop the shape (the body stays but holds no shape, so it
+			// costs no narrow-phase work), so re-entering the radius is cheap.
+			node.Shape.Shape = null;
+		}
 	}
 
 	/// <summary>
@@ -290,24 +347,30 @@ public partial class VoxelChunk : Node3D
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
 
-		// Apply to the sub-cell's nodes.
+		// Apply to the sub-cell's nodes. The visual mesh is always set. The
+		// collision shape is stashed (BuiltShape) and the body/shape wiring is
+		// deferred to SetSubCellCollisionEnabled — which only attaches the shape
+		// to a live body when the chunk is within the player's collision radius.
+		// This keeps the instant edit from creating a Jolt body for a far sub-cell
+		// (the per-frame radius gate handles the attach when the player is near).
 		var node = GetOrCreateSubCell(cellX, cellY, cellZ);
+		node.Mesh.Mesh = visual;
 		if (visual != null && collision != null && collision.Count > 0)
 		{
-			node.Mesh.Mesh = visual;
 			var shape = new ConcavePolygonShape3D();
 			shape.SetFaces(collision.ToArray());
 			node.BuiltShape = shape;
-			node.Shape.Shape = shape;
 			node.HasGeometry = true;
 		}
 		else
 		{
 			// Empty region: clear the sub-cell's geometry + collision.
-			node.Mesh.Mesh = null;
-			node.Shape.Shape = null;
 			node.BuiltShape = null;
 			node.HasGeometry = false;
+			if (node.Body != null)
+			{
+				node.Shape.Shape = null;
+			}
 		}
 	}
 
@@ -670,19 +733,21 @@ public partial class VoxelChunk : Node3D
 				foreach (var (cxx, cyy, czz, mesh, col) in _pendingSubCells)
 				{
 					var node = GetOrCreateSubCell(cxx, cyy, czz);
+					node.Mesh.Mesh = mesh;
+					// Collision is stashed, not attached: the per-frame
+					// collision-radius gate (SetSubCellCollisionEnabled) only
+					// creates the body + attaches the shape while this chunk is
+					// near the player. This is what keeps the total Jolt body
+					// count under the cap (far chunks have no bodies).
 					if (mesh != null && col != null && col.Count > 0)
 					{
-						node.Mesh.Mesh = mesh;
 						var shape = new ConcavePolygonShape3D();
 						shape.SetFaces(col.ToArray());
 						node.BuiltShape = shape;
-						node.Shape.Shape = shape;
 						node.HasGeometry = true;
 					}
 					else
 					{
-						node.Mesh.Mesh = null;
-						node.Shape.Shape = null;
 						node.BuiltShape = null;
 						node.HasGeometry = false;
 					}
@@ -741,6 +806,12 @@ public partial class VoxelChunk : Node3D
 	/// Assigns the per-chunk concave collision shape when <paramref name="enabled"/> is
 	/// true, or removes it (nulls the shape) when false. The shape is (re)built by
 	/// <see cref="Rebuild"/> and cached; toggling is O(1).
+	///
+	/// In sub-cell mode (Option B) this is a NO-OP: the whole-chunk <c>_shape</c>
+	/// is never assigned (collision lives on the per-sub-cell bodies, managed by
+	/// <see cref="SetSubCellCollisionEnabled"/>). The <c>_collisionReady</c> flag is
+	/// still set (it gates spawn), so this runs but assigns null to the whole-chunk
+	/// shape — harmless.
 	/// </summary>
 	public void SetCollisionEnabled(bool enabled)
 	{
