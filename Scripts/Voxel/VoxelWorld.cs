@@ -1514,35 +1514,39 @@ public partial class VoxelWorld : Node3D
 				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
 				int _lightCells = 0;
 
-				// (2) LIGHT: local recompute over a box around the edit. The box
-				//     radius is maxLight (a light source's reach) so the box
-				//     boundary is genuinely unaffected by the edit (the local
-				//     recompute's fixed-condition assumption holds). A plain
-				//     geometry edit (no light source) still needs a small box:
-				//     opening a sky column or blocking light changes light out to
-				//     the sky-line, so use maxLight to be safe.
-				int range = MaxLightLevel;
-				if (range < 1) range = 1;
-				int lpx = 2 * ChunkSizeXZ + 2 * range + 2;
+				// The wide field dims (fixed for the session) + the edit's wide
+				// position. The field's half-extent (cs + fieldRange + 1) is the
+				// padding past the chunk, where the FIXED boundary conditions live.
+				int fieldRange = MaxLightLevel;
+				if (fieldRange < 1) fieldRange = 1;
+				int lpx = 2 * ChunkSizeXZ + 2 * fieldRange + 2;
 				int lpy = ChunkHeight + 2;
-				int lpz = 2 * ChunkSizeXZ + 2 * range + 2;
+				int lpz = 2 * ChunkSizeXZ + 2 * fieldRange + 2;
 				int half = lpx / 2 - 1; // center chunk origin -> wide index
-				// The edit's chunk-local (lx, ly, lz) -> wide field lattice.
 				int wx = _instantEditLocal.X + half;
 				int wy = _instantEditLocal.Y + 1;
 				int wz = _instantEditLocal.Z + half;
-				int bx0 = Mathf.Max(0, wx - range), bx1 = Mathf.Min(lpx - 1, wx + range);
-				int by0 = Mathf.Max(0, wy - range), by1 = Mathf.Min(lpy - 1, wy + range);
-				int bz0 = Mathf.Max(0, wz - range), bz1 = Mathf.Min(lpz - 1, wz + range);
 
-				// Tell the local recompute which voxel to patch in the CACHED wide
-				// volumes (its solid state + block-light source changed). Read the
-				// authoritative post-edit values straight from the chunk's data —
-				// SetVoxel already wrote them, so this covers place/break/replace
-				// and any multi-voxel edit's last write (the voxel the player sees).
+				// The edit's post-edit material + block-light level (read from the
+				// chunk data — SetVoxel already wrote them). This sizes the light
+				// box: a light source only affects its OWN radius, so the recompute
+				// box is that radius, NOT the full MaxLightLevel. (A plain geometry
+				// edit — no source — needs the full field range: opening a sky
+				// column or blocking light changes light out to the sky-line.)
 				byte _patchMat = instantChunk.Data.Get(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
 				byte _patchLight = instantChunk.Data.GetBlockLight(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
 				instantChunk.SetPatchVoxel(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z, _patchMat, _patchLight);
+				int boxRange = _patchLight > 0 ? Mathf.Max(1, LightRadiusFor(_patchLight)) : fieldRange;
+
+				// (2) LIGHT: local recompute over a box around the edit. The box
+				//     radius is the edit's light radius (a source only reaches that
+				//     far), so the box boundary — one radius past the edit — is
+				//     genuinely unaffected by the edit (the fixed-condition
+				//     assumption holds). Much smaller than the full field for a
+				//     torch (13 vs 30), which is what keeps the edit fast.
+				int bx0 = Mathf.Max(0, wx - boxRange), bx1 = Mathf.Min(lpx - 1, wx + boxRange);
+				int by0 = Mathf.Max(0, wy - boxRange), by1 = Mathf.Min(lpy - 1, wy + boxRange);
+				int bz0 = Mathf.Max(0, wz - boxRange), bz1 = Mathf.Min(lpz - 1, wz + boxRange);
 
 				// Run the local recompute over the cached wide volumes (no 385k
 				// rebuild) and collect the sub-cells whose light changed.
@@ -1569,20 +1573,22 @@ public partial class VoxelWorld : Node3D
 				// chunks — so no patch is needed; the boundary hand-off seeds it.)
 				if (_patchLight > 0)
 				{
-					int lightR = LightRadiusFor(_patchLight);
+					int lightR = boxRange; // = LightRadiusFor(_patchLight)
 					if (lightR >= ChunkSizeXZ - _instantEditLocal.X - 1
 						|| lightR >= ChunkSizeXZ - _instantEditLocal.Z - 1
 						|| _instantEditLocal.X + 1 + lightR >= ChunkSizeXZ
 						|| _instantEditLocal.Z + 1 + lightR >= ChunkSizeXZ)
 					{
 						// The light crosses a border. Only the 8 ORTHOGONAL+DIAGONAL
-						// neighbours of the edited chunk can be lit (lightR <=
-						// MaxLight < ChunkSizeXZ, so the lit region never spans two
-						// chunks on one axis). Run a local recompute on each loaded
-						// one, centred on the source (wide-world coords of the source).
-						int srcWx = _instantEditLocal.X + half;
-						int srcWz = _instantEditLocal.Z + half;
-						int srcWy = _instantEditLocal.Y + 1;
+						// neighbours of the edited chunk can be lit (lightR <
+						// ChunkSizeXZ, so the lit region never spans two chunks on
+						// one axis). Run a local recompute on each loaded one,
+						// centred on the source, with the SAME tight box (lightR),
+						// so a torch only recomputes its 13-voxel reach — not the
+						// full MaxLightLevel box.
+						int srcWx = wx;
+						int srcWz = wz;
+						int srcWy = wy;
 						for (int dx = -1; dx <= 1; dx++)
 							for (int dz = -1; dz <= 1; dz++)
 							{
