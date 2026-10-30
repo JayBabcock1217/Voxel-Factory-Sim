@@ -66,6 +66,7 @@ LodRenderDistanceChunks = 128
 LodDistanceBase = 1.5
 MaterialConfig = ExtResource("11_materialconfig")
 MachineConfig = ExtResource("3_bmxlf")
+EnableRegenerateShortcut = false
 
 [node name="Player" type="Node3D" parent="." unique_id=481445753]
 

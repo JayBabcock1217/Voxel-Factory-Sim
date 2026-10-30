@@ -452,6 +452,7 @@ public partial class VoxelWorld : Node3D
 		public static long TSnapshot, TLight, TRemeshMesh, TRemeshApply, TCross, TTotal;
 		public static int RemeshCells, LightCells, CrossChunks, CrossCells;
 		public static bool _pathEnteredLogged = false;
+		public static bool _gateLogged = false;
 		public static void Start() { TSnapshot = TLight = TRemeshMesh = TRemeshApply = TCross = 0; RemeshCells = LightCells = CrossChunks = CrossCells = 0; }
 		public static void Flush(string tag)
 		{
@@ -1581,6 +1582,13 @@ public partial class VoxelWorld : Node3D
 		// the main thread is no longer contending with the build dispatch, so the
 		// first edits are fast too (the light + mesh are still computed in this
 		// frame — still instant).
+		if (!EditProfile._gateLogged && _instantRebuildChunk != null)
+		{
+			EditProfile._gateLogged = true;
+			var _g = (VoxelChunk)_instantRebuildChunk;
+			GD.Print($"[Edit] GATE chunk=({_g.Coord.X},{_g.Coord.Y}) dataReady={_g.DataReady} " +
+				$"inFlight={_g.MeshBuildInFlight} subCell={SubCellMeshing}");
+		}
 		if (_instantRebuildChunk is VoxelChunk instantChunk
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
@@ -1902,6 +1910,12 @@ public partial class VoxelWorld : Node3D
 			// so it rebuilds synchronously as soon as generation completes. An
 			// in-flight async build self-clears here; a freed chunk just falls
 			// through to the normal budget path.
+			if (_instantRebuildChunk != null)
+			{
+				var _pc = (VoxelChunk)_instantRebuildChunk;
+				GD.Print($"[Edit] GATE-MISSED chunk=({_pc.Coord.X},{_pc.Coord.Y}) dataReady={_pc.DataReady} " +
+					$"inFlight={_pc.MeshBuildInFlight} subCell={SubCellMeshing} (clearing pending)");
+			}
 			_instantRebuildChunk = null;
 		}
 
