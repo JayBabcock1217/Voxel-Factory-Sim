@@ -809,7 +809,6 @@ public static class MeshBuilder
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int lastMaterial = palette.MaterialCount;
-		Vector3 origin = new Vector3(wx0, 0, wz0);
 
 		// The sub-cell's padded field MUST mirror the WHOLE-CHUNK lattice
 		// structure exactly: a 1-voxel shell around the region PLUS 1 extra
@@ -923,18 +922,27 @@ public static class MeshBuilder
 		// to wide index (wideHalf, wideHalf). A world voxel (wx,wy,wz) maps to
 		// wide index (wx - wx0 + wideHalf, wy + 1, wz - wz0 + wideHalf).
 
+		// WORLD-POSITION transform. ResolveEdge returns the lattice position in
+		// SUB-CELL-LOCAL lattice coords (0..px-1), NOT whole-chunk lattice
+		// coords. A local lattice point (latticeX) maps to chunk-local voxel
+		// (offX + latticeX - 1) (offX = rx0-1 is the padded field's chunk-local
+		// origin). So the world position is (offX + latticeX - 1 + chunkOrigin)
+		// * voxelSize + half. The whole-chunk path has offX=0 (its field starts
+		// at the chunk origin), so it reduces to (latticeX - 1 + origin)*vs+half.
+		// Forgetting the offX offset compresses every sub-cell toward the chunk
+		// origin (the "scaled down" look) and opens a gap at each sub-cell
+		// border.
+		Vector3 localOrigin = new Vector3(wx0 + offX, offY, wz0 + offZ);
+		Vector3 half = new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
+
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
 			int ma, mb, mc;
 			float la, lb, lc;
-			// ResolveVertex samples the WIDE field by the air corner's world
-			// voxel. But ResolveVertex is written for the whole-chunk padded
-			// field (it indexes wideLight by airX-1 + wideHalf, where airX is a
-			// whole-chunk lattice coord). For a sub-cell, the air corner is a
-			// sub-cell-local lattice coord, so I resolve the position/material
-			// via ResolveEdge (sub-cell field) and compute the light inline from
-			// the wide field using the air corner's CHUNK-LOCAL -> world mapping.
+			// Resolve each vertex in the SUB-CELL field (position in local
+			// lattice coords + material + wide-field light sampled by the air
+			// corner's world voxel).
 			ResolveSubCellVertex(solid, field, wideLight, blockLight,
 				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
 				offX, offY, offZ,
@@ -951,10 +959,9 @@ public static class MeshBuilder
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC,
 				out pc, out mc, out lc);
 
-			Vector3 half = new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
-			pa = (pa - Vector3.One + origin) * voxelSize + half;
-			pb = (pb - Vector3.One + origin) * voxelSize + half;
-			pc = (pc - Vector3.One + origin) * voxelSize + half;
+			pa = (pa - Vector3.One + localOrigin) * voxelSize + half;
+			pb = (pb - Vector3.One + localOrigin) * voxelSize + half;
+			pc = (pc - Vector3.One + localOrigin) * voxelSize + half;
 
 			Vector3 n = (pb - pa).Cross(pc - pa);
 			if (n.LengthSquared() < 1e-12f)
