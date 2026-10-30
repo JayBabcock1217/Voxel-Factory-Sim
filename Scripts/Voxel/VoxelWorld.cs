@@ -1512,7 +1512,6 @@ public partial class VoxelWorld : Node3D
 
 				// TEMP (Option B diagnosis): time the whole instant sub-cell edit.
 				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
-				long _tLight = 0;
 				int _lightCells = 0;
 
 				// (2) LIGHT: local recompute over a box around the edit. The box
@@ -1536,14 +1535,18 @@ public partial class VoxelWorld : Node3D
 				int by0 = Mathf.Max(0, wy - range), by1 = Mathf.Min(lpy - 1, wy + range);
 				int bz0 = Mathf.Max(0, wz - range), bz1 = Mathf.Min(lpz - 1, wz + range);
 
-				// Build the wide solid+block volumes (cheap: a few hundred k voxel
-				// reads) and run the local recompute. The snapshot gives the
-				// neighbour data; the center chunk is instantChunk.Data.
-				MeshBuilder.BuildWideVolumes(instantChunk.Data, instantChunk.Coord.X * ChunkSizeXZ, instantChunk.Coord.Y * ChunkSizeXZ,
-					ChunkSizeXZ, ChunkHeight,
-					c => _snap.TryGetValue(c, out ChunkData d) ? d : null,
-					out byte[] wideSolid, out byte[] wideBlock, lpx, lpy, lpz);
-				var _lightChanged = instantChunk.RecomputeLightLocal(this, wideSolid, wideBlock,
+				// Tell the local recompute which voxel to patch in the CACHED wide
+				// volumes (its solid state + block-light source changed). Read the
+				// authoritative post-edit values straight from the chunk's data —
+				// SetVoxel already wrote them, so this covers place/break/replace
+				// and any multi-voxel edit's last write (the voxel the player sees).
+				byte _patchMat = instantChunk.Data.Get(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
+				byte _patchLight = instantChunk.Data.GetBlockLight(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
+				instantChunk.SetPatchVoxel(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z, _patchMat, _patchLight);
+
+				// Run the local recompute over the cached wide volumes (no 385k
+				// rebuild) and collect the sub-cells whose light changed.
+				var _lightChanged = instantChunk.RecomputeLightLocal(this,
 					lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1);
 				if (InstantBuildProfile) _lightCells = _lightChanged.Count;
 				_dirty.UnionWith(_lightChanged);
@@ -1553,7 +1556,6 @@ public partial class VoxelWorld : Node3D
 				{
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
-				if (InstantBuildProfile) _tLight = _sw.ElapsedMilliseconds;
 				if (InstantBuildProfile && InstantBuildProfileCount < 12)
 				{
 					InstantBuildProfileCount++;

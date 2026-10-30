@@ -83,6 +83,11 @@ public partial class VoxelChunk : Node3D
 	// thread — same happens-before safety as _pendingMesh).
 	private float[] _pendingLight;
 	private byte[] _pendingBlockLit;
+	// Option B lighting: the in-flight full build's wide SOLID|AIR + BLOCK-LIGHT
+	// volumes, committed to _cachedWideSolid/_cachedWideBlock in ApplyBuildResult
+	// (same happens-before safety as _pendingLight).
+	private byte[] _pendingWideSolid;
+	private byte[] _pendingWideBlock;
 	// Option B: set by the async Rebuild when sub-cell mode is on, telling
 	// ApplyBuildResult (main thread) to run RebuildAllSubCells (the node wiring
 	// for the sub-cell meshes + collision must happen on the main thread). The
@@ -107,6 +112,22 @@ public partial class VoxelChunk : Node3D
 	// thread only.
 	private float[] _cachedLightField;
 	private byte[] _cachedBlockLit;
+	// Option B lighting: the wide light field's SOLID|AIR + BLOCK-LIGHT volumes
+	// (the inputs to SkyLight.Compute/ComputeLocal), cached so the instant-edit
+	// local recompute does NOT rebuild the full 385k-voxel volume on every edit.
+	// They are immutable for a given solid+source state; a geometry edit only
+	// changes the edited voxels' values (PatchedVoxels), and a fresh async full
+	// rebuild recomputes + replaces them. null until the first build.
+	private byte[] _cachedWideSolid;
+	private byte[] _cachedWideBlock;
+	// Option B lighting: the most-recent edited voxel (chunk-local) + its
+	// material + block-light level, recorded by the instant-edit path so
+	// RecomputeLightLocal can patch the cached wide volumes at just that voxel
+	// (instead of rebuilding the full 385k-voxel volume). Cleared after use.
+	private Vector3I _patchVoxel;
+	private int _patchMaterial;
+	private byte _patchLight;
+	private bool _hasPatch;
 
 	// ------------------------------------------------------------------
 	// Sub-cell (dirty-region) meshing — Option B (see VoxelWorld.SubCellMeshing).
@@ -272,6 +293,21 @@ public partial class VoxelChunk : Node3D
 		=> world.SnapshotNeighbours(Coord, includeCentre: true);
 
 	/// <summary>
+	/// Records the edited voxel (chunk-local) + its material + block-light level
+	/// so the next <see cref="ReconsumeLightLocal"/> can patch the CACHED wide
+	/// solid/block volumes at just that voxel — instead of rebuilding the full
+	/// 385k-voxel volume (the cost that made the instant edit ~300 ms). Called
+	/// by the instant-edit path before the local recompute.
+	/// </summary>
+	public void SetPatchVoxel(int lx, int ly, int lz, int material, byte light)
+	{
+		_patchVoxel = new Vector3I(lx, ly, lz);
+		_patchMaterial = material;
+		_patchLight = light;
+		_hasPatch = true;
+	}
+
+	/// <summary>
 	/// LOCAL light recompute (Option B lighting): recompute the wide light field
 	/// only over a box around the edit (instead of the full 3×3-chunk flood fill),
 	/// re-applying the response curve, and return the sub-cells whose per-vertex
@@ -280,21 +316,37 @@ public partial class VoxelChunk : Node3D
 	/// full rebuild. The box is clamped to the wide field; the boundary values are
 	/// reused as fixed conditions (see <see cref="SkyLight.ComputeLocal"/>).
 	///
-	/// The caller supplies the wide field's solid+blockLight volumes (built once
-	/// for the edit) and the box in WIDE-FIELD lattice coords. Returns the set of
+	/// Uses the CACHED wide solid/block volumes (built by the last full rebuild),
+	/// patching only the edited voxel's values (see <see cref="SetPatchVoxel"/>)
+	/// so it does NOT rebuild the full volume on every edit. Returns the set of
 	/// sub-cells to re-mesh (may be empty if the light didn't actually change).
 	/// </summary>
 	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightLocal(
 		VoxelWorld world,
-		byte[] wideSolid,
-		byte[] wideBlock,
 		int lpx, int lpy, int lpz,
 		int bx0, int by0, int bz0, int bx1, int by1, int bz1)
 	{
 		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
-		if (_cachedLightField == null)
+		if (_cachedLightField == null || _cachedWideSolid == null)
 		{
 			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+
+		// Patch the cached wide volumes at the edited voxel (its solid state and
+		// block-light source changed; everything else is unchanged).
+		if (_hasPatch)
+		{
+			int half = lpx / 2 - 1;
+			int wx = _patchVoxel.X + half;
+			int wy = _patchVoxel.Y + 1;
+			int wz = _patchVoxel.Z + half;
+			if (wx >= 0 && wx < lpx && wy >= 0 && wy < lpy && wz >= 0 && wz < lpz)
+			{
+				int idx = wx + lpx * (wy + lpy * wz);
+				_cachedWideSolid[idx] = (byte)(_patchMaterial != 0 ? 1 : 0);
+				_cachedWideBlock[idx] = _patchLight;
+			}
+			_hasPatch = false;
 		}
 
 		// Snapshot the box before the recompute so we can diff which voxels
@@ -312,12 +364,12 @@ public partial class VoxelChunk : Node3D
 
 		// The local max-BFS recompute (writes the normalized 0..1 field in place
 		// over the box; boundary values are the fixed conditions).
-		SkyLight.ComputeLocal(wideSolid, wideBlock, _cachedLightField, _cachedBlockLit,
+		SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
 			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
 
 		// Re-apply the response curve ONLY over the box (it's a pure per-voxel
 		// remap, so it's safe to apply to just the changed region).
-		ApplyLightResponseBox(world, before, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
 
 		// Diff: a voxel changed if its light differs by more than a tiny epsilon.
 		// Map each changed voxel to the sub-cell(s) whose vertices sample it.
@@ -348,7 +400,7 @@ public partial class VoxelChunk : Node3D
 
 	/// <summary>Applies the response curve to a box of the light field in place.</summary>
 	private void ApplyLightResponseBox(
-		VoxelWorld world, float[] before, int total, int bx, int by, int bz,
+		VoxelWorld world, int total, int bx, int by, int bz,
 		int bx0, int by0, int bz0, int lpx, int lpy, int lpz)
 	{
 		float exp = world.LightFalloff >= 1f ? world.LightFalloff : 1f;
@@ -448,7 +500,8 @@ public partial class VoxelChunk : Node3D
 		if (_cachedLightField == null)
 		{
 			_cachedLightField = MeshBuilder.BuildLightFieldWide(
-				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel, out _cachedBlockLit);
+				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel,
+				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock);
 			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
 		}
 		int maxLight = world.MaxLightLevel;
@@ -598,10 +651,16 @@ public partial class VoxelChunk : Node3D
 				// the field + the session-constant curve params, so caching the
 				// curved result is correct; a curve-param change rebuilds all
 				// chunks and re-caches with the new curve.
-				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out byte[] blockLit);
+				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
+					out byte[] blockLit, out byte[] wideSolid, out byte[] wideBlock);
 				MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 				float[] pendingLight = lightField;
 				byte[] pendingBlockLit = blockLit;
+				// Cache the flood fill's input volumes for the instant-edit LOCAL
+				// recompute (Option B): it patches only the edited voxels instead
+				// of rebuilding this 385k-voxel volume on every edit.
+				_pendingWideSolid = wideSolid;
+				_pendingWideBlock = wideBlock;
 
 				if (subCellMode)
 				{
@@ -757,10 +816,13 @@ public partial class VoxelChunk : Node3D
 			// re-curving). The curve is deterministic from the field + the
 			// session-constant curve params, so caching the curved result is
 			// correct; a curve-param change rebuilds all chunks and re-caches.
-			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out blockLit);
+			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
+				out blockLit, out byte[] wideSolid, out byte[] wideBlock);
 			MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 			_cachedLightField = lightField;
 			_cachedBlockLit = blockLit;
+			_cachedWideSolid = wideSolid;
+			_cachedWideBlock = wideBlock;
 		}
 
 		// TEMP (Path 1 diagnosis): time the synchronous surface build so we can
@@ -912,8 +974,12 @@ public partial class VoxelChunk : Node3D
 		{
 			_cachedLightField = _pendingLight;
 			_cachedBlockLit = _pendingBlockLit;
+			_cachedWideSolid = _pendingWideSolid;
+			_cachedWideBlock = _pendingWideBlock;
 			_pendingLight = null;
 			_pendingBlockLit = null;
+			_pendingWideSolid = null;
+			_pendingWideBlock = null;
 		}
 
 		// Only clear the dirty flag when a mesh was actually applied. If the

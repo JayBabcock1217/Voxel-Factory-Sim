@@ -1471,6 +1471,26 @@ public static class MeshBuilder
 		System.Func<Vector2I, ChunkData> neighborQuery,
 		int maxLight,
 		out byte[] blockLit)
+		=> BuildLightFieldWide(chunk, wx0, wz0, cs, sy, neighborQuery, maxLight, out blockLit, out _, out _);
+
+	/// <summary>
+	/// Like <see cref="BuildLightFieldWide(ChunkData, int, int, int, Func{Vector2I, ChunkData}, int, out byte[])"/>
+	/// but also returns the SOLID|AIR and BLOCK-LIGHT volumes the flood fill ran
+	/// over. Callers that recompute light locally later (the instant-edit path,
+	/// Option B) cache these so they don't have to rebuild the full 385k-voxel
+	/// volume on every edit — they patch only the edited voxels instead.
+	/// </summary>
+	public static float[] BuildLightFieldWide(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		int cs,
+		int sy,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		int maxLight,
+		out byte[] blockLit,
+		out byte[] wideSolid,
+		out byte[] wideBlock)
 	{
 		// Clamp the range exactly as SkyLight.Compute does (normalized level, >= 1).
 		int range = maxLight;
@@ -1485,7 +1505,10 @@ public static class MeshBuilder
 		// Center chunk + one full light range per side + 1-voxel pad per side.
 		int px = 2 * cs + 2 * range + 2, py = sy + 2, pz = 2 * cs + 2 * range + 2;
 		BuildWideVolumes(chunk, wx0, wz0, cs, sy, neighborQuery, out byte[] solid, out byte[] block, px, py, pz);
-		return SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
+		float[] field = SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
+		wideSolid = solid;
+		wideBlock = block;
+		return field;
 	}
 
 	/// <summary>
