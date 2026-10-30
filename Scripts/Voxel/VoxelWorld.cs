@@ -1550,6 +1550,35 @@ public partial class VoxelWorld : Node3D
 		{
 			if (SubCellMeshing)
 			{
+				// SETTLE-WINDOW DEFERRAL: while any async first-build is in
+				// flight (the world is still settling after load), the budget
+				// loop's Task.Run builds are churning the thread pool and the
+				// instant edit runs head-on with that churn — the ~150–200 ms
+				// "first edit after load" hitch (the mesh + light are only a few
+				// ms on their own; the cost is the contention). Defer the WHOLE
+				// instant edit to the next frame (keep _instantRebuildChunk set)
+				// so it applies once the build dispatch clears. The edit is still
+				// computed synchronously (in the frame it applies) — light + mesh
+				// are instant relative to that — it just doesn't hitch during the
+				// load-in window. Once the world is settled (no builds in flight)
+				// the edit runs in-frame, every time.
+				bool _anyBuildInFlight = false;
+				foreach (VoxelChunk c in _chunks.Values)
+				{
+					if (c.MeshBuildInFlight)
+					{
+						_anyBuildInFlight = true;
+						break;
+					}
+				}
+				if (_anyBuildInFlight)
+				{
+					// Defer: leave _instantRebuildChunk set; it re-enters this
+					// path next frame. (The budget loop below still runs, so the
+					// builds keep progressing toward settled.)
+					return;
+				}
+
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
 				// edit dirtied. Two kinds of sub-cells change:
 				//  (1) GEOMETRY — the sub-cell(s) whose solid/air state changed
