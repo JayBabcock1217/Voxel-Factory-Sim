@@ -765,6 +765,349 @@ public static class MeshBuilder
 	}
 
 	/// <summary>
+	/// Builds ONE sub-cell's MC surface + collision (Option B / sub-cell
+	/// remeshing). This is the small, fast path: instead of building the whole
+	/// chunk's isosurface (~10k triangles, ~20 ms), it builds only the
+	/// sub-cell's triangles (~1/64th the work, single-digit ms).
+	///
+	/// The sub-cell region is given in CHUNK-LOCAL voxel coords (rx0..rx1 etc.,
+	/// inclusive). A 1-voxel shell around the region is sampled (via the same
+	/// neighbor query the whole-chunk path uses) so the isosurface is
+	/// continuous across sub-cell borders — seams are identical to the
+	/// whole-chunk path. The per-vertex light is sampled from the supplied
+	/// CACHED wide light field (already curved, Path 1), so NO flood fill runs
+	/// here — the light is chunk-wide and reused.
+	///
+	/// Returns the sub-cell's visual <see cref="ArrayMesh"/> and its collision
+	/// triangles (world-space, ready for ConcavePolygonShape3D.SetFaces).
+	/// </summary>
+	public static (ArrayMesh visual, List<Vector3> collision) BuildSubCell(
+		ChunkData chunk,
+		int wx0,
+		int wz0,
+		float voxelSize,
+		VoxelMaterialPalette palette,
+		Vector2I coord,
+		System.Func<Vector2I, ChunkData> neighborQuery,
+		// The sub-cell region in CHUNK-LOCAL voxel coords (inclusive).
+		int rx0, int ry0, int rz0,
+		int rx1, int ry1, int rz1,
+		// The cached, already-curved WIDE light field (Path 1) + its blockLit
+		// mask, sampled by world voxel for per-vertex light. null = uniform
+		// full light (no light sampling).
+		float[] wideLight,
+		byte[] wideBlockLit,
+		int lpx, int lpy, int lpz,
+		// Seam ownership: whether the east/south/diagonal neighbours are loaded
+		// (the +X/+Z boundary cells are drawn only when the neighbour exists,
+		// exactly as the whole-chunk path).
+		bool eastLoaded,
+		bool southLoaded,
+		bool diagLoaded,
+		System.Func<int, int, int, byte> materialQuery = null)
+	{
+		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
+		int lastMaterial = palette.MaterialCount;
+		Vector3 origin = new Vector3(wx0, 0, wz0);
+
+		// The sub-cell's padded field covers the region PLUS a 1-voxel shell on
+		// every side, using the SAME lattice convention as the whole-chunk path:
+		// lattice point (ix,iy,iz) -> LOCAL voxel (ix-1, iy-1, iz-1), where LOCAL
+		// voxel 0 = chunk-local (rx0-1, ry0-1, rz0-1) (the -X/-Y/-Z shell corner).
+		// So the field's local voxel range is 0..(W-1) where W = region + 2 shell,
+		// and the lattice is 0..(W+1) (the extra 1 per axis is the MC lattice
+		// padding, lattice 0 -> local voxel -1).
+		int wX = (rx1 - rx0 + 1) + 2; // local voxel width (region + 1 shell each side)
+		int wY = (ry1 - ry0 + 1) + 2;
+		int wZ = (rz1 - rz0 + 1) + 2;
+		int px = wX + 2, py = wY + 2, pz = wZ + 2; // lattice dims (local + 2 padding)
+
+		// local voxel (lx,ly,lz) -> chunk-local voxel (rx0-1+lx, ry0-1+ly, rz0-1+lz).
+		int offX = rx0 - 1, offY = ry0 - 1, offZ = rz0 - 1;
+
+		// 1) Build the small padded field (material + solid + block light).
+		var field = new float[px * py * pz];
+		var solid = new float[px * py * pz];
+		var blockLight = new byte[px * py * pz];
+		for (int iz = 0; iz < pz; iz++)
+		{
+			for (int iy = 0; iy < py; iy++)
+			{
+				for (int ix = 0; ix < px; ix++)
+				{
+					// Lattice (ix,iy,iz) -> local voxel (ix-1,iy-1,iz-1) -> chunk-local.
+					int vx = offX + (ix - 1);
+					int vy = offY + (iy - 1);
+					int vz = offZ + (iz - 1);
+					float m = SampleMaterial(chunk, sx, sy, sz, coord, neighborQuery, vx, vy, vz);
+					int idx = ix + px * (iy + py * iz);
+					field[idx] = m;
+					solid[idx] = m > 0f ? 1f : 0f;
+					blockLight[idx] = SampleBlockLight(chunk, sx, sy, sz, coord, neighborQuery, vx, vy, vz);
+				}
+			}
+		}
+
+		// 2) Generate the MC isosurface, limited to the region's cells. In the
+		//    local lattice, cell (cx,cy,cz) has corners at lattice (cx..cx+1) ->
+		//    chunk-local voxels (rx0+cx-2 .. rx0+cx-1), i.e. it covers voxels
+		//    [rx0+cx-2, rx0+cx-1]. The region is [rx0, rx1]. A cell covers the
+		//    region iff [rx0+cx-2, rx0+cx-1] intersects [rx0, rx1]
+		//    <=> cx in [1, rx1-rx0+2] = [1, wX-1] (wX = region+2). So the
+		//    region's cells are cx in [1, wX-1], cy in [1, wY-1], cz in [1, wZ-1].
+		int cx0 = 1, cy0 = 1, cz0 = 1;
+		int cx1 = wX - 1, cy1 = wY - 1, cz1 = wZ - 1;
+
+		// Seam ownership within the sub-cell: the +X/+Z boundary cells of the
+		// REGION are drawn only when that side's neighbour sub-cell region is
+		// present. But the seam rule is really about CHUNK borders, not sub-cell
+		// borders. Since a sub-cell's region is strictly inside one chunk (or
+		// spans a chunk border only if the sub-cell straddles it — which it
+		// doesn't; sub-cells are within a chunk), the chunk-seam ownership
+		// (east/south/diag loaded) applies only to the sub-cells on the chunk's
+		// +X/+Z border. For interior sub-cells, all cells are drawn. For the
+		// chunk's +X-border sub-cell, the region's +X boundary cells (cx == the
+		// region's max X, which equals the chunk's +X border) need eastLoaded.
+		// We approximate: a region cell on the region's +X edge is drawn only if
+		// (a) the region's +X edge is NOT the chunk's +X border (interior seam,
+		// always drawn), or (b) it IS the chunk's +X border and eastLoaded.
+		bool regionAtChunkEast = (rx1 >= sx - 1);
+		bool regionAtChunkSouth = (rz1 >= sz - 1);
+
+		var tris = MarchingCubes.Generate(solid, px, py, pz, (cx, cy, cz) =>
+		{
+			// Only cells inside the region.
+			if (cx < cx0 || cx > cx1 || cy < cy0 || cy > cy1 || cz < cz0 || cz > cz1)
+			{
+				return false;
+			}
+			// Chunk-seam ownership for the region's boundary cells that sit on
+			// the chunk's +X/+Z border.
+			if (regionAtChunkEast && cx == cx1 && cz < cz1)
+			{
+				return eastLoaded;
+			}
+			if (regionAtChunkSouth && cz == cz1 && cx < cx1)
+			{
+				return southLoaded;
+			}
+			if (regionAtChunkEast && regionAtChunkSouth && cx == cx1 && cz == cz1)
+			{
+				return eastLoaded && southLoaded && diagLoaded;
+			}
+			return true;
+		});
+
+		// 3) Emit + assemble the small surface (same logic as the whole-chunk
+		//    path, but over the small triangle list). Per-vertex light comes
+		//    from the cached WIDE field (sampled by the air corner's world
+		//    voxel), NOT a local flood fill.
+		var perMaterial = new List<Vector3>[lastMaterial];
+		var perUv = new List<Vector2>[lastMaterial];
+		var perLight = new List<float>[lastMaterial];
+		for (int i = 0; i < lastMaterial; i++)
+		{
+			perMaterial[i] = new List<Vector3>();
+			perUv[i] = new List<Vector2>();
+			perLight[i] = new List<float>();
+		}
+		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<float> lights)>();
+
+		var collision = new List<Vector3>();
+		int wideHalf = (wideLight != null) ? (lpx / 2 - 1) : 0;
+		// The wide field's world offset: the center chunk origin (wx0, wz0) maps
+		// to wide index (wideHalf, wideHalf). A world voxel (wx,wy,wz) maps to
+		// wide index (wx - wx0 + wideHalf, wy + 1, wz - wz0 + wideHalf).
+
+		foreach (var tri in tris)
+		{
+			Vector3 pa, pb, pc;
+			int ma, mb, mc;
+			float la, lb, lc;
+			// ResolveVertex samples the WIDE field by the air corner's world
+			// voxel. But ResolveVertex is written for the whole-chunk padded
+			// field (it indexes wideLight by airX-1 + wideHalf, where airX is a
+			// whole-chunk lattice coord). For a sub-cell, the air corner is a
+			// sub-cell-local lattice coord, so I resolve the position/material
+			// via ResolveEdge (sub-cell field) and compute the light inline from
+			// the wide field using the air corner's CHUNK-LOCAL -> world mapping.
+			ResolveSubCellVertex(solid, field, wideLight, blockLight,
+				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
+				offX, offY, offZ,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA,
+				out pa, out ma, out la);
+			ResolveSubCellVertex(solid, field, wideLight, blockLight,
+				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
+				offX, offY, offZ,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB,
+				out pb, out mb, out lb);
+			ResolveSubCellVertex(solid, field, wideLight, blockLight,
+				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
+				offX, offY, offZ,
+				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC,
+				out pc, out mc, out lc);
+
+			Vector3 half = new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
+			pa = (pa - Vector3.One + origin) * voxelSize + half;
+			pb = (pb - Vector3.One + origin) * voxelSize + half;
+			pc = (pc - Vector3.One + origin) * voxelSize + half;
+
+			Vector3 n = (pb - pa).Cross(pc - pa);
+			if (n.LengthSquared() < 1e-12f)
+			{
+				continue;
+			}
+			n = -n.Normalized();
+
+			bool isMixed = ma != mb || ma != mc;
+			if (isMixed && materialQuery != null)
+			{
+				EmitBlendedTriangle(blended, palette, pa, pb, pc, n, ma, mb, mc, la, lb, lc);
+			}
+			else
+			{
+				int m = ma == mb || ma == mc ? ma : (mb == mc ? mb : mc);
+				if (m < 1 || m > lastMaterial)
+				{
+					continue;
+				}
+				var verts = perMaterial[m - 1];
+				var uvs = perUv[m - 1];
+				var lights = perLight[m - 1];
+				float uvScale = palette.TextureScales[m - 1];
+				verts.Add(pa); verts.Add(n); uvs.Add(PlanarUv(pa, n, uvScale)); lights.Add(la);
+				verts.Add(pb); verts.Add(n); uvs.Add(PlanarUv(pb, n, uvScale)); lights.Add(lb);
+				verts.Add(pc); verts.Add(n); uvs.Add(PlanarUv(pc, n, uvScale)); lights.Add(lc);
+			}
+
+			collision.Add(pa); collision.Add(pb); collision.Add(pc);
+		}
+
+		// 4) Assemble the small ArrayMesh (one surface per material + blends).
+		var mesh = new ArrayMesh();
+		for (int m = 1; m <= lastMaterial; m++)
+		{
+			var verts = perMaterial[m - 1];
+			if (verts.Count == 0)
+			{
+				continue;
+			}
+			var uvs = perUv[m - 1];
+			var lights = perLight[m - 1];
+			var tool = new SurfaceTool();
+			tool.Begin(Mesh.PrimitiveType.Triangles);
+			tool.SetMaterial(palette.Materials[m - 1]);
+			for (int i = 0; i + 1 < verts.Count; i += 2)
+			{
+				tool.SetNormal(verts[i + 1]);
+				tool.SetUV(uvs[i / 2]);
+				tool.SetUV2(new Vector2(lights[i / 2], 0f));
+				tool.AddVertex(verts[i]);
+			}
+			tool.Commit(mesh);
+		}
+		foreach (var entry in blended)
+		{
+			var b = entry.Value;
+			if (b.verts.Count == 0)
+			{
+				continue;
+			}
+			var tool = new SurfaceTool();
+			tool.Begin(Mesh.PrimitiveType.Triangles);
+			tool.SetMaterial(entry.Key);
+			for (int i = 0; i < b.verts.Count; i++)
+			{
+				tool.SetNormal(b.norms[i]);
+				tool.SetUV(b.uvs[i]);
+				tool.SetUV2(new Vector2(b.uv2s[i].X, b.lights[i]));
+				tool.AddVertex(b.verts[i]);
+			}
+			tool.Commit(mesh);
+		}
+
+		return (mesh, collision);
+	}
+
+	/// <summary>
+	/// Resolves one MC triangle vertex for a SUB-CELL build: position + material
+	/// (from the sub-cell's small padded field) + per-vertex light (sampled from
+	/// the CACHED wide light field by the air corner's world voxel). This is the
+	/// sub-cell analogue of <see cref="ResolveVertex"/>: the air corner's
+	/// chunk-local coords are derived from the sub-cell-local lattice coords
+	/// (via the padded origin fX0/fY0/fZ0) and mapped to world voxels to index
+	/// the wide field. The solid/emitter check is on the sub-cell padded field
+	/// (the surface was built from it).
+	/// </summary>
+	private static void ResolveSubCellVertex(
+		float[] solidField,
+		float[] materialField,
+		float[] wideLight,
+		byte[] blockLight,
+		int nx, int ny, int nz,
+		int lpx, int lpy, int lpz,
+		int wideHalf,
+		int wx0, int wz0,
+		int fX0, int fY0, int fZ0,
+		int cx, int cy, int cz,
+		int edge,
+		out Vector3 position,
+		out int material,
+		out float light)
+	{
+		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
+			out position, out int solidX, out int solidY, out int solidZ);
+		material = (int)materialField[solidX + nx * (solidY + ny * solidZ)];
+
+		// Air corner = the edge endpoint opposite the solid endpoint.
+		MarchingCubes.EdgeCorners(edge, out int c0x, out int c0y, out int c0z, out int c1x, out int c1y, out int c1z);
+		int airX, airY, airZ;
+		if (solidX == cx + c0x && solidY == cy + c0y && solidZ == cz + c0z)
+		{
+			airX = cx + c1x; airY = cy + c1y; airZ = cz + c1z;
+		}
+		else
+		{
+			airX = cx + c0x; airY = cy + c0y; airZ = cz + c0z;
+		}
+
+		int slidx = airX + nx * (airY + ny * airZ);
+		if (solidField[slidx] != 0f)
+		{
+			if (blockLight != null && blockLight[slidx] > 0)
+			{
+				light = 1f;
+				return;
+			}
+			light = 0f;
+			return;
+		}
+
+		// Air corner's CHUNK-LOCAL voxel coords -> world voxel -> wide field.
+		// Lattice (airX,airY,airZ) maps to chunk-local voxel (fX0+airX-1, fY0+airY-1, fZ0+airZ-1).
+		int localX = fX0 + airX - 1;
+		int localY = fY0 + airY - 1;
+		int localZ = fZ0 + airZ - 1;
+		if (wideLight == null)
+		{
+			light = 1f;
+			return;
+		}
+		int wx = wx0 + localX;
+		int wy = localY;
+		int wz = wz0 + localZ;
+		int ix = wx - wx0 + wideHalf;
+		int iy = wy + 1;
+		int iz = wz - wz0 + wideHalf;
+		if (ix < 0 || ix >= lpx || iy < 0 || iy >= lpy || iz < 0 || iz >= lpz)
+		{
+			light = 1f; // outside the wide field: open sky
+			return;
+		}
+		light = wideLight[ix + lpx * (iy + lpy * iz)];
+	}
+
+	/// <summary>
 	/// Resolves one MC triangle vertex in a SINGLE pass: its lattice-space
 	/// position, the material index of the solid voxel the crossing came from,
 	/// AND the per-vertex light sampled from the WIDE field (via the air-side

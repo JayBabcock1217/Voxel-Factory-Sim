@@ -651,6 +651,19 @@ public partial class VoxelWorld : Node3D
 			cz, Mathf.Min(cz + CellSizeZ - 1, ChunkSizeXZ - 1));
 
 	/// <summary>
+	/// Static version of <see cref="CellBounds"/> for callers that know the
+	/// chunk's real XZ size and height (e.g. a worker thread that can't touch
+	/// the instance). The cell spans [cx..cx+CellSizeX-1] etc., clamped to
+	/// (chunkXZ-1, chunkHeight-1) so the last cell is short if the chunk isn't
+	/// an exact multiple of the cell size.
+	/// </summary>
+	public static (int x0, int x1, int y0, int y1, int z0, int z1) CellBoundsStatic(int cx, int cy, int cz, int chunkXZ, int chunkHeight)
+		=> (
+			cx, Mathf.Min(cx + CellSizeX - 1, chunkXZ - 1),
+			cy, Mathf.Min(cy + CellSizeY - 1, chunkHeight - 1),
+			cz, Mathf.Min(cz + CellSizeZ - 1, chunkXZ - 1));
+
+	/// <summary>
 	/// All sub-cells whose geometry can change when the region <c>[min..max]</c>
 	/// (chunk-local voxel coords, inclusive) is edited: the cells the region
 	/// touches PLUS the cells adjacent across a cell border (border faces are
@@ -695,6 +708,12 @@ public partial class VoxelWorld : Node3D
 	// 1-ring neighbours keep using the normal async budget. Cleared after it is
 	// applied. Null until the first edit.
 	private VoxelChunk _instantRebuildChunk;
+	// The chunk-LOCAL voxel coords of the most recent edit (set alongside
+	// _instantRebuildChunk by SetVoxel). Used by the sub-cell path (Option B)
+	// to compute which sub-cell(s) the edit dirtied (the sub-cell containing the
+	// voxel + any sub-cell within 1 voxel of a sub-cell border). Only meaningful
+	// when _instantRebuildChunk is non-null.
+	private Vector3I _instantEditLocal;
 	// Millisecond tick when the spawn neighbourhood FIRST reported ready. The
 	// player is not actually spawned until SpawnSettleDelayMs has elapsed since
 	// this — a settling grace period that lets the physics server register the
@@ -1459,7 +1478,72 @@ public partial class VoxelWorld : Node3D
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
 		{
-			instantChunk.RebuildSynchronous(this);
+			if (SubCellMeshing)
+			{
+				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
+				// edit dirtied (the sub-cell containing the edited voxel + any
+				// sub-cell within 1 voxel of a sub-cell border, whose 1-voxel
+				// padding includes the edited voxel). Each is a tiny MC build
+				// (single-digit ms), so the whole edit is fast enough to run
+				// synchronously in this frame — instant. The chunk's wide light
+				// field is reused (cached), so no flood fill; a fresh full
+				// sub-cell-light refresh happens via the async budget (light
+				// lags, Path 1).
+				// Which sub-cell(s) the edited voxel dirties: the sub-cell that
+				// CONTAINS it, plus any sub-cell whose 1-voxel padding includes
+				// it (the padding samples the voxel's neighbours, so a voxel
+				// within 1 voxel of a sub-cell border also changes that
+				// neighbour's surface). A voxel deep inside a sub-cell dirties
+				// just ONE sub-cell — this is what keeps the edit under 10 ms.
+				var _dirty = new HashSet<VoxelCell>();
+				for (int ox = -1; ox <= 1; ox++)
+					for (int oy = -1; oy <= 1; oy++)
+						for (int oz = -1; oz <= 1; oz++)
+						{
+							int px = _instantEditLocal.X + ox;
+							int py = _instantEditLocal.Y + oy;
+							int pz = _instantEditLocal.Z + oz;
+							if (px < 0 || py < 0 || pz < 0
+								|| px >= ChunkSizeXZ || py >= ChunkHeight || pz >= ChunkSizeXZ)
+							{
+								continue; // outside this chunk (the neighbour's problem)
+							}
+							var pc = CellOf(px, py, pz);
+							_dirty.Add(pc);
+						}
+				// One frozen neighbour snapshot serves every dirty sub-cell of
+				// this chunk (they all cull against the same neighbour state),
+				// so compute it once here instead of per sub-cell.
+				var _snap = instantChunk.SnapshotForEdit(this);
+				// TEMP (Option B diagnosis): time the whole instant sub-cell
+				// edit so we can confirm it lands under 10 ms. Gated on
+				// InstantBuildProfile (auto-clears). Removed once tuned.
+				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
+				foreach (var cell in _dirty)
+				{
+					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
+				}
+				if (InstantBuildProfile && InstantBuildProfileCount < 12)
+				{
+					InstantBuildProfileCount++;
+					GD.Print($"[SubCellEdit] chunk ({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
+						$"cells={_dirty.Count} build={_sw.ElapsedMilliseconds} ms");
+					if (InstantBuildProfileCount >= 12)
+					{
+						InstantBuildProfile = false;
+					}
+				}
+				// The geometry is instant. Mark the chunk dirty so the async
+				// budget runs a fresh full rebuild (recomputing the wide light
+				// field with the new solid state, refreshing the cache) — the
+				// "light lags behind" behaviour.
+				instantChunk.NeedsMesh = true;
+			}
+			else
+			{
+				// Whole-chunk sync path (the safe fallback, SubCellMeshing off).
+				instantChunk.RebuildSynchronous(this);
+			}
 			_instantRebuildChunk = null;
 		}
 		else if (!(_instantRebuildChunk is { } pendingInstant && !pendingInstant.DataReady))
@@ -2817,6 +2901,9 @@ public partial class VoxelWorld : Node3D
 		// actually looking at. (Multi-voxel edits like a torch touch a region;
 		// the chunk the player clicked is the one that must appear instantly.)
 		_instantRebuildChunk = chunk;
+		// The chunk-LOCAL coords of the edited voxel, for the sub-cell path to
+		// compute the dirtied sub-cell(s). (lx, v.Y, lz are in scope here.)
+		_instantEditLocal = new Vector3I(lx, v.Y, lz);
 	}
 
 	/// <summary>

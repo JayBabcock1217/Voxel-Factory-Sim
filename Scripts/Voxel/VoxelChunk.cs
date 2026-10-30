@@ -83,16 +83,57 @@ public partial class VoxelChunk : Node3D
 	// thread — same happens-before safety as _pendingMesh).
 	private float[] _pendingLight;
 	private byte[] _pendingBlockLit;
+	// Option B: set by the async Rebuild when sub-cell mode is on, telling
+	// ApplyBuildResult (main thread) to run RebuildAllSubCells (the node wiring
+	// for the sub-cell meshes + collision must happen on the main thread). The
+	// worker only computes the light field; the actual sub-cell MC builds run on
+	// the main thread in ApplyBuildResult (they're small, ~64 × single-digit ms,
+	// spread over the deferred apply — acceptable for a first-build).
+	private bool _pendingSubCellBuild;
+	// Option B: the prebuilt sub-cell results (cell origin + mesh + collision
+	// triangles) computed by the worker, wired to nodes on the main thread by
+	// ApplyBuildResult. Written by the worker, read on the main thread after the
+	// task completes (happens-before via the deferred call).
+	private List<(int x, int y, int z, ArrayMesh mesh, List<Vector3> collision)> _pendingSubCells;
 
 	// Path 1 (light decoupling): the last COMPUTED wide light field for this
-	// chunk (RAW 0..maxLight, response curve NOT yet applied — it is applied at
-	// mesh-build time), plus its blockLit mask. The full (async) build computes
-	// this and stores it; the synchronous INSTANT edit path reuses it to skip
-	// the expensive flood fill, so a placed/broken voxel appears immediately
-	// with its (possibly one-edit-stale) lighting, and the fresh light catches
-	// up on the next full rebuild. Written on the main thread only.
+	// chunk, ALREADY response-curved (the curve is applied once when the field
+	// is computed and cached, so the instant path can reuse it WITHOUT re-running
+	// the ~560k Math.Pow curve calls), plus its blockLit mask. The full (async)
+	// build computes + curves + stores it; the synchronous INSTANT edit path
+	// reuses it to skip BOTH the flood fill and the curve, so a placed/broken
+	// voxel appears immediately with its (possibly one-edit-stale) lighting, and
+	// the fresh light catches up on the next full rebuild. Written on the main
+	// thread only.
 	private float[] _cachedLightField;
 	private byte[] _cachedBlockLit;
+
+	// ------------------------------------------------------------------
+	// Sub-cell (dirty-region) meshing — Option B (see VoxelWorld.SubCellMeshing).
+	// When enabled, the chunk's mesh is kept as a grid of small sub-cells; an
+	// edit rebuilds only the sub-cell(s) it touches (tiny MC build, single-digit
+	// ms) instead of the whole chunk (~20 ms). Each sub-cell has its own
+	// MeshInstance3D + concave CollisionShape3D (collision is ALWAYS rebuilt for
+	// the touched sub-cell, so physics stays correct). The whole-chunk
+	// _meshInstance/_shape are unused in this mode (kept for the fallback path).
+	// ------------------------------------------------------------------
+	private readonly Dictionary<int, SubCellNode> _subCells = new();
+
+	/// <summary>
+	/// One sub-cell's visual + collision nodes. Created lazily when a sub-cell
+	/// first gets geometry. <c>cellIndex</c> is 0..CellsPerChunk-1 (see
+	/// <see cref="VoxelWorld.CellIndex"/>); <c>cellX/Y/Z</c> are the cell's local
+	/// voxel origin (0..ChunkSize-1 per axis).
+	/// </summary>
+	private sealed class SubCellNode
+	{
+		public int CellIndex;
+		public int CellX, CellY, CellZ;
+		public MeshInstance3D Mesh;
+		public CollisionShape3D Shape;
+		public ConcavePolygonShape3D BuiltShape;
+		public bool HasGeometry;
+	}
 
 	public void Initialize(Vector2I coord, ChunkData data)
 	{
@@ -116,6 +157,158 @@ public partial class VoxelChunk : Node3D
 
 		_shape = new CollisionShape3D { Name = "Shape" };
 		body.AddChild(_shape);
+	}
+
+	/// <summary>
+	/// Gets or lazily creates the sub-cell node for a sub-cell's local voxel
+	/// origin (cellX, cellY, cellZ). The node holds a MeshInstance3D + a
+	/// StaticBody3D/CollisionShape3D (per-sub-cell collision). Only created when
+	/// the sub-cell is about to get geometry, so empty sub-cells cost nothing.
+	/// </summary>
+	private SubCellNode GetOrCreateSubCell(int cellX, int cellY, int cellZ)
+	{
+		int idx = VoxelWorld.CellIndex(cellX, cellY, cellZ);
+		if (_subCells.TryGetValue(idx, out SubCellNode existing))
+		{
+			return existing;
+		}
+		var node = new SubCellNode
+		{
+			CellIndex = idx,
+			CellX = cellX,
+			CellY = cellY,
+			CellZ = cellZ,
+		};
+		node.Mesh = new MeshInstance3D { Name = $"Cell_{idx}" };
+		node.Mesh.Layers = VoxelWorld.TerrainRenderLayer;
+		AddChild(node.Mesh);
+
+		var body = new StaticBody3D { Name = $"Collision_{idx}" };
+		AddChild(body);
+		node.Shape = new CollisionShape3D { Name = "Shape" };
+		body.AddChild(node.Shape);
+
+		_subCells[idx] = node;
+		return node;
+	}
+
+	/// <summary>
+	/// Builds ONE sub-cell's MC surface + collision SYNCHRONOUSLY (Option B fast
+	/// path) and applies it to that sub-cell's nodes. This is the small, cheap
+	/// rebuild: a sub-cell is ~1/64th of a chunk, so its MC build is
+	/// single-digit ms — fast enough to run on the main thread in the edit's
+	/// frame (instant). The per-vertex light is sampled from the chunk's CACHED
+	/// wide light field (Path 1), so no flood fill runs here. The sub-cell's
+	/// collision shape is rebuilt in the same frame (collision is ALWAYS updated
+	/// on the edit path — the player can't fall through a freshly placed block).
+	///
+	/// If the sub-cell has no surface (empty region), its mesh + collision are
+	/// cleared (the block was removed).
+	/// </summary>
+	/// <summary>
+	/// The frozen neighbour snapshot for the instant-edit path: all dirty
+	/// sub-cells of this chunk cull against the same neighbour state, so the
+	/// caller computes it once per edit and passes it to every
+	/// <see cref="RebuildSubCell"/> call.
+	/// </summary>
+	public System.Collections.Generic.Dictionary<Vector2I, ChunkData> SnapshotForEdit(VoxelWorld world)
+		=> world.SnapshotNeighbours(Coord, includeCentre: true);
+
+	public void RebuildSubCell(VoxelWorld world, int cellX, int cellY, int cellZ)
+		=> RebuildSubCell(world, cellX, cellY, cellZ, null);
+
+	/// <inheritdoc/>
+	/// <param name="neighbourSnapshot">
+	/// A precomputed frozen neighbour snapshot to reuse (all sub-cells of one
+	/// chunk share it — see the instant-edit path, which computes it once per
+	/// edit and passes it to every dirty sub-cell). Null = compute it here.
+	/// </param>
+	public void RebuildSubCell(
+		VoxelWorld world,
+		int cellX, int cellY, int cellZ,
+		System.Collections.Generic.Dictionary<Vector2I, ChunkData> neighbourSnapshot)
+	{
+		if (!DataReady)
+		{
+			return;
+		}
+
+		int cs = world.ChunkSizeXZ;
+		int wx0 = Coord.X * cs;
+		int wz0 = Coord.Y * cs;
+
+		var data = Data;
+		var palette = world.Palette;
+		float voxelSize = world.VoxelSize;
+		Vector2I coord = Coord;
+
+		// The sub-cell's region (chunk-local voxel coords, inclusive) + clamped
+		// to the chunk's real size (the last cell is short if the chunk isn't an
+		// exact multiple of the cell size).
+		var (x0, x1, y0, y1, z0, z1) = world.CellBounds(cellX, cellY, cellZ);
+
+		// Frozen neighbour snapshot (same as the whole-chunk path) so the
+		// sub-cell's border culling + light sample compute from the same
+		// neighbour state — seams stay identical. Reused across the edit when
+		// the caller supplies it (all sub-cells of the chunk share one).
+		if (neighbourSnapshot == null)
+		{
+			neighbourSnapshot = world.SnapshotNeighbours(Coord, includeCentre: true);
+		}
+		System.Func<Vector2I, ChunkData> neighborQuery = c =>
+			neighbourSnapshot.TryGetValue(c, out ChunkData d) ? d : null;
+		System.Func<int, int, int, byte> materialQuery = world.Palette.BlendEnabled
+			? world.VoxelMaterialForMesh
+			: null;
+
+		// The cached wide light field (Path 1). If none is cached yet (first
+		// build), compute + curve it now (on the main thread) and cache it —
+		// the sub-cell build then samples it. (First builds are budgeted/async
+		// in practice, so this main-thread compute is rare.)
+		if (_cachedLightField == null)
+		{
+			_cachedLightField = MeshBuilder.BuildLightFieldWide(
+				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel, out _cachedBlockLit);
+			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
+		}
+		int maxLight = world.MaxLightLevel;
+		int lpx = 2 * data.SizeX + 2 * maxLight + 2;
+		int lpy = data.SizeY + 2;
+		int lpz = 2 * data.SizeZ + 2 * maxLight + 2;
+
+		// Seam ownership: the +X/+Z boundary cells of a sub-cell on the chunk's
+		// +X/+Z border are drawn only when that side's neighbour chunk is loaded
+		// (same rule as the whole-chunk path).
+		bool eastLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y)) != null;
+		bool southLoaded = neighborQuery(new Vector2I(coord.X, coord.Y + 1)) != null;
+		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
+
+		// The small MC build (single-digit ms).
+		var (visual, collision) = MeshBuilder.BuildSubCell(
+			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
+			x0, y0, z0, x1, y1, z1,
+			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+			eastLoaded, southLoaded, diagLoaded, materialQuery);
+
+		// Apply to the sub-cell's nodes.
+		var node = GetOrCreateSubCell(cellX, cellY, cellZ);
+		if (visual != null && collision != null && collision.Count > 0)
+		{
+			node.Mesh.Mesh = visual;
+			var shape = new ConcavePolygonShape3D();
+			shape.SetFaces(collision.ToArray());
+			node.BuiltShape = shape;
+			node.Shape.Shape = shape;
+			node.HasGeometry = true;
+		}
+		else
+		{
+			// Empty region: clear the sub-cell's geometry + collision.
+			node.Mesh.Mesh = null;
+			node.Shape.Shape = null;
+			node.BuiltShape = null;
+			node.HasGeometry = false;
+		}
 	}
 
 	/// <summary>
@@ -204,6 +397,7 @@ public partial class VoxelChunk : Node3D
 		// dirty until ApplyBuildResult clears the flag, so a drop queued for
 		// this chunk waits the whole rebuild, not just its budgeted slot.
 		NeedsMesh = true;
+		bool subCellMode = world.SubCellMeshing;
 		_meshBuild = Task.Run(() =>
 		{
 			try
@@ -211,26 +405,66 @@ public partial class VoxelChunk : Node3D
 				// Path 1 (light decoupling): compute the wide light field HERE
 				// (the expensive flood fill, off the main thread), APPLY the
 				// response curve to it (in place — it's a freshly-computed array
-				// we own), and expose the ALREADY-CURVED field to the mesh build
-				// via the cached-light overload. The cached-light overload does
-				// NOT re-apply the curve (the field is already curved), so the
-				// instant edit path that reuses this cached field skips both the
-				// flood fill AND the ~560k Math.Pow curve calls. The curve is
-				// deterministic from the field + the session-constant curve
-				// params, so caching the curved result is correct; a curve-param
-				// change rebuilds all chunks and re-caches with the new curve.
+				// we own), and expose the ALREADY-CURVED field to the mesh build.
+				// Both the whole-chunk and sub-cell paths use this cached curved
+				// field, so the instant edit path skips both the flood fill AND
+				// the ~560k Math.Pow curve calls. The curve is deterministic from
+				// the field + the session-constant curve params, so caching the
+				// curved result is correct; a curve-param change rebuilds all
+				// chunks and re-caches with the new curve.
 				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight, out byte[] blockLit);
 				MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 				float[] pendingLight = lightField;
 				byte[] pendingBlockLit = blockLit;
 
-				// All the heavy voxel math happens here, off the main thread.
-				// Collision is the visual surface exactly: MeshBuilder.Build
-				// emits the visual triangles (face quads in Faces mode, the MC
-				// isosurface in MarchingCubes mode) into the collision soup, so
-				// the player stands on exactly what is drawn. The precomputed,
-				// already-curved lightField is passed so the internal flood fill
-				// AND the response curve are both skipped (Path 1 fast path).
+				if (subCellMode)
+				{
+					// OPTION B (sub-cell remeshing): build every sub-cell of this
+					// chunk (each a small MC build sampling the cached wide light
+					// field) HERE, off the main thread. The node wiring (mesh +
+					// collision assignments) must happen on the main thread, so
+					// we stash the prebuilt results and marshal back via
+					// ApplyBuildResult, which wires them up. We also stash the
+					// light field for ApplyBuildResult to commit to the cache.
+					int maxL = maxLight;
+					int lpx = 2 * data.SizeX + 2 * maxL + 2;
+					int lpy = data.SizeY + 2;
+					int lpz = 2 * data.SizeZ + 2 * maxL + 2;
+					bool east = neighborQuery(new Vector2I(coord.X + 1, coord.Y)) != null;
+					bool south = neighborQuery(new Vector2I(coord.X, coord.Y + 1)) != null;
+					bool diag = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
+					var results = new List<(int, int, int, ArrayMesh, List<Vector3>)>();
+					for (int cxx = 0; cxx < data.SizeX; cxx += VoxelWorld.CellSizeX)
+					{
+						for (int cyy = 0; cyy < data.SizeY; cyy += VoxelWorld.CellSizeY)
+						{
+							for (int czz = 0; czz < data.SizeZ; czz += VoxelWorld.CellSizeZ)
+							{
+								var (bx, bx1, by, by1, bz, bz1) = VoxelWorld.CellBoundsStatic(cxx, cyy, czz, data.SizeX, data.SizeY);
+								var (mesh, col) = MeshBuilder.BuildSubCell(
+									data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
+									bx, by, bz, bx1, by1, bz1,
+									lightField, blockLit, lpx, lpy, lpz,
+									east, south, diag, materialQuery);
+								results.Add((cxx, cyy, czz, mesh, col));
+							}
+						}
+					}
+					_pendingLight = pendingLight;
+					_pendingBlockLit = pendingBlockLit;
+					_pendingSubCellBuild = true;
+					_pendingSubCells = results;
+					CallDeferred(nameof(ApplyBuildResult));
+					return;
+				}
+
+				// Whole-chunk path (SubCellMeshing off): the heavy voxel math
+				// happens here, off the main thread. Collision is the visual
+				// surface exactly: MeshBuilder.Build emits the visual triangles
+				// into the collision soup, so the player stands on exactly what
+				// is drawn. The precomputed, already-curved lightField is passed
+				// so the internal flood fill AND the response curve are both
+				// skipped (Path 1 fast path).
 				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, pendingLight, pendingBlockLit);
 
 				// Store the prebuilt results for the main thread. Written here,
@@ -420,22 +654,66 @@ public partial class VoxelChunk : Node3D
 	private void ApplyBuildResult()
 	{
 		_meshBuild = null;
+		bool appliedMesh;
 
-		bool appliedMesh = _pendingMesh != null;
-		if (appliedMesh)
+		// Option B (sub-cell mode): wire up the prebuilt sub-cell results. The
+		// worker computed the per-sub-cell ArrayMesh + collision triangles; this
+		// (main thread) assigns them to the sub-cell nodes. Also hide the
+		// whole-chunk mesh (unused in sub-cell mode). A successful sub-cell
+		// build (results present) counts as "applied" for the NeedsMesh gate.
+		if (_pendingSubCellBuild)
 		{
-			_meshInstance.Mesh = _pendingMesh;
-			_pendingMesh = null;
+			_meshInstance.Mesh = null;
+			appliedMesh = _pendingSubCells != null;
+			if (appliedMesh)
+			{
+				foreach (var (cxx, cyy, czz, mesh, col) in _pendingSubCells)
+				{
+					var node = GetOrCreateSubCell(cxx, cyy, czz);
+					if (mesh != null && col != null && col.Count > 0)
+					{
+						node.Mesh.Mesh = mesh;
+						var shape = new ConcavePolygonShape3D();
+						shape.SetFaces(col.ToArray());
+						node.BuiltShape = shape;
+						node.Shape.Shape = shape;
+						node.HasGeometry = true;
+					}
+					else
+					{
+						node.Mesh.Mesh = null;
+						node.Shape.Shape = null;
+						node.BuiltShape = null;
+						node.HasGeometry = false;
+					}
+				}
+				// The sub-cell shapes are live concave collision now. Flag the
+				// chunk's collision as ready so the spawn gate (which reads
+				// CollisionReady, not the whole-chunk _shape) unlocks — the
+				// whole-chunk _shape stays null in sub-cell mode by design.
+				_collisionReady = true;
+				_pendingSubCells = null;
+			}
+			_pendingSubCellBuild = false;
 		}
-
-		if (_pendingCollision != null)
+		else
 		{
-			var shape = new ConcavePolygonShape3D();
-			shape.SetFaces(_pendingCollision.ToArray());
-			_pendingCollision = null;
-			_builtShape = shape;
-			_collisionReady = true;
-			_shape.Shape = _builtShape;
+			appliedMesh = _pendingMesh != null;
+			if (appliedMesh)
+			{
+				_meshInstance.Mesh = _pendingMesh;
+				_pendingMesh = null;
+			}
+
+			if (_pendingCollision != null)
+			{
+				var shape = new ConcavePolygonShape3D();
+				shape.SetFaces(_pendingCollision.ToArray());
+				_pendingCollision = null;
+				_builtShape = shape;
+				_collisionReady = true;
+				_shape.Shape = _builtShape;
+			}
 		}
 
 		// Commit the freshly-computed wide light field to the chunk's cache

@@ -58,6 +58,7 @@ BiomeNoiseFrequency = 0.001
 FoliageDensity = 0.1
 EnableRocks = false
 MeshMode = 1
+SubCellMeshing = true
 MinLight = 0.011
 MaxLightLevel = 30
 LightFalloff = 15.0
