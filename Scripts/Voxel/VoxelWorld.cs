@@ -431,13 +431,36 @@ public partial class VoxelWorld : Node3D
 	private bool _debugVertexLight = false;
 	internal static bool VertexLightDumpPending;
 
-	// TEMP (Path 1 diagnosis): when true, the synchronous INSTANT edit path
-	// (VoxelChunk.RebuildSynchronous) times its surface build and prints the
-	// per-edit cost — so we can see the cost now that the light flood fill is
-	// skipped (vs the old ~200ms). Auto-clears after a few prints. Off by
-	// default; flip on in the editor to measure one edit session.
-	internal static bool InstantBuildProfile = true;
-	internal static int InstantBuildProfileCount = 0;
+	// TEMP (edit diagnosis): edit-centric profiler. One [Edit] line per instant
+	// edit, broken into every part of the process. Only the INSTANT-EDIT path
+	// records into it (the async chunk builds do NOT), so the log tracks edits
+	// only. Accumulates on the main thread (edits are main-thread); Flush()
+	// prints + clears. Auto-stops after N edits.
+	internal sealed class EditProfile
+	{
+		public const int MaxEdits = 40;
+		public static bool Enabled = true;
+		public static int Printed = 0;
+		public static readonly System.Diagnostics.Stopwatch Sw = System.Diagnostics.Stopwatch.StartNew();
+		// Ticks per stage (accumulated across the sub-cells of one edit).
+		public static long TSnapshot, TLight, TRemeshMesh, TRemeshApply, TCross, TTotal;
+		public static int RemeshCells, LightCells, CrossChunks, CrossCells;
+		public static void Start() { TSnapshot = TLight = TRemeshMesh = TRemeshApply = TCross = 0; RemeshCells = LightCells = CrossChunks = CrossCells = 0; }
+		public static void Flush(string tag)
+		{
+			if (!Enabled) { return; }
+			Printed++;
+			long inv = System.TimeSpan.TicksPerMillisecond;
+			long total = TTotal / inv, snap = TSnapshot / inv, light = TLight / inv,
+				mesh = TRemeshMesh / inv, apply = TRemeshApply / inv, cross = TCross / inv;
+			long other = total - snap - light - mesh - apply - cross;
+			GD.Print($"[Edit] {tag} total={total}ms | snapshot={snap} light={light} " +
+				$"mesh={mesh} apply={apply} cross={cross} other={other} | " +
+				$"remeshCells={RemeshCells} lightCells={LightCells} crossChunks={CrossChunks} crossCells={CrossCells}");
+			Start();
+			if (Printed >= MaxEdits) { Enabled = false; }
+		}
+	}
 
 	/// <summary>
 	/// Applies the <see cref="MinLight"/> floor to a normalized (0..1) light
@@ -1590,7 +1613,10 @@ public partial class VoxelWorld : Node3D
 				//      update the cached wide field, and re-mesh the sub-cells
 				//      whose light actually changed. So the edit's light is
 				//      instant too (torches glow, caves brighten, in this frame).
+				EditProfile.Start();
+				long _e0 = EditProfile.Sw.ElapsedTicks;
 				var _snap = instantChunk.SnapshotForEdit(this);
+				EditProfile.TSnapshot += EditProfile.Sw.ElapsedTicks - _e0;
 
 				// (1) Geometry-dirty sub-cells (solid/air state changed — these
 				// ALWAYS re-mesh). _lightDirty holds the light-dirty sub-cells
@@ -1613,12 +1639,6 @@ public partial class VoxelWorld : Node3D
 							_geometryDirty.Add(gc);
 							_dirty.Add(gc);
 						}
-
-				// TEMP (Option B diagnosis): stage-level timing of the instant
-				// sub-cell edit (light recompute vs re-mesh) to find the cost.
-				var _sw = InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
-				long _lightMs = 0, _remeshMs = 0;
-				int _lightCells = 0;
 
 				// The wide field dims (fixed for the session) + the edit's wide
 				// position. The field's half-extent (cs + fieldRange + 1) is the
@@ -1717,7 +1737,7 @@ public partial class VoxelWorld : Node3D
 				bool lightRecomputed = false;
 				if (anyLightRelevant && worldSettled)
 				{
-					long _lightStart = InstantBuildProfile ? _sw.ElapsedTicks : 0;
+					long _lightStart = EditProfile.Sw.ElapsedTicks;
 					// (2) LIGHT: local recompute over a box around the edit.
 					//     The box radius is sized above (source radius when a
 					//     source is added, full field range otherwise), so the box
@@ -1731,10 +1751,10 @@ public partial class VoxelWorld : Node3D
 					// 385k rebuild) and collect the sub-cells whose light changed.
 					var _lightChanged = instantChunk.RecomputeLightLocal(this,
 						lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1);
-					if (InstantBuildProfile) _lightCells = _lightChanged.Count;
+					EditProfile.LightCells = _lightChanged.Count;
 					_dirty.UnionWith(_lightChanged);
 					lightRecomputed = true;
-					if (InstantBuildProfile) _lightMs += _sw.ElapsedTicks - _lightStart;
+					EditProfile.TLight += EditProfile.Sw.ElapsedTicks - _lightStart;
 				}
 
 				// Re-mesh the dirty sub-cells.
@@ -1745,7 +1765,7 @@ public partial class VoxelWorld : Node3D
 				// produced mesh is byte-identical, so the expensive MC build is
 				// skipped. This is what keeps a torch fast: only the few sub-cells
 				// whose vertices sit in the torch's lit region re-mesh.
-				long _remeshStart = InstantBuildProfile ? _sw.ElapsedTicks : 0;
+				long _remeshStart = EditProfile.Sw.ElapsedTicks;
 				int _remeshCells = 0;
 				foreach (var cell in _dirty)
 				{
@@ -1755,10 +1775,17 @@ public partial class VoxelWorld : Node3D
 					{
 						continue; // light-only, and no sampled light changed -> no re-mesh
 					}
+					long _cellStart = EditProfile.Sw.ElapsedTicks;
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
-					if (InstantBuildProfile) _remeshCells++;
+					long _cellTicks = EditProfile.Sw.ElapsedTicks - _cellStart;
+					// Split the cell's time into the mesh build (RebuildSubCell's
+					// BuildSubCell) vs the apply (node wiring + collision shape) —
+					// RebuildSubCell reports the split via the edit profiler.
+					EditProfile.TRemeshMesh += _cellTicks - (VoxelChunk.LastBuildTicks - VoxelChunk.LastApplyTicks);
+					EditProfile.TRemeshApply += VoxelChunk.LastApplyTicks;
+					_remeshCells++;
 				}
-				if (InstantBuildProfile) _remeshMs += _sw.ElapsedTicks - _remeshStart;
+				EditProfile.RemeshCells = _remeshCells;
 
 				// CROSS-CHUNK LIGHT: if the edit is a light source whose reach
 				// (LightRadiusFor) crosses a chunk border, the neighbouring chunk's
@@ -1770,6 +1797,7 @@ public partial class VoxelWorld : Node3D
 				// sub-cells whose light changed. (Each neighbour's wide field
 				// already carries the source — the wide field spans neighbouring
 				// chunks — so no patch is needed; the boundary hand-off seeds it.)
+				long _crossStart = EditProfile.Sw.ElapsedTicks;
 				if (_patchLight > 0 && worldSettled)
 				{
 					// The SOURCE's real reach (13 for a torch), used for BOTH the
@@ -1821,25 +1849,19 @@ public partial class VoxelWorld : Node3D
 								{
 									neighbour.RebuildSubCell(this, ncell.X, ncell.Y, ncell.Z, nSnap);
 								}
+								EditProfile.CrossChunks++;
+								EditProfile.CrossCells += nChanged.Count;
 							}
 					}
 				}
-				if (InstantBuildProfile && InstantBuildProfileCount < 12)
-				{
-					InstantBuildProfileCount++;
-					long inv = System.TimeSpan.TicksPerMillisecond;
-					long otherMs = _sw.ElapsedMilliseconds - (_lightMs / inv) - (_remeshMs / inv);
-					GD.Print($"[SubCellEdit] chunk ({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
-						$"cells={_dirty.Count} (light={_lightCells}) remesh={_remeshCells} " +
-						$"settled={worldSettled} recompute={(lightSourceChanged || solidChanged)} " +
-						$"boxRange={boxRange} " +
-						$"light={_lightMs / inv}ms remesh={_remeshMs / inv}ms other={otherMs}ms " +
-						$"total={_sw.ElapsedMilliseconds} ms");
-					if (InstantBuildProfileCount >= 12)
-					{
-						InstantBuildProfile = false;
-					}
-				}
+				EditProfile.TCross += EditProfile.Sw.ElapsedTicks - _crossStart;
+
+				// EDIT-CENTRIC PROFILER FLUSH: one [Edit] line per instant edit,
+				// broken into every part of the process (snapshot / light / remesh
+				// mesh / remesh apply / cross-chunk / other). Only edits record.
+				EditProfile.TTotal += EditProfile.Sw.ElapsedTicks - _e0;
+				EditProfile.Flush($"chunk({instantChunk.Coord.X},{instantChunk.Coord.Y}) " +
+					$"settled={worldSettled} boxRange={boxRange}");
 				// The geometry + light are instant. Mark the chunk dirty so the
 				// async budget runs a fresh full rebuild (recomputing the wide
 				// light field with the new solid state, refreshing the cache) — a

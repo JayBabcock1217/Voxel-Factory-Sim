@@ -402,13 +402,6 @@ public static class MeshBuilder
 		int lastMaterial = palette.MaterialCount;
 		Vector3 origin = new Vector3(wx0, 0, wz0);
 
-		// TEMP (Path 1 diagnosis): per-stage timing for the MC surface build,
-		// so we can see which sub-stage eats the ~50ms and target it. Gated on
-		// VoxelWorld.InstantBuildProfile (auto-clears). Removed once tuned.
-		bool _prof = VoxelWorld.InstantBuildProfile;
-		var _sw = _prof ? System.Diagnostics.Stopwatch.StartNew() : null;
-		long _tField = 0, _tLight = 0, _tGen = 0, _tEmit = 0, _tMesh = 0;
-
 		// 1) Build the padded field: material index per lattice point, air
 		//    (0) everywhere outside the chunk data. A parallel binary
 		//    solid|air field (1/0) drives marching cubes itself: feeding raw
@@ -436,8 +429,6 @@ public static class MeshBuilder
 				}
 			}
 		}
-		if (_prof) { _tField = _sw.ElapsedMilliseconds; }
-
 		// 1b) Light: flood-fill a WIDE 3x3-chunk region (self + 8 neighbours)
 		//     so sky light propagates a full 15-voxel radius across chunk seams
 		//     (caves spanning a seam no longer stay dark on one side) and the
@@ -501,8 +492,6 @@ public static class MeshBuilder
 		{
 			ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma, blockLitW);
 		}
-		if (_prof) { _tLight = _sw.ElapsedMilliseconds; }
-
 		// 2) Extract the single air|solid isosurface.
 		//    Ownership: each chunk draws only its +X/+Z side boundary cells
 		//    (the -X/-Z side is owned by the negative-side neighbour), so a
@@ -556,8 +545,6 @@ public static class MeshBuilder
 				// must be real data, so require east, south AND diagonal.
 				return eastLoaded && southLoaded && diagLoaded;
 			});
-		if (_prof) { _tGen = _sw.ElapsedMilliseconds; }
-
 		// 3) Resolve every vertex (lattice position + material of the solid
 		//    voxel the crossing came from) and group triangles by material.
 		var perMaterial = new List<Vector3>[lastMaterial]; // [pos, normal] pairs
@@ -673,8 +660,6 @@ public static class MeshBuilder
 				collisionOut.Add(pc);
 			}
 		}
-		if (_prof) { _tEmit = _sw.ElapsedMilliseconds; }
-
 		// 4) Emit one flat-shaded surface per material.
 		var mesh = new ArrayMesh();
 		for (int m = 1; m <= lastMaterial; m++)
@@ -746,19 +731,6 @@ public static class MeshBuilder
 				.Select(System.Linq.Enumerable.OrderBy(byLight, kv => kv.Key),
 					kv => $"{(kv.Key / 100f):F2}:{kv.Value}"));
 			GD.Print($"[VTEX-LIGHT] chunk {coord}: {dbgLight.Count} verts min={mn:F2} max={mx:F2} histogram(light:count)= [{hist}]");
-		}
-
-		if (_prof)
-		{
-			_sw.Stop();
-			_tMesh = _sw.ElapsedMilliseconds;
-			// Cumulative markers -> per-stage deltas. On the cached-light path the
-			// light stage is just the field clone + ApplyLightResponse (small); on
-			// the inline path it includes the flood fill. We report field / gen /
-			// emit / mesh as deltas plus the total so we can see the split.
-			GD.Print($"[MCStage] chunk ({coord.X},{coord.Y}) " +
-				$"field={_tField} light={_tLight - _tField} gen={_tGen - _tLight} " +
-				$"emit={_tEmit - _tGen} mesh={_tMesh - _tEmit} TOTAL={_tMesh} ms");
 		}
 
 		return mesh;
@@ -834,7 +806,6 @@ public static class MeshBuilder
 		int offX = rx0 - 1, offY = ry0 - 1, offZ = rz0 - 1;
 
 		// 1) Build the small padded field (material + solid + block light).
-		var _fsw = VoxelWorld.InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
 		var field = new float[px * py * pz];
 		var solid = new float[px * py * pz];
 		var blockLight = new byte[px * py * pz];
@@ -856,7 +827,6 @@ public static class MeshBuilder
 				}
 			}
 		}
-		long _fieldMs = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 
 		// 2) Generate the MC isosurface, limited to the region's cells. In the
 		//    local lattice, cell (cx,cy,cz) has corners at lattice (cx..cx+1) ->
@@ -879,7 +849,6 @@ public static class MeshBuilder
 		bool regionAtChunkEast = (rx1 >= sx - 1);
 		bool regionAtChunkSouth = (rz1 >= sz - 1);
 
-		long _mcStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		var tris = MarchingCubes.Generate(solid, px, py, pz, (cx, cy, cz) =>
 		{
 			// Only cells inside the region.
@@ -903,7 +872,6 @@ public static class MeshBuilder
 			}
 			return true;
 		});
-		long _mcMs = _fsw != null ? _fsw.ElapsedMilliseconds - _mcStart : 0;
 
 		// 3) Emit + assemble the small surface (same logic as the whole-chunk
 		//    path, but over the small triangle list). Per-vertex light comes
@@ -939,7 +907,6 @@ public static class MeshBuilder
 		Vector3 localOrigin = new Vector3(wx0 + offX, offY, wz0 + offZ);
 		Vector3 half = new Vector3(0.5f, 0.5f, 0.5f) * voxelSize;
 
-		long _emitStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		foreach (var tri in tris)
 		{
 			Vector3 pa, pb, pc;
@@ -999,9 +966,7 @@ public static class MeshBuilder
 			collision.Add(pa); collision.Add(pb); collision.Add(pc);
 		}
 
-		long _emitMs = _fsw != null ? _fsw.ElapsedMilliseconds - _emitStart : 0;
 		// 4) Assemble the small ArrayMesh (one surface per material + blends).
-		long _asmStart = _fsw != null ? _fsw.ElapsedMilliseconds : 0;
 		var mesh = new ArrayMesh();
 		for (int m = 1; m <= lastMaterial; m++)
 		{
@@ -1044,12 +1009,6 @@ public static class MeshBuilder
 			tool.Commit(mesh);
 		}
 
-		long _asmMs = _fsw != null ? _fsw.ElapsedMilliseconds - _asmStart : 0;
-		if (VoxelWorld.InstantBuildProfile && VoxelWorld.InstantBuildProfileCount < 12)
-		{
-			GD.Print($"[SubCellBuild] field={_fieldMs}ms mc={_mcMs}ms emit={_emitMs}ms assemble={_asmMs}ms " +
-				$"tris={tris.Count} verts={collision.Count / 3} region=({wX}x{wY}x{wZ})");
-		}
 		return (mesh, collision);
 	}
 

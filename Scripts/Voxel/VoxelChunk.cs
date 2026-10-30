@@ -142,6 +142,12 @@ public partial class VoxelChunk : Node3D
 	private int _patchWideIndex; // wide lattice index of the edited voxel (-1 = unknown)
 	private bool _hasPatch;
 
+	// TEMP (edit diagnosis): the last RebuildSubCell's BuildSubCell vs apply
+	// tick split, so VoxelWorld's edit profiler can split remesh into
+	// mesh-build vs node-apply. Main-thread only (edits are synchronous).
+	internal static long LastBuildTicks;
+	internal static long LastApplyTicks;
+
 	// ------------------------------------------------------------------
 	// Sub-cell (dirty-region) meshing — Option B (see VoxelWorld.SubCellMeshing).
 	// When enabled, the chunk's mesh is kept as a grid of small sub-cells; an
@@ -816,14 +822,17 @@ public partial class VoxelChunk : Node3D
 		bool southLoaded = neighborQuery(new Vector2I(coord.X, coord.Y + 1)) != null;
 		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
 
-		// The small MC build (single-digit ms).
-		var _t0 = VoxelWorld.InstantBuildProfile ? System.Diagnostics.Stopwatch.StartNew() : null;
+		// The small MC build. Split the cost into the mesh build (BuildSubCell)
+		// vs the apply (node wiring + collision shape) for the edit profiler.
+		LastBuildTicks = 0;
+		LastApplyTicks = 0;
+		var _t0 = System.Diagnostics.Stopwatch.StartNew();
 		var (visual, collision) = MeshBuilder.BuildSubCell(
 			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 			x0, y0, z0, x1, y1, z1,
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
-		long _buildMs = _t0 != null ? _t0.ElapsedMilliseconds : 0;
+		LastBuildTicks = _t0.ElapsedTicks;
 
 		// Apply to the sub-cell's nodes. The visual mesh is always set. The
 		// collision shape is stashed (BuiltShape) and the body/shape wiring is
@@ -831,7 +840,6 @@ public partial class VoxelChunk : Node3D
 		// to a live body when the chunk is within the player's collision radius.
 		// This keeps the instant edit from creating a Jolt body for a far sub-cell
 		// (the per-frame radius gate handles the attach when the player is near).
-		long _t1 = VoxelWorld.InstantBuildProfile ? _t0.ElapsedMilliseconds : 0;
 		var node = GetOrCreateSubCell(cellX, cellY, cellZ);
 		node.Mesh.Mesh = visual;
 		if (visual != null && collision != null && collision.Count > 0)
@@ -851,12 +859,7 @@ public partial class VoxelChunk : Node3D
 				node.Shape.Shape = null;
 			}
 		}
-		long _applyMs = VoxelWorld.InstantBuildProfile ? _t0.ElapsedMilliseconds - _t1 : 0;
-		if (VoxelWorld.InstantBuildProfile && VoxelWorld.InstantBuildProfileCount < 12)
-		{
-			GD.Print($"[SubCellMesh] cell ({cellX},{cellY},{cellZ}) build={_buildMs}ms apply={_applyMs}ms " +
-				$"hasGeom={(visual != null)} collisionVerts={collision?.Count ?? 0}");
-		}
+		LastApplyTicks = _t0.ElapsedTicks - LastBuildTicks;
 	}
 
 	/// <summary>
@@ -1144,13 +1147,6 @@ public partial class VoxelChunk : Node3D
 			_cachedWideBlock = wideBlock;
 		}
 
-		// TEMP (Path 1 diagnosis): time the synchronous surface build so we can
-		// see the per-edit cost now that the flood fill is skipped. Gated on a
-		// static one-shot flag so it prints only a few times. Removed once we
-		// know the number.
-		bool profileInstant = VoxelWorld.InstantBuildProfile;
-		var sw = profileInstant ? System.Diagnostics.Stopwatch.StartNew() : null;
-
 		// The heavy voxel math, on the main thread (synchronous fast path). The
 		// precomputed lightField is passed so the internal flood fill is skipped
 		// (Path 1). Output is identical to the full build modulo the light value.
@@ -1159,21 +1155,6 @@ public partial class VoxelChunk : Node3D
 			neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery,
 			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma,
 			lightField, blockLit);
-
-		if (profileInstant)
-		{
-			sw.Stop();
-			GD.Print($"[InstantBuild] chunk ({Coord.X},{Coord.Y}) cachedLight={hasCachedLight}: " +
-				$"build={sw.ElapsedMilliseconds} ms — {collision.Count / 3} tris");
-			if (VoxelWorld.InstantBuildProfileCount < 12)
-			{
-				VoxelWorld.InstantBuildProfileCount++;
-			}
-			else
-			{
-				VoxelWorld.InstantBuildProfile = false;
-			}
-		}
 
 		// Apply the result NOW (same frame). The same wiring ApplyBuildResult
 		// does, but inline so there is no deferred hop.
