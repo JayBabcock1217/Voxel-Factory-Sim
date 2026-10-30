@@ -171,12 +171,6 @@ public partial class VoxelChunk : Node3D
 	private int _patchWideIndex; // wide lattice index of the edited voxel (-1 = unknown)
 	private bool _hasPatch;
 
-	// TEMP (edit diagnosis): the last RebuildSubCell's BuildSubCell vs apply
-	// tick split, so VoxelWorld's edit profiler can split remesh into
-	// mesh-build vs node-apply. Main-thread only (edits are synchronous).
-	internal static long LastBuildTicks;
-	internal static long LastApplyTicks;
-
 	// ------------------------------------------------------------------
 	// Sub-cell (dirty-region) meshing — Option B (see VoxelWorld.SubCellMeshing).
 	// When enabled, the chunk's mesh is kept as a grid of small sub-cells; an
@@ -853,15 +847,13 @@ public partial class VoxelChunk : Node3D
 
 		// The small MC build. Split the cost into the mesh build (BuildSubCell)
 		// vs the apply (node wiring + collision shape) for the edit profiler.
-		LastBuildTicks = 0;
-		LastApplyTicks = 0;
 		var _t0 = System.Diagnostics.Stopwatch.StartNew();
 		var (visual, collision) = MeshBuilder.BuildSubCell(
 			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 			x0, y0, z0, x1, y1, z1,
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
-		LastBuildTicks = _t0.ElapsedTicks;
+		VoxelWorld.EditProfile.LastBuildTicks = _t0.ElapsedTicks;
 
 		// Apply to the sub-cell's nodes. The visual mesh is always set. The
 		// collision shape is stashed (BuiltShape) and the body/shape wiring is
@@ -888,7 +880,7 @@ public partial class VoxelChunk : Node3D
 				node.Shape.Shape = null;
 			}
 		}
-		LastApplyTicks = _t0.ElapsedTicks - LastBuildTicks;
+		VoxelWorld.EditProfile.LastApplyTicks = _t0.ElapsedTicks - VoxelWorld.EditProfile.LastBuildTicks;
 	}
 
 	/// <summary>

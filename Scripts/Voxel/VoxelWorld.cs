@@ -451,8 +451,10 @@ public partial class VoxelWorld : Node3D
 		// Ticks per stage (accumulated across the sub-cells of one edit).
 		public static long TSnapshot, TLight, TRemeshMesh, TRemeshApply, TCross, TTotal;
 		public static int RemeshCells, LightCells, CrossChunks, CrossCells;
-		public static bool _pathEnteredLogged = false;
-		public static bool _gateLogged = false;
+		// The last RebuildSubCell's BuildSubCell vs apply tick split, reported
+		// back by VoxelChunk.RebuildSubCell so the remesh stage can be split
+		// into mesh-build vs node-apply. Main-thread only (edits are synchronous).
+		public static long LastBuildTicks, LastApplyTicks;
 		public static void Start() { TSnapshot = TLight = TRemeshMesh = TRemeshApply = TCross = 0; RemeshCells = LightCells = CrossChunks = CrossCells = 0; }
 		public static void Flush(string tag)
 		{
@@ -1589,13 +1591,6 @@ public partial class VoxelWorld : Node3D
 		// the main thread is no longer contending with the build dispatch, so the
 		// first edits are fast too (the light + mesh are still computed in this
 		// frame — still instant).
-		if (!EditProfile._gateLogged && _instantRebuildChunk != null)
-		{
-			EditProfile._gateLogged = true;
-			var _g = (VoxelChunk)_instantRebuildChunk;
-			GD.Print($"[Edit] GATE chunk=({_g.Coord.X},{_g.Coord.Y}) dataReady={_g.DataReady} " +
-				$"inFlight={_g.MeshBuildInFlight} subCell={SubCellMeshing}");
-		}
 		if (_instantRebuildChunk is VoxelChunk instantChunk
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
@@ -1613,11 +1608,6 @@ public partial class VoxelWorld : Node3D
 				//      update the cached wide field, and re-mesh the sub-cells
 				//      whose light actually changed. So the edit's light is
 				//      instant too (torches glow, caves brighten, in this frame).
-				if (!EditProfile._pathEnteredLogged)
-				{
-					EditProfile._pathEnteredLogged = true;
-					GD.Print($"[Edit] (sub-cell instant path entered; SubCellMeshing={SubCellMeshing})");
-				}
 				EditProfile.Start();
 				long _e0 = EditProfile.Sw.ElapsedTicks;
 				var _snap = instantChunk.SnapshotForEdit(this);
@@ -1785,9 +1775,9 @@ public partial class VoxelWorld : Node3D
 					long _cellTicks = EditProfile.Sw.ElapsedTicks - _cellStart;
 					// Split the cell's time into the mesh build (RebuildSubCell's
 					// BuildSubCell) vs the apply (node wiring + collision shape) —
-					// RebuildSubCell reports the split via the edit profiler.
-					EditProfile.TRemeshMesh += _cellTicks - (VoxelChunk.LastBuildTicks - VoxelChunk.LastApplyTicks);
-					EditProfile.TRemeshApply += VoxelChunk.LastApplyTicks;
+					// RebuildSubCell reports the split into the edit profiler.
+					EditProfile.TRemeshMesh += _cellTicks - (EditProfile.LastBuildTicks - EditProfile.LastApplyTicks);
+					EditProfile.TRemeshApply += EditProfile.LastApplyTicks;
 					_remeshCells++;
 				}
 				EditProfile.RemeshCells = _remeshCells;
@@ -1897,12 +1887,6 @@ public partial class VoxelWorld : Node3D
 			// so it rebuilds synchronously as soon as generation completes. An
 			// in-flight async build self-clears here; a freed chunk just falls
 			// through to the normal budget path.
-			if (_instantRebuildChunk != null)
-			{
-				var _pc = (VoxelChunk)_instantRebuildChunk;
-				GD.Print($"[Edit] GATE-MISSED chunk=({_pc.Coord.X},{_pc.Coord.Y}) dataReady={_pc.DataReady} " +
-					$"inFlight={_pc.MeshBuildInFlight} subCell={SubCellMeshing} (clearing pending)");
-			}
 			_instantRebuildChunk = null;
 		}
 
