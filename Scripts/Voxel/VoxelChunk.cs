@@ -56,6 +56,23 @@ public partial class VoxelChunk : Node3D
 	public bool MeshBuildInFlight => _meshBuild != null;
 
 	/// <summary>
+	/// True when the instant (sub-cell) edit path has already applied this
+	/// chunk's mesh + collision this frame. Set by the instant-edit path,
+	/// cleared by the next async full build (which re-bakes the wide light
+	/// field). While true the budget loop skips the chunk so its async build
+	/// doesn't race the instant gate (see <c>_instantSatisfied</c>).
+	/// </summary>
+	public bool InstantSatisfied => _instantSatisfied;
+
+	/// <summary>
+	/// Records that the instant (sub-cell) edit path applied this chunk's mesh
+	/// + collision this frame, so the budget loop skips its async full build
+	/// (which would set <see cref="MeshBuildInFlight"/> and starve the instant
+	/// gate). Cleared by the next async build (see <see cref="ApplyBuildResult"/>).
+	/// </summary>
+	public void MarkInstantSatisfied() => _instantSatisfied = true;
+
+	/// <summary>
 	/// True once this chunk has a live concave collision shape (built by
 	/// <see cref="Rebuild"/>/apply). The spawn gate requires this in addition to
 	/// the mesh being built, so the player never gets physics (and can't fall
@@ -71,6 +88,18 @@ public partial class VoxelChunk : Node3D
 	/// skips the chunk (see <see cref="Rebuild"/>).
 	/// </summary>
 	private Task _meshBuild;
+
+	// The instant (sub-cell) edit path has already applied this chunk's mesh +
+	// collision in the current frame (RebuildSubCell). It is set true by the
+	// instant-edit path and CLEARED by the next async full build (ApplyBuildResult
+	// / RebuildSynchronous) — which re-bakes the whole chunk's wide light field
+	// from the new solid state, refreshing the instant path's cached wide
+	// volumes. While true, the budget loop SKIPS the chunk (it would otherwise
+	// launch an async build that sets MeshBuildInFlight and starves the instant
+	// gate). The async build is the safety net that re-converges the local light
+	// delta to the full flood fill; this flag just spaces it out so it doesn't
+	// race the instant path every frame.
+	private bool _instantSatisfied;
 
 	// Pending results produced by the in-flight CPU build. Written by the worker
 	// task, read on the main thread only after the task has completed (the task
@@ -1190,6 +1219,7 @@ public partial class VoxelChunk : Node3D
 			NeedsMesh = false;
 		}
 		_meshBuild = null;
+		_instantSatisfied = false;
 	}
 
 	/// <summary>
@@ -1202,6 +1232,11 @@ public partial class VoxelChunk : Node3D
 	private void ApplyBuildResult()
 	{
 		_meshBuild = null;
+		// This async full build re-baked the wide light field from the new solid
+		// state (and re-cached the wide volumes), so the instant path's "already
+		// applied" mark is stale — clear it so the NEXT edit re-runs the instant
+		// path and the budget can skip it again.
+		_instantSatisfied = false;
 		bool appliedMesh;
 
 		// Option B (sub-cell mode): wire up the prebuilt sub-cell results. The

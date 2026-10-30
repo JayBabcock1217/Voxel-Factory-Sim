@@ -1529,7 +1529,14 @@ public partial class VoxelWorld : Node3D
 		var pending = new List<VoxelChunk>();
 		foreach (VoxelChunk chunk in _chunks.Values)
 		{
-			if (chunk.NeedsMesh && chunk.DataReady)
+			// SKIP instantly-satisfied chunks: the instant (sub-cell) edit path
+			// already applied their mesh + collision this frame. Launching an
+			// async full build for one here would set MeshBuildInFlight and
+			// starve the instant-edit gate (the edit would be DROPPED). The
+			// async build is the safety net that re-converges the local light
+			// delta to the full flood fill; it still runs — but on a later
+			// frame, once the instant path has settled and the flag is cleared.
+			if (chunk.NeedsMesh && chunk.DataReady && !chunk.InstantSatisfied)
 			{
 				if (chunk.EditPriority > 0 && chunk.EditPriority < priorityCap)
 				{
@@ -1595,35 +1602,6 @@ public partial class VoxelWorld : Node3D
 		{
 			if (SubCellMeshing)
 			{
-				// SETTLE-WINDOW DEFERRAL: while any async first-build is in
-				// flight (the world is still settling after load), the budget
-				// loop's Task.Run builds are churning the thread pool and the
-				// instant edit runs head-on with that churn — the ~150–200 ms
-				// "first edit after load" hitch (the mesh + light are only a few
-				// ms on their own; the cost is the contention). Defer the WHOLE
-				// instant edit to the next frame (keep _instantRebuildChunk set)
-				// so it applies once the build dispatch clears. The edit is still
-				// computed synchronously (in the frame it applies) — light + mesh
-				// are instant relative to that — it just doesn't hitch during the
-				// load-in window. Once the world is settled (no builds in flight)
-				// the edit runs in-frame, every time.
-				bool _anyBuildInFlight = false;
-				foreach (VoxelChunk c in _chunks.Values)
-				{
-					if (c.MeshBuildInFlight)
-					{
-						_anyBuildInFlight = true;
-						break;
-					}
-				}
-				if (_anyBuildInFlight)
-				{
-					// Defer: leave _instantRebuildChunk set; it re-enters this
-					// path next frame. (The budget loop below still runs, so the
-					// builds keep progressing toward settled.)
-					return;
-				}
-
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
 				// edit dirtied. Two kinds of sub-cells change:
 				//  (1) GEOMETRY — the sub-cell(s) whose solid/air state changed
@@ -1895,6 +1873,15 @@ public partial class VoxelWorld : Node3D
 				// safety net that converges the local recompute to the full
 				// flood-fill result (and handles any light the box didn't cover).
 				instantChunk.NeedsMesh = true;
+				// Mark the chunk INSTANT-SATISFIED: the sub-cell path just
+				// applied the mesh + collision this frame, so the budget loop
+				// must NOT launch an async full build for it this frame (that
+				// build sets MeshBuildInFlight and would starve the next
+				// instant edit's gate). The async full build is the safety net
+				// that re-converges the local light delta to the full flood
+				// fill; it still runs — but only once, on a later frame, when
+				// the instant path has settled. (Cleared by the async build.)
+				instantChunk.MarkInstantSatisfied();
 			}
 			else
 			{
