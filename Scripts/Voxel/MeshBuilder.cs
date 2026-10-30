@@ -391,6 +391,13 @@ public static class MeshBuilder
 		int lastMaterial = palette.MaterialCount;
 		Vector3 origin = new Vector3(wx0, 0, wz0);
 
+		// TEMP (Path 1 diagnosis): per-stage timing for the MC surface build,
+		// so we can see which sub-stage eats the ~50ms and target it. Gated on
+		// VoxelWorld.InstantBuildProfile (auto-clears). Removed once tuned.
+		bool _prof = VoxelWorld.InstantBuildProfile;
+		var _sw = _prof ? System.Diagnostics.Stopwatch.StartNew() : null;
+		long _tField = 0, _tLight = 0, _tGen = 0, _tEmit = 0, _tMesh = 0;
+
 		// 1) Build the padded field: material index per lattice point, air
 		//    (0) everywhere outside the chunk data. A parallel binary
 		//    solid|air field (1/0) drives marching cubes itself: feeding raw
@@ -418,6 +425,7 @@ public static class MeshBuilder
 				}
 			}
 		}
+		if (_prof) { _tField = _sw.ElapsedMilliseconds; }
 
 		// 1b) Light: flood-fill a WIDE 3x3-chunk region (self + 8 neighbours)
 		//     so sky light propagates a full 15-voxel radius across chunk seams
@@ -470,6 +478,7 @@ public static class MeshBuilder
 		// (1.0) are unaffected by the curves. The block-lit mask exempts torch
 		// light from the falloff/gamma (see ApplyLightResponse).
 		ApplyLightResponse(wideLight, minLight, lightFalloff, darknessGamma, blockLitW);
+		if (_prof) { _tLight = _sw.ElapsedMilliseconds; }
 
 		// 2) Extract the single air|solid isosurface.
 		//    Ownership: each chunk draws only its +X/+Z side boundary cells
@@ -524,6 +533,7 @@ public static class MeshBuilder
 				// must be real data, so require east, south AND diagonal.
 				return eastLoaded && southLoaded && diagLoaded;
 			});
+		if (_prof) { _tGen = _sw.ElapsedMilliseconds; }
 
 		// 3) Resolve every vertex (lattice position + material of the solid
 		//    voxel the crossing came from) and group triangles by material.
@@ -637,6 +647,7 @@ public static class MeshBuilder
 				collisionOut.Add(pc);
 			}
 		}
+		if (_prof) { _tEmit = _sw.ElapsedMilliseconds; }
 
 		// 4) Emit one flat-shaded surface per material.
 		var mesh = new ArrayMesh();
@@ -709,6 +720,19 @@ public static class MeshBuilder
 				.Select(System.Linq.Enumerable.OrderBy(byLight, kv => kv.Key),
 					kv => $"{(kv.Key / 100f):F2}:{kv.Value}"));
 			GD.Print($"[VTEX-LIGHT] chunk {coord}: {dbgLight.Count} verts min={mn:F2} max={mx:F2} histogram(light:count)= [{hist}]");
+		}
+
+		if (_prof)
+		{
+			_sw.Stop();
+			_tMesh = _sw.ElapsedMilliseconds;
+			// Cumulative markers -> per-stage deltas. On the cached-light path the
+			// light stage is just the field clone + ApplyLightResponse (small); on
+			// the inline path it includes the flood fill. We report field / gen /
+			// emit / mesh as deltas plus the total so we can see the split.
+			GD.Print($"[MCStage] chunk ({coord.X},{coord.Y}) " +
+				$"field={_tField} light={_tLight - _tField} gen={_tGen - _tLight} " +
+				$"emit={_tEmit - _tGen} mesh={_tMesh - _tEmit} TOTAL={_tMesh} ms");
 		}
 
 		return mesh;
