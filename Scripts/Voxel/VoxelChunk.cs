@@ -126,6 +126,12 @@ public partial class VoxelChunk : Node3D
 	// rebuild recomputes + replaces them. null until the first build.
 	private byte[] _cachedWideSolid;
 	private byte[] _cachedWideBlock;
+	// Starlight delta: the per-chunk RAW integer light level (0..maxLevel)
+	// working state, kept in sync with _cachedLightField's NORMALIZED (pre-curve)
+	// source via SkyLight.RecomputeDeltaRaw. Per-chunk (not static) so a full
+	// rebuild committing one chunk's field can't clobber another chunk's delta
+	// state. Sized lazily to the wide field.
+	private int[] _deltaRawField;
 	// Option B lighting: the most-recent edited voxel (chunk-local) + its
 	// material + block-light level, recorded by the instant-edit path so
 	// RecomputeLightLocal can patch the cached wide volumes at just that voxel
@@ -133,6 +139,7 @@ public partial class VoxelChunk : Node3D
 	private Vector3I _patchVoxel;
 	private int _patchMaterial;
 	private byte _patchLight;
+	private int _patchWideIndex; // wide lattice index of the edited voxel (-1 = unknown)
 	private bool _hasPatch;
 
 	// ------------------------------------------------------------------
@@ -167,6 +174,15 @@ public partial class VoxelChunk : Node3D
 		public ConcavePolygonShape3D BuiltShape;
 		public bool HasGeometry;
 	}
+
+	/// <summary>
+	/// The owning world (set by <c>VoxelWorld</c> in <see cref="Initialize"/>).
+	/// The Starlight delta helpers (<see cref="MaxLightFor"/>,
+	/// <see cref="MakeLightCurve"/>/raw-sync) read the session-constant light
+	/// params from it without needing a per-call <c>VoxelWorld</c> argument.
+	/// Null only before Initialize.
+	/// </summary>
+	public VoxelWorld World { get; set; }
 
 	public void Initialize(Vector2I coord, ChunkData data)
 	{
@@ -300,16 +316,20 @@ public partial class VoxelChunk : Node3D
 
 	/// <summary>
 	/// Records the edited voxel (chunk-local) + its material + block-light level
-	/// so the next <see cref="ReconsumeLightLocal"/> can patch the CACHED wide
+	/// so the next <see cref="RecomputeLightLocal"/> can patch the CACHED wide
 	/// solid/block volumes at just that voxel — instead of rebuilding the full
 	/// 385k-voxel volume (the cost that made the instant edit ~300 ms). Called
-	/// by the instant-edit path before the local recompute.
+	/// by the instant-edit path before the local recompute. When
+	/// <paramref name="wideIndex"/> is >= 0 it is the edited voxel's WIDE
+	/// lattice index (the caller knows it); the Starlight delta fast path uses
+	/// it to identify the single edited voxel (see <see cref="RecomputeLightLocal"/>).
 	/// </summary>
-	public void SetPatchVoxel(int lx, int ly, int lz, int material, byte light)
+	public void SetPatchVoxel(int lx, int ly, int lz, int material, byte light, int wideIndex = -1)
 	{
 		_patchVoxel = new Vector3I(lx, ly, lz);
 		_patchMaterial = material;
 		_patchLight = light;
+		_patchWideIndex = wideIndex;
 		_hasPatch = true;
 	}
 
@@ -363,13 +383,26 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
-	/// LOCAL light recompute (Option B lighting): recompute the wide light field
-	/// only over a box around the edit (instead of the full 3×3-chunk flood fill),
-	/// re-applying the response curve, and return the sub-cells whose per-vertex
-	/// light changed (so the caller re-meshes exactly those). This is what makes
-	/// an edit's LIGHT update instant — the light no longer waits for the async
-	/// full rebuild. The box is clamped to the wide field; the boundary values are
-	/// reused as fixed conditions (see <see cref="SkyLight.ComputeLocal"/>).
+	/// LOCAL light recompute (Option B lighting): update the wide light field
+	/// for a box around the edit, re-applying the response curve, and return the
+	/// sub-cells whose per-vertex light changed (so the caller re-meshes exactly
+	/// those). This is what makes an edit's LIGHT update instant — the light no
+	/// longer waits for the async full rebuild.
+	///
+	/// STARLIGHT DELTA PATH (the fast case): the box is exactly one light-range
+	/// around a SINGLE edited voxel (see the instant-edit sizing in
+	/// <c>VoxelWorld._Process</c>). Then the field is updated by <see
+	/// cref="SkyLight.ComputeDelta"/> — a per-voxel increase/decrease
+	/// propagation that touches only the voxels whose light actually changes —
+	/// instead of re-solving the whole box from scratch. The box is clamped to
+	/// the wide field and the boundary values are unchanged (the box is one
+	/// light-range past the edit), so the delta's result is bit-identical to the
+	/// full pipeline over the box.
+	///
+	/// FALLBACK: for any other box (a multi-voxel edit, a region past one
+	/// light-range) the box is re-solved from scratch by <see
+	/// cref="SkyLight.ComputeLocal"/> (the original local recompute) — still far
+	/// cheaper than the full 3×3-chunk flood fill, and always correct.
 	///
 	/// Uses the CACHED wide solid/block volumes (built by the last full rebuild),
 	/// patching only the edited voxel's values (see <see cref="SetPatchVoxel"/>)
@@ -389,95 +422,129 @@ public partial class VoxelChunk : Node3D
 		}
 
 		// Patch the cached wide volumes at the edited voxel (its solid state and
-		// block-light source changed; everything else is unchanged).
+		// block-light source changed; everything else is unchanged). NOTE: do NOT
+		// clear _hasPatch here — the delta fast-path check below needs it (and
+		// _patchWideIndex) to decide whether this is a single-voxel delta; it is
+		// cleared at the end of the method, after both paths have run.
 		if (_hasPatch)
 		{
-			int half = lpx / 2 - 1;
-			int wx = _patchVoxel.X + half;
+			int patchHalf = lpx / 2 - 1;
+			int wx = _patchVoxel.X + patchHalf;
 			int wy = _patchVoxel.Y + 1;
-			int wz = _patchVoxel.Z + half;
+			int wz = _patchVoxel.Z + patchHalf;
 			if (wx >= 0 && wx < lpx && wy >= 0 && wy < lpy && wz >= 0 && wz < lpz)
 			{
 				int idx = wx + lpx * (wy + lpy * wz);
 				_cachedWideSolid[idx] = (byte)(_patchMaterial != 0 ? 1 : 0);
 				_cachedWideBlock[idx] = _patchLight;
 			}
-			_hasPatch = false;
 		}
 
-		// Snapshot the box before the recompute so we can diff which voxels
-		// actually changed (and thus which sub-cells need re-meshing).
 		int bx = bx1 - bx0 + 1, by = by1 - by0 + 1, bz = bz1 - bz0 + 1;
-		int total = bx * by * bz;
-		var before = new float[total];
-		for (int iz = 0; iz < bz; iz++)
-			for (int iy = 0; iy < by; iy++)
-				for (int ix = 0; ix < bx; ix++)
-				{
-					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
-					before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
-				}
-
-		// The local max-BFS recompute (writes the normalized 0..1 field in place
-		// over the box; boundary values are the fixed conditions).
-		SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
-			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
-
-		// Re-apply the response curve ONLY over the box (it's a pure per-voxel
-		// remap, so it's safe to apply to just the changed region).
-		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
-
-		// Diff: a voxel changed if its light differs by more than a tiny epsilon.
-		// Record the changed wide indices (for the caller's precise sub-cell
-		// re-mesh) and map each changed voxel to the sub-cell(s) whose vertices
-		// sample it (the conservative bound, used when no precise check is made).
 		var changedWideList = new System.Collections.Generic.List<int>();
-		for (int iz = 0; iz < bz; iz++)
-			for (int iy = 0; iy < by; iy++)
-				for (int ix = 0; ix < bx; ix++)
-				{
-					int l = ix + bx * (iy + by * iz);
-					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
-					if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
+
+		// Single-voxel delta fast path: the box is exactly one light-range
+		// around the patched voxel (the instant-edit sizing) AND the patch is
+		// the box centre. Then SkyLight.ComputeDelta propagates only the delta
+		// (bit-identical to the box re-solve over the box), touching just the
+		// changed voxels. Anything else falls back to the box re-solve below.
+		int ml = MaxLightFor();
+		int px = _patchWideIndex % lpx;
+		int pwy = (_patchWideIndex / lpx) % lpy;
+		int pz = (_patchWideIndex / (lpx * lpy)) % lpz;
+		if (_hasPatch && _patchWideIndex >= 0
+			&& bx == 2 * ml + 1
+			&& by == lpy - 1
+			&& bz == 2 * ml + 1
+			&& bx0 == px - ml
+			&& by0 == 0
+			&& bz0 == pz - ml
+			&& _patchWideIndex == bx0 + lpx * (pwy + lpy * bz0))
+		{
+			var deltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
+				_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+				_patchWideIndex, ml, MakeLightCurve(), EnsureDeltaRaw(lpx * lpy * lpz));
+			changedWideList.EnsureCapacity(deltaChanged.Count);
+			for (int i = 0; i < deltaChanged.Count; i++)
+			{
+				changedWideList.Add(deltaChanged[i]);
+			}
+		}
+		else
+		{
+			// FALLBACK: snapshot the box's curved values, re-solve the whole box
+			// from scratch (boundary values are the fixed conditions), re-apply
+			// the response curve over it, then diff against the snapshot (a
+			// voxel changed iff its curved value moved by more than epsilon).
+			int total = bx * by * bz;
+			var before = new float[total];
+			for (int iz = 0; iz < bz; iz++)
+				for (int iy = 0; iy < by; iy++)
+					for (int ix = 0; ix < bx; ix++)
 					{
-						continue; // unchanged
+						int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+						before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
 					}
-					changedWideList.Add(g);
-					// Wide voxel -> chunk-local voxel -> sub-cell. The wide field's
-					// center chunk origin maps to wide index (lpx/2 - 1, 1, lpz/2 - 1);
-					// a wide voxel (wx,wy,wz) is chunk-local (wx - (lpx/2-1), wy - 1,
-					// wz - (lpz/2-1)). Air-voxel light is what a vertex samples, so
-					// the sub-cell containing that chunk-local voxel (and any whose
-					// 1-voxel padding includes it) re-meshes.
-					int clx = (bx0 + ix) - (lpx / 2 - 1);
-					int cly = (by0 + iy) - 1;
-					int clz = (bz0 + iz) - (lpz / 2 - 1);
-					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
-				}
+
+			SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
+				lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
+			ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+
+			for (int iz = 0; iz < bz; iz++)
+				for (int iy = 0; iy < by; iy++)
+					for (int ix = 0; ix < bx; ix++)
+					{
+						int l = ix + bx * (iy + by * iz);
+						int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+						if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
+						{
+							continue; // unchanged
+						}
+						changedWideList.Add(g);
+					}
+		}
+
+		// Map each changed wide voxel to the sub-cell(s) whose vertices sample
+		// it (the conservative bound, used when no precise check is made).
+		// Wide voxel -> chunk-local voxel: the wide field's center chunk origin
+		// maps to wide index (lpx/2 - 1, 1, lpz/2 - 1); a wide voxel (wx,wy,wz)
+		// is chunk-local (wx - (lpx/2-1), wy - 1, wz - (lpz/2-1)). Air-voxel
+		// light is what a vertex samples, so the sub-cell containing that
+		// chunk-local voxel (and any whose 1-voxel padding includes it)
+		// re-meshes.
+		int half = lpx / 2 - 1;
+		int lpySz = world.ChunkHeight + 2;
+		for (int i = 0; i < changedWideList.Count; i++)
+		{
+			int g = changedWideList[i];
+			int wz = g / (lpx * lpySz);
+			int rem = g - wz * (lpx * lpySz);
+			int wy = rem / lpx;
+			int wx = rem - wy * lpx;
+			changed.UnionWith(DirtyCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+		}
 
 		_lightChangedWide = changedWideList.Count > 0 ? changedWideList.ToArray() : null;
+		_hasPatch = false; // the patch has been consumed (delta or fallback)
 		return changed;
 	}
 
 	/// <summary>
-	/// LOCAL light recompute centred on an ARBITRARY wide-world position
-	/// <paramref name="wWorld"/> (a world voxel, not necessarily inside this
-	/// chunk) with radius <paramref name="range"/>. Used by the instant-edit
-	/// path for a NEIGHBOUR chunk whose wide field is lit by a light source in
-	/// the edited chunk: the source's light crosses the seam, and this makes the
-	/// neighbour's light update instant too (instead of waiting for the async
-	/// full rebuild — the "delay before the other chunk computes its light").
-	/// No patch is applied (the neighbour's own voxels are unchanged); its wide
-	/// volumes already carry the source (the wide field covers the neighbouring
-	/// chunks, so the source voxel is inside this neighbour's field). Returns the
-	/// sub-cells to re-mesh (may be empty if the box is entirely outside this
-	/// chunk, or the light didn't change).
+	/// NEIGHBOUR light update for a light source that crosses a chunk seam: the
+	/// source's wide index <paramref name="wIndex"/> lies inside THIS chunk's
+	/// wide field (the wide field spans the neighbouring chunks), and the
+	/// source's solid state / block-light level just changed (a torch was
+	/// placed, broken, or swapped in the edited chunk). This runs the Starlight
+	/// delta (<see cref="SkyLight.ComputeDelta"/>) centred on the source — NOT a
+	/// box re-solve — so the neighbour's light updates instant and touches only
+	/// the voxels that actually change. No patch is applied (the neighbour's own
+	/// voxels are unchanged; its wide volumes already carry the source). Returns
+	/// the sub-cells to re-mesh (empty if the light didn't change).
 	/// </summary>
 	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightLocalAt(
 		VoxelWorld world,
 		int lpx, int lpy, int lpz,
-		int wWorldX, int wWorldY, int wWorldZ,
-		int range)
+		int wIndex)
 	{
 		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
 		_lightChangedWide = null;
@@ -485,55 +552,42 @@ public partial class VoxelChunk : Node3D
 		{
 			return changed; // no light field yet (first build) — the full rebuild handles it
 		}
-
-		int bx0 = Mathf.Max(0, wWorldX - range);
-		int bx1 = Mathf.Min(lpx - 1, wWorldX + range);
-		int by0 = Mathf.Max(0, wWorldY - range);
-		int by1 = Mathf.Min(lpy - 1, wWorldY + range);
-		int bz0 = Mathf.Max(0, wWorldZ - range);
-		int bz1 = Mathf.Min(lpz - 1, wWorldZ + range);
-		if (bx0 > bx1 || by0 > by1 || bz0 > bz1)
+		if (wIndex < 0 || wIndex >= lpx * lpy * lpz)
 		{
-			return changed; // the box is entirely outside this chunk's field
+			return changed; // source not in this chunk's field
 		}
 
-		// Snapshot the box (diff which voxels changed), run the local recompute
-		// (no patch — the neighbour's own voxels are unchanged), re-curve, diff.
-		int bx = bx1 - bx0 + 1, by = by1 - by0 + 1, bz = bz1 - bz0 + 1;
-		int total = bx * by * bz;
-		var before = new float[total];
-		for (int iz = 0; iz < bz; iz++)
-			for (int iy = 0; iy < by; iy++)
-				for (int ix = 0; ix < bx; ix++)
-				{
-					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
-					before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
-				}
+		// The neighbour's own voxels are unchanged (no patch); its wide volumes
+		// already carry the source. Run the Starlight delta centred on the
+		// source — it touches only the voxels whose light actually changes.
+		var deltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
+			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+			wIndex, MaxLightFor(), MakeLightCurve(), EnsureDeltaRaw(lpx * lpy * lpz));
+		if (deltaChanged.Count == 0)
+		{
+			_lightChangedWide = null;
+			return changed;
+		}
 
-		SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
-			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
+		var changedWideList = new System.Collections.Generic.List<int>(deltaChanged.Count);
+		for (int i = 0; i < deltaChanged.Count; i++)
+		{
+			changedWideList.Add(deltaChanged[i]);
+		}
 
-		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+		int half = lpx / 2 - 1;
+		int lpySz = world.ChunkHeight + 2;
+		for (int i = 0; i < changedWideList.Count; i++)
+		{
+			int g = changedWideList[i];
+			int wz = g / (lpx * lpySz);
+			int rem = g - wz * (lpx * lpySz);
+			int wy = rem / lpx;
+			int wx = rem - wy * lpx;
+			changed.UnionWith(DirtyCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+		}
 
-		var changedWideList = new System.Collections.Generic.List<int>();
-		for (int iz = 0; iz < bz; iz++)
-			for (int iy = 0; iy < by; iy++)
-				for (int ix = 0; ix < bx; ix++)
-				{
-					int l = ix + bx * (iy + by * iz);
-					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
-					if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
-					{
-						continue;
-					}
-					changedWideList.Add(g);
-					int clx = (bx0 + ix) - (lpx / 2 - 1);
-					int cly = (by0 + iy) - 1;
-					int clz = (bz0 + iz) - (lpz / 2 - 1);
-					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
-				}
-
-		_lightChangedWide = changedWideList.Count > 0 ? changedWideList.ToArray() : null;
+		_lightChangedWide = changedWideList.ToArray();
 		return changed;
 	}
 
@@ -616,6 +670,59 @@ public partial class VoxelChunk : Node3D
 					if (hasFloor) norm = VoxelWorld.ApplyMinLight(norm, minL);
 					_cachedLightField[g] = norm;
 				}
+	}
+
+	/// <summary>The clamped max light level (the curve + delta normalization divisor).</summary>
+	private int MaxLightFor()
+	{
+		int m = World?.MaxLightLevel ?? 1;
+		if (m < 1) m = 1;
+		else if (m > 255) m = 255;
+		return m;
+	}
+
+	/// <summary>
+	/// Returns the chunk's per-chunk raw-level buffer for the Starlight delta,
+	/// growing it to <paramref name="size"/> if needed. Allocated once per
+	/// wide-field size (rarely grows), so the delta path itself allocates nothing.
+	/// </summary>
+	private int[] EnsureDeltaRaw(int size)
+	{
+		if (_deltaRawField == null || _deltaRawField.Length < size)
+		{
+			_deltaRawField = new int[size];
+		}
+		return _deltaRawField;
+	}
+
+	/// <summary>
+	/// The response-curve closure for <see cref="SkyLight.ComputeDelta"/>: the
+	/// EXACT per-voxel expression <see cref="ApplyLightResponseBox"/> applies
+	/// (falloff^exp + darknessGamma^gamma for sky-lit voxels, the MinLight floor
+	/// for all, block-lit voxels exempt from the first two stages), written as a
+	/// pure function of (raw level, blockLit). Reusing the same expression is
+	/// what keeps the delta's curved field bit-identical to the full pipeline's.
+	/// </summary>
+	private System.Func<int, byte, float> MakeLightCurve()
+	{
+		float minL = World?.MinLight ?? 0f;
+		float exp = World?.LightFalloff ?? 1f;
+		float dg = World?.DarknessGamma ?? 1f;
+		if (exp < 1f) exp = 1f;
+		if (dg < 1f) dg = 1f;
+		bool hasFloor = minL > 0f;
+		int maxL = MaxLightFor();
+		return (int level, byte lit) =>
+		{
+			float norm = level / (float)maxL;
+			if (lit != 1)
+			{
+				if (exp > 1.0001f) norm = (float)Math.Pow(norm, exp);
+				if (dg > 1.0001f) norm = (float)Math.Pow(norm, dg);
+			}
+			if (hasFloor) norm = VoxelWorld.ApplyMinLight(norm, minL);
+			return norm;
+		};
 	}
 
 	/// <summary>
@@ -846,6 +953,12 @@ public partial class VoxelChunk : Node3D
 				// chunks and re-caches with the new curve.
 				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
 					out byte[] blockLit, out byte[] wideSolid, out byte[] wideBlock);
+				// Re-sync the Starlight delta's per-chunk raw-level state from
+				// the NORMALIZED field BEFORE the curve is applied (the curve is
+				// not the inverse of normalization; deriving raw from the curved
+				// field would be wrong). Done on this (build) thread so it is
+				// consistent with the field being committed.
+				SkyLight.RecomputeDeltaRaw(lightField, MaxLightFor(), EnsureDeltaRaw(lightField.Length));
 				MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 				float[] pendingLight = lightField;
 				byte[] pendingBlockLit = blockLit;
@@ -1011,6 +1124,10 @@ public partial class VoxelChunk : Node3D
 			// correct; a curve-param change rebuilds all chunks and re-caches.
 			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
 				out blockLit, out byte[] wideSolid, out byte[] wideBlock);
+			// Re-sync the Starlight delta's raw-level working state from the
+			// NORMALIZED field (before the curve is applied — the curve is not
+			// the inverse of normalization). Per-chunk buffer.
+			SkyLight.RecomputeDeltaRaw(lightField, MaxLightFor(), EnsureDeltaRaw(lightField.Length));
 			MeshBuilder.ApplyLightResponse(lightField, minLight, lightFalloff, darknessGamma, blockLit);
 			_cachedLightField = lightField;
 			_cachedBlockLit = blockLit;
@@ -1162,7 +1279,10 @@ public partial class VoxelChunk : Node3D
 		// Commit the freshly-computed wide light field to the chunk's cache
 		// (Path 1). This is what the synchronous INSTANT edit path reuses to
 		// skip the flood fill. Only when a full build produced a field (a
-		// failed build leaves the previous cache in place).
+		// failed build leaves the previous cache in place). The Starlight
+		// delta's per-chunk raw-level state was already re-synced (from the
+		// NORMALIZED field, before the curve) on the build thread, so nothing
+		// to do here.
 		if (_pendingLight != null)
 		{
 			_cachedLightField = _pendingLight;

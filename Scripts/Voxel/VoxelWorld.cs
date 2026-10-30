@@ -1612,7 +1612,13 @@ public partial class VoxelWorld : Node3D
 				// column or blocking light changes light out to the sky-line.)
 				byte _patchMat = instantChunk.Data.Get(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
 				byte _patchLight = instantChunk.Data.GetBlockLight(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z);
-				instantChunk.SetPatchVoxel(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z, _patchMat, _patchLight);
+				// The edited voxel's wide index (the Starlight delta fast path
+				// uses it to identify the single edited voxel; -1 = unknown, the
+				// caller falls back to the box re-solve when it can't be computed).
+				int _patchWide = (wx >= 0 && wx < lpx && wy >= 0 && wy < lpy && wz >= 0 && wz < lpz)
+					? wx + lpx * (wy + lpy * wz)
+					: -1;
+				instantChunk.SetPatchVoxel(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z, _patchMat, _patchLight, _patchWide);
 
 				// COLD-START GUARD: while the world is still settling (any chunk
 				// has a first build in flight), the async first-builds are
@@ -1772,7 +1778,7 @@ public partial class VoxelWorld : Node3D
 									continue; // no field to recompute yet
 								}
 								var nChanged = neighbour.RecomputeLightLocalAt(this, lpx, lpy, lpz,
-									srcWx, srcWy, srcWz, lightR);
+									srcWx + lpx * (srcWy + lpy * srcWz));
 								if (nChanged.Count == 0)
 								{
 									continue;
@@ -3130,6 +3136,7 @@ public partial class VoxelWorld : Node3D
 		var data = new ChunkData(ChunkSizeXZ, ChunkHeight, ChunkSizeXZ);
 		var chunk = new VoxelChunk { Name = $"Chunk_{coord.X}_{coord.Y}" };
 		chunk.Initialize(coord, data);
+		chunk.World = this; // the Starlight delta helpers read the light params from the world
 		_chunkRoot.AddChild(chunk);
 		_chunks[coord] = chunk;
 		_generatingBudget++;
