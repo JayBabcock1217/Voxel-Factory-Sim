@@ -305,26 +305,34 @@ public static class SkyLight
 	/// <summary>
 	/// LOCAL light recompute (Option B lighting): recompute the light only over a
 	/// bounded box <c>[x0..x1] × [y0..y1] × [z0..z1]</c> of the padded field
-	/// (inclusive, lattice coords), reusing the field's EXISTING light values on
-	/// the box boundary as fixed boundary conditions. This is far cheaper than a
-	/// full <see cref="Compute"/> flood fill (which scans the whole 3×3-chunk
-	/// region) and is what makes an edit's light update instant.
+	/// (inclusive, lattice coords). The box interior is solved from scratch by a
+	/// max-BFS seeded from its SURROUNDING (the fixed boundary conditions), which
+	/// makes it far cheaper than a full <see cref="Compute"/> flood fill (which
+	/// scans the whole 3×3-chunk region) and is what makes an edit's light update
+	/// instant.
+	///
+	/// BOUNDARY CONDITIONS (the surrounding, which is unchanged by the edit as
+	/// long as the box is one light-range past it):
+	///   * SKY — a column open to the field top seeds full light (the same
+	///     per-column rule as <see cref="Compute"/>); a column blocked above the
+	///     box hand-offs from the existing value just above it. This is what lets
+	///     a broken block re-light the whole open column above it instantly (the
+	///     sky hand-off seeds the box top, the BFS propagates down).
+	///   * BLOCK — every light source in or adjacent to the box seeds its air
+	///     neighbours at (level - 1), exactly as <see cref="Compute"/> does.
 	///
 	/// CORRECTNESS: light is a monotone MAX propagation (each voxel = the max of
-	/// its own seeds and its neighbours' propagated values, decaying 1/voxel).
-	/// Given correct boundary values, a local max-BFS over the box converges to
-	/// the SAME values the full flood fill would produce inside the box — so the
-	/// result is bit-identical to the full recompute, as long as the box boundary
-	/// values are already correct (they are, because they were set by the
-	/// previous full/region recompute and only the interior changed). The box
-	/// must therefore extend at least one light-range past the edited region so
-	/// the boundary is genuinely unaffected by the edit.
+	/// its own seeds and its neighbours' propagated values, decaying 1/voxel), so
+	/// a max-BFS driven by the true surrounding converges to the SAME values the
+	/// full flood fill would produce inside the box. The interior is started at 0
+	/// (never seeded from the stale field), so a stale interior value can only
+	/// make the result LESS correct — it is dropped, not trusted.
 	///
 	/// Writes the recomputed (NORMALIZED 0..1) light back into
-	/// <paramref name="light"/> in place over the box, and updates
+	/// <paramref name="light"/> in place over the box, and recomputes
 	/// <paramref name="blockLit"/> over the box (a voxel is block-lit when a
-	/// block-source path reached it at least as brightly as any sky path — the
-	/// same rule the full <see cref="Compute"/> uses).
+	/// block-source path reached it — a removed torch therefore drops its stale
+	/// flags, and a sky hand-off keeps the boundary's flag).
 	/// </summary>
 	/// <param name="solid">Padded solid|air field (1 = solid) at (nx,ny,nz).</param>
 	/// <param name="blockLight">Per-voxel block-light SOURCE levels (0 = none) at the same dims.</param>
@@ -347,55 +355,108 @@ public static class SkyLight
 		if (x1 >= nx) x1 = nx - 1; if (y1 >= ny) y1 = ny - 1; if (z1 >= nz) z1 = nz - 1;
 		if (x0 > x1 || y0 > y1 || z0 > z1) return;
 
-		// Work on a scratch copy of the box so the boundary (the box's outer
-		// shell) is read as a FIXED condition while the interior is solved.
 		int bx = x1 - x0 + 1, by = y1 - y0 + 1, bz = z1 - z0 + 1;
 		int total = bx * by * bz;
-		var boxLight = new float[total];
-		var boxLit = new byte[total]; // RECOMPUTED from scratch below (not copied).
-		// local index: (lx + bx*(ly + by*lz)), lx = x - x0, etc.
-		for (int lz = 0; lz < bz; lz++)
-			for (int ly = 0; ly < by; ly++)
-				for (int lx = 0; lx < bx; lx++)
-				{
-					int x = x0 + lx, y = y0 + ly, z = z0 + lz;
-					int g = x + nx * (y + ny * z);
-					int l = lx + bx * (ly + by * lz);
-					boxLight[l] = light[g]; // boundary + stale interior: the max-BFS starting values
-					// boxLit[l] is intentionally left 0: the mask is recomputed
-					// from the seeds + propagation below. Copying the old mask
-					// would leave stale block-lit flags after a torch is removed
-					// (a voxel that was block-lit but is now sky-lit must drop its
-					// block-lit flag, or the response curve treats it as block
-					// light and skips the falloff/gamma -> wrong brightness).
-				}
+		var boxLight = new float[total]; // zeroed: the interior is solved from scratch.
+		var boxLit = new byte[total];    // zeroed: the mask is recomputed (no stale flags).
+		int G(int x, int y, int z) => x + nx * (y + ny * z);
+		int L(int lx, int ly, int lz) => lx + bx * (ly + by * lz);
 
-		// SEED 1 — SKY: every air voxel in the box with a solid-free column to
-		// the TOP OF THE FIELD (it sees the sky) is full light. This is a pure
-		// per-column function of the SOLID field (unchanged by a light-only
-		// recompute), so it is exact and seam-safe. A column blocked within the
-		// field stays at its boundary/handoff value (the full recompute set it).
-		// Scan from the TOP OF THE BOX (y1) down to y0: only the box's voxels
-		// are seeded, and a column blocked between y0 and the field top is
-		// handled by the max-BFS handoff from the boundary (not seeded here).
-		// (Scanning from ny-1 would index the box with (y - y0) < 0 when y0 > 0.)
+		// ------------------------------------------------------------------
+		// FIXED BOUNDARY CONDITIONS. The box interior is solved by a max-BFS
+		// seeded from its SURROUNDING, so the result equals what the full flood
+		// fill would produce inside the box (the surrounding values are
+		// unchanged by the edit — the box is one light-range past it). Two
+		// kinds of surrounding:
+		//   (a) SKY — a column open to the field top seeds 1f; a column blocked
+		//       above the box hand-offs from the stale value just above it
+		//       (already correct, and unaffected by the box).
+		//   (b) BLOCK — every source in or adjacent to the box seeds its air
+		//       neighbours at (level - 1), exactly as the full Compute does.
+		// The interior is otherwise started at 0, so only the true conditions
+		// drive the solve (a stale interior value could only make it LESS
+		// correct, so it is never seeded).
+		// ------------------------------------------------------------------
+
+		// (a) Sky hand-off + open-sky seed, per (x, z) column of the box.
 		for (int lx = 0; lx < bx; lx++)
 			for (int lz = 0; lz < bz; lz++)
 			{
 				int x = x0 + lx, z = z0 + lz;
-				for (int y = y1; y >= y0; y--)
+				if (y0 > 0)
 				{
-					int g = x + nx * (y + ny * z);
-					if (solid[g] != 0) break;
-					int l = lx + bx * ((y - y0) + by * lz);
-					boxLight[l] = 1f; // open sky
+					// The column is blocked above the box: hand off from the
+					// stale value just above the box (correct + edit-invariant).
+					int gAbove = G(x, y0 - 1, z);
+					if (solid[gAbove] == 0 && light[gAbove] > 0f)
+					{
+						int gl = G(x, y0, z);
+						if (solid[gl] == 0)
+						{
+							boxLight[L(lx, 0, lz)] = light[gAbove];
+							boxLit[L(lx, 0, lz)] = blockLit[gAbove];
+						}
+					}
+				}
+				else
+				{
+					// Box reaches the field top: a solid-free column up to the
+					// top is open sky -> full light (same per-column rule as the
+					// full Compute). Scan from the top of the box down.
+					for (int y = y1; y >= y0; y--)
+					{
+						int g = G(x, y, z);
+						if (solid[g] != 0) break;
+						boxLight[L(lx, y - y0, lz)] = 1f;
+					}
 				}
 			}
 
-		// BFS over the box, max-propagating from (a) the sky seeds, (b) the
-		// block-light sources inside the box, and (c) the box boundary (the
-		// existing light handoff from outside). Decays 1/voxel, snapping to the
-		// level grid exactly as the full Compute does (deterministic + seam-safe).
+		// (b) Block-light sources: every solid source with a level, in the box
+		//     OR on its 1-voxel shell (so a source just outside the box still
+		//     seeds into the box, and a source inside seeds to the boundary).
+		if (blockLight != null)
+		{
+			for (int lz = -1; lz <= bz; lz++)
+				for (int ly = -1; ly <= by; ly++)
+					for (int lx = -1; lx <= bx; lx++)
+					{
+						int x = x0 + lx, y = y0 + ly, z = z0 + lz;
+						if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) continue;
+						int g = G(x, y, z);
+						byte src = blockLight[g];
+						if (src == 0 || solid[g] == 0) continue;
+						float nl = (src > maxLevel ? maxLevel : (src >= 1 ? src - 1 : 0)) / (float)maxLevel;
+						if (nl <= 0f) continue;
+						// Seed the 6 air neighbours that land inside the box.
+						Seed(lx + 1, ly, lz, nl);
+						Seed(lx - 1, ly, lz, nl);
+						Seed(lx, ly + 1, lz, nl);
+						Seed(lx, ly - 1, lz, nl);
+						Seed(lx, ly, lz + 1, nl);
+						Seed(lx, ly, lz - 1, nl);
+					}
+		}
+
+		void Seed(int lx, int ly, int lz, float nl)
+		{
+			if (lx < 0 || ly < 0 || lz < 0 || lx >= bx || ly >= by || lz >= bz) return;
+			int g = G(x0 + lx, y0 + ly, z0 + lz);
+			if (solid[g] != 0) return;
+			int l = L(lx, ly, lz);
+			if (nl > boxLight[l])
+			{
+				boxLight[l] = nl;
+				boxLit[l] = 1; // block-lit (a block-source path reached it)
+			}
+		}
+
+		// ------------------------------------------------------------------
+		// PROPAGATION — a max-BFS over the box, decaying 1/voxel and snapping
+		// to the level grid, exactly as the full Compute (deterministic +
+		// seam-safe). Every voxel that has light from the boundary conditions
+		// above is enqueued, then re-enqueued whenever a brighter path lifts it.
+		// ------------------------------------------------------------------
 		var queue = new int[total];
 		int qHead = 0, qTail = 0;
 		void Enq(int idx)
@@ -408,48 +469,9 @@ public static class SkyLight
 			}
 			queue[qTail++] = idx;
 		}
-
-		// Enqueue every box voxel that currently has light (sky seeds, boundary
-		// handoff, or stale interior) so the max-BFS can propagate from all of
-		// them. (Re-enqueuing on increase happens in Propagate.)
 		for (int l = 0; l < total; l++)
 		{
-			if (boxLight[l] >= 1f / maxLevel) Enq(l);
-		}
-
-		// Block-light sources inside the box: seed their 6 air neighbours.
-		if (blockLight != null)
-		{
-			for (int lz = 0; lz < bz; lz++)
-				for (int ly = 0; ly < by; ly++)
-					for (int lx = 0; lx < bx; lx++)
-					{
-						int x = x0 + lx, y = y0 + ly, z = z0 + lz;
-						int g = x + nx * (y + ny * z);
-						byte src = blockLight[g];
-						if (src == 0 || solid[g] == 0) continue;
-						float nl = (src > maxLevel ? maxLevel : (src >= 1 ? src - 1 : 0)) / (float)maxLevel;
-						if (nl <= 0f) continue;
-						// Seed the 6 air neighbours (clamped to the box).
-						SeedNeighbour(lx, ly, lz, 1, 0, 0, nl, true);
-						SeedNeighbour(lx, ly, lz, -1, 0, 0, nl, true);
-						SeedNeighbour(lx, ly, lz, 0, 1, 0, nl, true);
-						SeedNeighbour(lx, ly, lz, 0, -1, 0, nl, true);
-						SeedNeighbour(lx, ly, lz, 0, 0, 1, nl, true);
-						SeedNeighbour(lx, ly, lz, 0, 0, -1, nl, true);
-					}
-		}
-
-		void SeedNeighbour(int lx, int ly, int lz, int dx, int dy, int dz, float nl, bool fromBlock)
-		{
-			int nlx = lx + dx, nly = ly + dy, nlz = lz + dz;
-			if (nlx < 0 || nly < 0 || nlz < 0 || nlx >= bx || nly >= by || nlz >= bz) return;
-			int nidx = nlx + bx * (nly + by * nlz);
-			int g = (x0 + nlx) + nx * ((y0 + nly) + ny * (z0 + nlz));
-			if (solid[g] != 0 || nl <= boxLight[nidx]) return;
-			boxLight[nidx] = nl;
-			if (fromBlock) boxLit[nidx] = 1;
-			Enq(nidx);
+			if (boxLight[l] > 0f) Enq(l);
 		}
 
 		while (qHead < qTail)
@@ -464,26 +486,24 @@ public static class SkyLight
 			int rem = l / bx;
 			int ly = rem % by;
 			int lz = rem / by;
-			bool srcBlock = boxLit[l] == 1;
-			// Propagate to the 6 in-box neighbours.
-			PropStep(lx, ly, lz, 1, 0, 0, nl, srcBlock);
-			PropStep(lx, ly, lz, -1, 0, 0, nl, srcBlock);
-			PropStep(lx, ly, lz, 0, 1, 0, nl, srcBlock);
-			PropStep(lx, ly, lz, 0, -1, 0, nl, srcBlock);
-			PropStep(lx, ly, lz, 0, 0, 1, nl, srcBlock);
-			PropStep(lx, ly, lz, 0, 0, -1, nl, srcBlock);
+			PropStep(lx + 1, ly, lz, nl);
+			PropStep(lx - 1, ly, lz, nl);
+			PropStep(lx, ly + 1, lz, nl);
+			PropStep(lx, ly - 1, lz, nl);
+			PropStep(lx, ly, lz + 1, nl);
+			PropStep(lx, ly, lz - 1, nl);
 		}
 
-		void PropStep(int lx, int ly, int lz, int dx, int dy, int dz, float nl, bool fromBlock)
+		void PropStep(int lx, int ly, int lz, float nl)
 		{
-			int nlx = lx + dx, nly = ly + dy, nlz = lz + dz;
-			if (nlx < 0 || nly < 0 || nlz < 0 || nlx >= bx || nly >= by || nlz >= bz) return;
-			int nidx = nlx + bx * (nly + by * nlz);
-			int g = (x0 + nlx) + nx * ((y0 + nly) + ny * (z0 + nlz));
-			if (solid[g] != 0 || nl <= boxLight[nidx]) return;
-			boxLight[nidx] = nl;
-			if (fromBlock) boxLit[nidx] = 1;
-			Enq(nidx);
+			if (lx < 0 || ly < 0 || lz < 0 || lx >= bx || ly >= by || lz >= bz) return;
+			int g = G(x0 + lx, y0 + ly, z0 + lz);
+			if (solid[g] != 0) return;
+			int l = L(lx, ly, lz);
+			if (nl <= boxLight[l]) return;
+			boxLight[l] = nl;
+			boxLit[l] = 1; // a block or hand-off path reached it
+			Enq(l);
 		}
 
 		// Write the solved box back into the global field.
@@ -491,8 +511,8 @@ public static class SkyLight
 			for (int ly = 0; ly < by; ly++)
 				for (int lx = 0; lx < bx; lx++)
 				{
-					int l = lx + bx * (ly + by * lz);
-					int g = (x0 + lx) + nx * ((y0 + ly) + ny * (z0 + lz));
+					int l = L(lx, ly, lz);
+					int g = G(x0 + lx, y0 + ly, z0 + lz);
 					light[g] = boxLight[l];
 					blockLit[g] = boxLit[l];
 				}
