@@ -375,11 +375,15 @@ public static class SkyLight
 		// per-column function of the SOLID field (unchanged by a light-only
 		// recompute), so it is exact and seam-safe. A column blocked within the
 		// field stays at its boundary/handoff value (the full recompute set it).
+		// Scan from the TOP OF THE BOX (y1) down to y0: only the box's voxels
+		// are seeded, and a column blocked between y0 and the field top is
+		// handled by the max-BFS handoff from the boundary (not seeded here).
+		// (Scanning from ny-1 would index the box with (y - y0) < 0 when y0 > 0.)
 		for (int lx = 0; lx < bx; lx++)
 			for (int lz = 0; lz < bz; lz++)
 			{
 				int x = x0 + lx, z = z0 + lz;
-				for (int y = ny - 1; y >= y0; y--)
+				for (int y = y1; y >= y0; y--)
 				{
 					int g = x + nx * (y + ny * z);
 					if (solid[g] != 0) break;
