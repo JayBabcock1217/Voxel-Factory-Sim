@@ -112,6 +112,12 @@ public partial class VoxelChunk : Node3D
 	// thread only.
 	private float[] _cachedLightField;
 	private byte[] _cachedBlockLit;
+	// The last local recompute's CHANGED voxels (wide-field lattice indices), so
+	// the instant-edit path can decide which sub-cells' vertices actually
+	// changed light — and skip the expensive MC re-mesh for sub-cells whose
+	// sampled light is unchanged (the Minecraft-style "only re-mesh what
+	// changed" optimisation). Wide indices, matching _cachedLightField.
+	private int[] _lightChangedWide;
 	// Option B lighting: the wide light field's SOLID|AIR + BLOCK-LIGHT volumes
 	// (the inputs to SkyLight.Compute/ComputeLocal), cached so the instant-edit
 	// local recompute does NOT rebuild the full 385k-voxel volume on every edit.
@@ -308,6 +314,55 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
+	/// Whether the cached wide block-light volume exists (built by a full
+	/// rebuild). The instant-edit path uses it to read the PRE-edit block-light
+	/// level at a voxel, to decide if the edit's light source actually changed.
+	/// </summary>
+	public bool HasWideCache => _cachedWideBlock != null;
+
+	/// <summary>
+	/// The PRE-edit block-light level at a wide-field voxel (wx, wy, wz), or 0 if
+	/// the cache is missing or the index is out of range. This is the value the
+	/// last full rebuild computed (before the current edit's patch), so comparing
+	/// it to the post-edit level tells the instant-edit path whether the light
+	/// SOURCE changed (and thus whether a local light recompute is needed at all).
+	/// <paramref name="lpx"/>/<paramref name="lpy"/>/<paramref name="lpz"/> are the
+	/// wide field dims (the caller computes them, matching the cached volume).
+	/// </summary>
+	public int GetWideBlockAt(int lpx, int lpy, int lpz, int wx, int wy, int wz)
+	{
+		if (_cachedWideBlock == null)
+		{
+			return 0;
+		}
+		if (wx < 0 || wx >= lpx || wy < 0 || wy >= lpy || wz < 0 || wz >= lpz)
+		{
+			return 0;
+		}
+		return _cachedWideBlock[wx + lpx * (wy + lpy * wz)];
+	}
+
+	/// <summary>
+	/// The PRE-edit solid (1) / air (0) state at a wide-field voxel, or 0 (air)
+	/// if the cache is missing or the index is out of range. Used by the
+	/// instant-edit path to detect a SOLID-STATE change (placing/breaking a
+	/// block), which can change sky light out to the sky-line even when no light
+	/// source changed — so a local light recompute is still required.
+	/// </summary>
+	public int GetWideSolidAt(int lpx, int lpy, int lpz, int wx, int wy, int wz)
+	{
+		if (_cachedWideSolid == null)
+		{
+			return 0;
+		}
+		if (wx < 0 || wx >= lpx || wy < 0 || wy >= lpy || wz < 0 || wz >= lpz)
+		{
+			return 0;
+		}
+		return _cachedWideSolid[wx + lpx * (wy + lpy * wz)];
+	}
+
+	/// <summary>
 	/// LOCAL light recompute (Option B lighting): recompute the wide light field
 	/// only over a box around the edit (instead of the full 3×3-chunk flood fill),
 	/// re-applying the response curve, and return the sub-cells whose per-vertex
@@ -327,6 +382,7 @@ public partial class VoxelChunk : Node3D
 		int bx0, int by0, int bz0, int bx1, int by1, int bz1)
 	{
 		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		_lightChangedWide = null;
 		if (_cachedLightField == null || _cachedWideSolid == null)
 		{
 			return changed; // no light field yet (first build) — the full rebuild handles it
@@ -372,7 +428,10 @@ public partial class VoxelChunk : Node3D
 		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
 
 		// Diff: a voxel changed if its light differs by more than a tiny epsilon.
-		// Map each changed voxel to the sub-cell(s) whose vertices sample it.
+		// Record the changed wide indices (for the caller's precise sub-cell
+		// re-mesh) and map each changed voxel to the sub-cell(s) whose vertices
+		// sample it (the conservative bound, used when no precise check is made).
+		var changedWideList = new System.Collections.Generic.List<int>();
 		for (int iz = 0; iz < bz; iz++)
 			for (int iy = 0; iy < by; iy++)
 				for (int ix = 0; ix < bx; ix++)
@@ -383,6 +442,7 @@ public partial class VoxelChunk : Node3D
 					{
 						continue; // unchanged
 					}
+					changedWideList.Add(g);
 					// Wide voxel -> chunk-local voxel -> sub-cell. The wide field's
 					// center chunk origin maps to wide index (lpx/2 - 1, 1, lpz/2 - 1);
 					// a wide voxel (wx,wy,wz) is chunk-local (wx - (lpx/2-1), wy - 1,
@@ -395,6 +455,7 @@ public partial class VoxelChunk : Node3D
 					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
 				}
 
+		_lightChangedWide = changedWideList.Count > 0 ? changedWideList.ToArray() : null;
 		return changed;
 	}
 
@@ -419,6 +480,7 @@ public partial class VoxelChunk : Node3D
 		int range)
 	{
 		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		_lightChangedWide = null;
 		if (_cachedLightField == null || _cachedWideSolid == null)
 		{
 			return changed; // no light field yet (first build) — the full rebuild handles it
@@ -453,6 +515,7 @@ public partial class VoxelChunk : Node3D
 
 		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
 
+		var changedWideList = new System.Collections.Generic.List<int>();
 		for (int iz = 0; iz < bz; iz++)
 			for (int iy = 0; iy < by; iy++)
 				for (int ix = 0; ix < bx; ix++)
@@ -463,13 +526,69 @@ public partial class VoxelChunk : Node3D
 					{
 						continue;
 					}
+					changedWideList.Add(g);
 					int clx = (bx0 + ix) - (lpx / 2 - 1);
 					int cly = (by0 + iy) - 1;
 					int clz = (bz0 + iz) - (lpz / 2 - 1);
 					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
 				}
 
+		_lightChangedWide = changedWideList.Count > 0 ? changedWideList.ToArray() : null;
 		return changed;
+	}
+
+	/// <summary>
+	/// The wide-field lattice indices of the voxels whose light changed in the
+	/// most recent <see cref="RecomputeLightLocal"/> / <see cref="RecomputeLightLocalAt"/>,
+	/// or null if none (or no recompute has run). The instant-edit path uses this
+	/// to re-mesh only the sub-cells whose vertices actually sample a changed
+	/// light value (see <see cref="SubCellSamplesLightChanged"/>).
+	/// </summary>
+	public int[] GetLightChangedWide() => _lightChangedWide;
+
+	/// <summary>
+	/// True if any of the sub-cell's sampled light values (its region + the
+	/// 1-voxel shell + the 1 MC-lattice padding point each side — exactly the
+	/// voxels <c>BuildSubCell</c> samples) changed in the last local recompute.
+	/// Used to skip the expensive MC re-mesh for sub-cells whose surface light
+	/// is unchanged: if no sampled voxel changed, the produced mesh is
+	/// byte-identical, so re-meshing is wasted work.
+	/// </summary>
+	public bool SubCellSamplesLightChanged(VoxelWorld world, int cellX, int cellY, int cellZ)
+	{
+		int[] changedWide = _lightChangedWide;
+		if (changedWide == null)
+		{
+			return false; // no light recompute ran (or nothing changed)
+		}
+		if (_cachedLightField == null)
+		{
+			return false;
+		}
+		var (x0, x1, y0, y1, z0, z1) = world.CellBounds(cellX, cellY, cellZ);
+		// Wide field dims: center chunk origin -> wide (lpx/2-1, 1, lpz/2-1).
+		int cs = world.ChunkSizeXZ;
+		int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+		int fpx = 2 * cs + 2 * maxL + 2;
+		int half = fpx / 2 - 1;
+		// The sub-cell's sampled wide region: region + 1 shell + 1 MC pad each
+		// side, in wide coords (the same lattice BuildSubCell samples).
+		int wx0 = (x0 - 2) + half, wx1 = (x1 + 2) + half;
+		int wy0 = (y0 - 2) + 1, wy1 = (y1 + 2) + 1;
+		int wz0 = (z0 - 2) + half, wz1 = (z1 + 2) + half;
+		for (int i = 0; i < changedWide.Length; i++)
+		{
+			int g = changedWide[i];
+			int wz = g / (fpx * (world.ChunkHeight + 2));
+			int rem = g - wz * fpx * (world.ChunkHeight + 2);
+			int wy = rem / fpx;
+			int wx = rem - wy * fpx;
+			if (wx >= wx0 && wx <= wx1 && wy >= wy0 && wy <= wy1 && wz >= wz0 && wz <= wz1)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/// <summary>Applies the response curve to a box of the light field in place.</summary>
