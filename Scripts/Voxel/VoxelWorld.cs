@@ -1465,15 +1465,85 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
+		// Build/rebuild meshes within a per-frame budget. Order: edited
+		// chunks first (most recently edited wins ties), then nearest to the
+		// player. Edited chunks (EditPriority > 0) sort before never-edited ones
+		// at the same distance. Chunks whose data isn't generated yet are
+		// skipped — Rebuild would no-op on them anyway.
+		//
+		// WHY THIS YIELDS RING ORDER: first-builds (chunks just generated) carry
+		// EditPriority 0, so they are ordered purely by distance-to-player —
+		// nearest first, i.e. the innermost unfinished ring. That is exactly the
+		// order generation completed them in (the gen queue is spiral-ordered),
+		// so the budget meshes the spawn neighbourhood before the outer ring.
+		// MarkNeighboursForRebuild deliberately does NOT stamp a rising priority
+		// (see its docs): doing so let a LATER (farther) completion re-prioritise
+		// the budget ahead of the not-yet-meshed inner ring, so the budget chased
+		// the newest completions "all over the place" and the spawn gate starved.
+		//
+		// STALE-PRIORITY CAP: an edit stamp from many frames ago is no longer
+		// "fresh" — if it still sits at the top, it would pin the budget to one
+		// far chunk while first-builds wait. Cap every priority to a recent
+		// window (the last ~120 stamps) so stale edits age out and distance
+		// order (the ring order) takes over again.
+		const int PriorityWindow = 120;
+		int priorityCap = _editPriorityCounter - PriorityWindow;
+		var pending = new List<VoxelChunk>();
+		foreach (VoxelChunk chunk in _chunks.Values)
+		{
+			if (chunk.NeedsMesh && chunk.DataReady)
+			{
+				if (chunk.EditPriority > 0 && chunk.EditPriority < priorityCap)
+				{
+					// Stale edit priority: age it out so it can't pin the budget.
+					chunk.EditPriority = priorityCap;
+				}
+				pending.Add(chunk);
+			}
+		}
+
+		// OrderBy/ThenBy is a stable sort, so equal (priority, distance) keys
+		// keep their original order; the edit-priority stamp plus distance is
+		// a deterministic total order over the edited area.
+		pending = pending
+			.OrderByDescending(c => c.EditPriority)
+			.ThenBy(c => DistanceSq(c.Coord, playerChunk))
+			.ToList();
+
+		for (int i = 0; i < pending.Count && i < ChunksPerFrame; i++)
+		{
+			pending[i].Rebuild(this);
+		}
+
+		// Item drops from edited voxels only spawn once the chunk update for
+		// the edited chunk has finished (see PendingDrops) — otherwise the drop
+		// would visibly rest in mid-air until the surface re-meshes.
+		FlushPendingDrops(playerChunk);
+
+		// Enable per-chunk collision for the player's vicinity: chunks within
+		// CollisionRadiusChunks (plus any just-rebuilt chunk) keep their shape
+		// so the player never stands on invisible ground; the rest have theirs
+		// nulled so the broad phase only ever tests a small constant number of
+		// colliders.
+		UpdateLocalCollision(playerChunk);
+
 		// INSTANT EDIT: the chunk the player most recently edited is rebuilt
 		// SYNCHRONOUSLY on the main thread and applied in THIS frame, so a
 		// placed/broken voxel is visible the frame the player clicks (Minecraft-
 		// style responsiveness). Without this, the edit waits for the async
-		// ChunksPerFrame budget below (a few frames) plus the worker-thread build
+		// ChunksPerFrame budget above (a few frames) plus the worker-thread build
 		// plus a CallDeferred apply — several frames of visible lag. Only the
 		// edited chunk is synchronous (a 16×256×16 mesh is ~1–3 ms); its 1-ring
 		// neighbours still use the async budget. A no-op when there is no pending
 		// edit, or the chunk isn't ready to mesh yet (still generating).
+		//
+		// RUNS AFTER THE BUDGET LOOP ON PURPOSE: the budget dispatches its
+		// ChunksPerFrame Task.Run builds, and the first edits after load used to
+		// run head-on with that thread-pool churn (the ~150–240 ms "first edit
+		// after load" hitch). Running the instant edit AFTER the dispatch means
+		// the main thread is no longer contending with the build dispatch, so the
+		// first edits are fast too (the light + mesh are still computed in this
+		// frame — still instant).
 		if (_instantRebuildChunk is VoxelChunk instantChunk
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
@@ -1759,67 +1829,6 @@ public partial class VoxelWorld : Node3D
 			_instantRebuildChunk = null;
 		}
 
-		// Build/rebuild meshes within a per-frame budget. Order: edited
-		// chunks first (most recently edited wins ties), then nearest to the
-		// player. Edited chunks (EditPriority > 0) sort before never-edited ones
-		// at the same distance. Chunks whose data isn't generated yet are
-		// skipped — Rebuild would no-op on them anyway.
-		//
-		// WHY THIS YIELDS RING ORDER: first-builds (chunks just generated) carry
-		// EditPriority 0, so they are ordered purely by distance-to-player —
-		// nearest first, i.e. the innermost unfinished ring. That is exactly the
-		// order generation completed them in (the gen queue is spiral-ordered),
-		// so the budget meshes the spawn neighbourhood before the outer ring.
-		// MarkNeighboursForRebuild deliberately does NOT stamp a rising priority
-		// (see its docs): doing so let a LATER (farther) completion re-prioritise
-		// the budget ahead of the not-yet-meshed inner ring, so the budget chased
-		// the newest completions "all over the place" and the spawn gate starved.
-		//
-		// STALE-PRIORITY CAP: an edit stamp from many frames ago is no longer
-		// "fresh" — if it still sits at the top, it would pin the budget to one
-		// far chunk while first-builds wait. Cap every priority to a recent
-		// window (the last ~120 stamps) so stale edits age out and distance
-		// order (the ring order) takes over again.
-		const int PriorityWindow = 120;
-		int priorityCap = _editPriorityCounter - PriorityWindow;
-		var pending = new List<VoxelChunk>();
-		foreach (VoxelChunk chunk in _chunks.Values)
-		{
-			if (chunk.NeedsMesh && chunk.DataReady)
-			{
-				if (chunk.EditPriority > 0 && chunk.EditPriority < priorityCap)
-				{
-					// Stale edit priority: age it out so it can't pin the budget.
-					chunk.EditPriority = priorityCap;
-				}
-				pending.Add(chunk);
-			}
-		}
-
-		// OrderBy/ThenBy is a stable sort, so equal (priority, distance) keys
-		// keep their original order; the edit-priority stamp plus distance is
-		// a deterministic total order over the edited area.
-		pending = pending
-			.OrderByDescending(c => c.EditPriority)
-			.ThenBy(c => DistanceSq(c.Coord, playerChunk))
-			.ToList();
-
-		for (int i = 0; i < pending.Count && i < ChunksPerFrame; i++)
-		{
-			pending[i].Rebuild(this);
-		}
-
-		// Item drops from edited voxels only spawn once the chunk update for
-		// the edited chunk has finished (see PendingDrops) — otherwise the drop
-		// would visibly rest in mid-air until the surface re-meshes.
-		FlushPendingDrops(playerChunk);
-
-		// Enable per-chunk collision for the player's vicinity: chunks within
-		// CollisionRadiusChunks (plus any just-rebuilt chunk) keep their shape
-		// so the player never stands on invisible ground; the rest have theirs
-		// nulled so the broad phase only ever tests a small constant number of
-		// colliders.
-		UpdateLocalCollision(playerChunk);
 
 		// Distant-Horizons-style LOD beyond the normal render distance
 		// (visual-only heightfields, own budget — never routed through
