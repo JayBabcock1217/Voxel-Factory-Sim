@@ -1538,24 +1538,46 @@ public partial class VoxelWorld : Node3D
 				instantChunk.SetPatchVoxel(_instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z, _patchMat, _patchLight);
 				int boxRange = _patchLight > 0 ? Mathf.Max(1, LightRadiusFor(_patchLight)) : fieldRange;
 
-				// (2) LIGHT: local recompute over a box around the edit. The box
-				//     radius is the edit's light radius (a source only reaches that
-				//     far), so the box boundary — one radius past the edit — is
-				//     genuinely unaffected by the edit (the fixed-condition
-				//     assumption holds). Much smaller than the full field for a
-				//     torch (13 vs 30), which is what keeps the edit fast.
-				int bx0 = Mathf.Max(0, wx - boxRange), bx1 = Mathf.Min(lpx - 1, wx + boxRange);
-				int by0 = Mathf.Max(0, wy - boxRange), by1 = Mathf.Min(lpy - 1, wy + boxRange);
-				int bz0 = Mathf.Max(0, wz - boxRange), bz1 = Mathf.Min(lpz - 1, wz + boxRange);
+				// COLD-START GUARD: while the world is still settling (any chunk
+				// has a first build in flight), the async first-builds are
+				// churning the worker threads and the local light recompute
+				// (BFS + curve + neighbour passes) gets stretched into a visible
+				// hitch (the ~160 ms "first edit after load"). Skip the light
+				// recompute in that window — the MESH is still rebuilt
+				// synchronously below (instant), and the light converges on the
+				// async full rebuild (the "light lags a frame" behaviour). Once
+				// the world is ready, the full instant light path runs.
+				bool worldSettled = true;
+				foreach (VoxelChunk c in _chunks.Values)
+				{
+					if (c.MeshBuildInFlight)
+					{
+						worldSettled = false;
+						break;
+					}
+				}
 
-				// Run the local recompute over the cached wide volumes (no 385k
-				// rebuild) and collect the sub-cells whose light changed.
-				var _lightChanged = instantChunk.RecomputeLightLocal(this,
-					lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1);
-				if (InstantBuildProfile) _lightCells = _lightChanged.Count;
-				_dirty.UnionWith(_lightChanged);
+				if (worldSettled)
+				{
+					// (2) LIGHT: local recompute over a box around the edit. The
+					//     box radius is the edit's light radius (a source only
+					//     reaches that far), so the box boundary — one radius past
+					//     the edit — is genuinely unaffected by the edit (the
+					//     fixed-condition assumption holds). Much smaller than the
+					//     full field for a torch (13 vs 30), which keeps it fast.
+					int bx0 = Mathf.Max(0, wx - boxRange), bx1 = Mathf.Min(lpx - 1, wx + boxRange);
+					int by0 = Mathf.Max(0, wy - boxRange), by1 = Mathf.Min(lpy - 1, wy + boxRange);
+					int bz0 = Mathf.Max(0, wz - boxRange), bz1 = Mathf.Min(lpz - 1, wz + boxRange);
 
-				// Re-mesh the union of geometry + light dirty sub-cells.
+					// Run the local recompute over the cached wide volumes (no
+					// 385k rebuild) and collect the sub-cells whose light changed.
+					var _lightChanged = instantChunk.RecomputeLightLocal(this,
+						lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1);
+					if (InstantBuildProfile) _lightCells = _lightChanged.Count;
+					_dirty.UnionWith(_lightChanged);
+				}
+
+				// Re-mesh the geometry (+ light, when computed) dirty sub-cells.
 				foreach (var cell in _dirty)
 				{
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
@@ -1571,7 +1593,7 @@ public partial class VoxelWorld : Node3D
 				// sub-cells whose light changed. (Each neighbour's wide field
 				// already carries the source — the wide field spans neighbouring
 				// chunks — so no patch is needed; the boundary hand-off seeds it.)
-				if (_patchLight > 0)
+				if (_patchLight > 0 && worldSettled)
 				{
 					int lightR = boxRange; // = LightRadiusFor(_patchLight)
 					if (lightR >= ChunkSizeXZ - _instantEditLocal.X - 1
