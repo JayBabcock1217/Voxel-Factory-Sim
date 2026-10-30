@@ -398,6 +398,80 @@ public partial class VoxelChunk : Node3D
 		return changed;
 	}
 
+	/// <summary>
+	/// LOCAL light recompute centred on an ARBITRARY wide-world position
+	/// <paramref name="wWorld"/> (a world voxel, not necessarily inside this
+	/// chunk) with radius <paramref name="range"/>. Used by the instant-edit
+	/// path for a NEIGHBOUR chunk whose wide field is lit by a light source in
+	/// the edited chunk: the source's light crosses the seam, and this makes the
+	/// neighbour's light update instant too (instead of waiting for the async
+	/// full rebuild — the "delay before the other chunk computes its light").
+	/// No patch is applied (the neighbour's own voxels are unchanged); its wide
+	/// volumes already carry the source (the wide field covers the neighbouring
+	/// chunks, so the source voxel is inside this neighbour's field). Returns the
+	/// sub-cells to re-mesh (may be empty if the box is entirely outside this
+	/// chunk, or the light didn't change).
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightLocalAt(
+		VoxelWorld world,
+		int lpx, int lpy, int lpz,
+		int wWorldX, int wWorldY, int wWorldZ,
+		int range)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		if (_cachedLightField == null || _cachedWideSolid == null)
+		{
+			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+
+		int bx0 = Mathf.Max(0, wWorldX - range);
+		int bx1 = Mathf.Min(lpx - 1, wWorldX + range);
+		int by0 = Mathf.Max(0, wWorldY - range);
+		int by1 = Mathf.Min(lpy - 1, wWorldY + range);
+		int bz0 = Mathf.Max(0, wWorldZ - range);
+		int bz1 = Mathf.Min(lpz - 1, wWorldZ + range);
+		if (bx0 > bx1 || by0 > by1 || bz0 > bz1)
+		{
+			return changed; // the box is entirely outside this chunk's field
+		}
+
+		// Snapshot the box (diff which voxels changed), run the local recompute
+		// (no patch — the neighbour's own voxels are unchanged), re-curve, diff.
+		int bx = bx1 - bx0 + 1, by = by1 - by0 + 1, bz = bz1 - bz0 + 1;
+		int total = bx * by * bz;
+		var before = new float[total];
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
+				}
+
+		SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
+			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
+
+		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int l = ix + bx * (iy + by * iz);
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
+					{
+						continue;
+					}
+					int clx = (bx0 + ix) - (lpx / 2 - 1);
+					int cly = (by0 + iy) - 1;
+					int clz = (bz0 + iz) - (lpz / 2 - 1);
+					changed.UnionWith(DirtyCellsForChunkLocal(world, clx, cly, clz));
+				}
+
+		return changed;
+	}
+
 	/// <summary>Applies the response curve to a box of the light field in place.</summary>
 	private void ApplyLightResponseBox(
 		VoxelWorld world, int total, int bx, int by, int bz,

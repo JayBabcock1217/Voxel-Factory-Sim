@@ -1556,6 +1556,77 @@ public partial class VoxelWorld : Node3D
 				{
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
+
+				// CROSS-CHUNK LIGHT: if the edit is a light source whose reach
+				// (LightRadiusFor) crosses a chunk border, the neighbouring chunk's
+				// wide field is lit by it too. The local recompute above only
+				// touched the CENTER chunk's field, so without this the neighbour
+				// would wait for the slow async full rebuild (the "delay before the
+				// other chunk computes its light"). Do an immediate LOCAL recompute
+				// on each lit neighbour, centred on the source, and re-mesh the
+				// sub-cells whose light changed. (Each neighbour's wide field
+				// already carries the source — the wide field spans neighbouring
+				// chunks — so no patch is needed; the boundary hand-off seeds it.)
+				if (_patchLight > 0)
+				{
+					int lightR = LightRadiusFor(_patchLight);
+					if (lightR >= ChunkSizeXZ - _instantEditLocal.X - 1
+						|| lightR >= ChunkSizeXZ - _instantEditLocal.Z - 1
+						|| _instantEditLocal.X + 1 + lightR >= ChunkSizeXZ
+						|| _instantEditLocal.Z + 1 + lightR >= ChunkSizeXZ)
+					{
+						// The light crosses at least one of this chunk's borders. For
+						// every LOADED neighbour whose field can reach the source's
+						// lit region, run a local recompute centred on the source
+						// (wide-world coords of the source).
+						int srcWx = _instantEditLocal.X + half;
+						int srcWz = _instantEditLocal.Z + half;
+						int srcWy = _instantEditLocal.Y + 1;
+						foreach (var kv in _chunks)
+						{
+							if (kv.Value == instantChunk)
+							{
+								continue;
+							}
+							// Cheap reject: only recompute a neighbour whose own field
+							// can contain the source's lit region. The neighbour's wide
+							// field spans [nwx0 - H, nwx0 + cs + H] per axis, where
+							// H = cs + range + 1 (center chunk + light range + 1 pad).
+							// The source's lit region spans [sX - lightR, sX + lightR].
+							// If the region is entirely outside the field, the local
+							// recompute is a no-op, so skip it.
+							int nwx0 = kv.Key.X * ChunkSizeXZ;
+							int nwz0 = kv.Key.Y * ChunkSizeXZ;
+							int sX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
+							int sZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
+							int H = ChunkSizeXZ + range + 1;
+							if (sX + lightR < nwx0 - H || sX - lightR > nwx0 + ChunkSizeXZ + H
+								|| sZ + lightR < nwz0 - H || sZ - lightR > nwz0 + ChunkSizeXZ + H)
+							{
+								continue; // the source's light never reaches this chunk's field
+							}
+							if (!kv.Value.DataReady || kv.Value.MeshBuildInFlight)
+							{
+								continue; // no field to recompute yet (the full build handles it)
+							}
+							var nChanged = kv.Value.RecomputeLightLocalAt(this, lpx, lpy, lpz,
+								srcWx, srcWy, srcWz, lightR);
+							if (nChanged.Count == 0)
+							{
+								continue;
+							}
+							// Re-mesh the neighbour's changed sub-cells (a fresh
+							// snapshot of the neighbour's neighbours; the neighbour
+							// is not the edited chunk, so its geometry is unchanged —
+							// only its light sampling changes).
+							var nSnap = kv.Value.SnapshotForEdit(this);
+							foreach (var ncell in nChanged)
+							{
+								kv.Value.RebuildSubCell(this, ncell.X, ncell.Y, ncell.Z, nSnap);
+							}
+						}
+					}
+				}
 				if (InstantBuildProfile && InstantBuildProfileCount < 12)
 				{
 					InstantBuildProfileCount++;
