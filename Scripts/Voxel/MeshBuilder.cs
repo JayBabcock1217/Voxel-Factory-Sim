@@ -771,12 +771,13 @@ public static class MeshBuilder
 	/// sub-cell's triangles (~1/64th the work, single-digit ms).
 	///
 	/// The sub-cell region is given in CHUNK-LOCAL voxel coords (rx0..rx1 etc.,
-	/// inclusive). A 1-voxel shell around the region is sampled (via the same
-	/// neighbor query the whole-chunk path uses) so the isosurface is
-	/// continuous across sub-cell borders — seams are identical to the
-	/// whole-chunk path. The per-vertex light is sampled from the supplied
-	/// CACHED wide light field (already curved, Path 1), so NO flood fill runs
-	/// here — the light is chunk-wide and reused.
+	/// inclusive). The field mirrors the whole-chunk lattice structure (1-voxel
+	/// shell + 1 MC lattice padding point each side) so every region voxel is
+	/// far enough from the lattice edge for ALL its faces to generate — this is
+	/// what keeps the isosurface continuous across sub-cell borders (no gaps).
+	/// The per-vertex light is sampled from the supplied CACHED wide light field
+	/// (already curved, Path 1), so NO flood fill runs here — the light is
+	/// chunk-wide and reused.
 	///
 	/// Returns the sub-cell's visual <see cref="ArrayMesh"/> and its collision
 	/// triangles (world-space, ready for ConcavePolygonShape3D.SetFaces).
@@ -810,17 +811,25 @@ public static class MeshBuilder
 		int lastMaterial = palette.MaterialCount;
 		Vector3 origin = new Vector3(wx0, 0, wz0);
 
-		// The sub-cell's padded field covers the region PLUS a 1-voxel shell on
-		// every side, using the SAME lattice convention as the whole-chunk path:
-		// lattice point (ix,iy,iz) -> LOCAL voxel (ix-1, iy-1, iz-1), where LOCAL
-		// voxel 0 = chunk-local (rx0-1, ry0-1, rz0-1) (the -X/-Y/-Z shell corner).
-		// So the field's local voxel range is 0..(W-1) where W = region + 2 shell,
-		// and the lattice is 0..(W+1) (the extra 1 per axis is the MC lattice
-		// padding, lattice 0 -> local voxel -1).
-		int wX = (rx1 - rx0 + 1) + 2; // local voxel width (region + 1 shell each side)
-		int wY = (ry1 - ry0 + 1) + 2;
-		int wZ = (rz1 - rz0 + 1) + 2;
-		int px = wX + 2, py = wY + 2, pz = wZ + 2; // lattice dims (local + 2 padding)
+		// The sub-cell's padded field MUST mirror the WHOLE-CHUNK lattice
+		// structure exactly: a 1-voxel shell around the region PLUS 1 extra
+		// lattice point of MC padding on each side. This is what puts every
+		// region voxel at least 2 lattice points from the lattice edge, so the
+		// isosurface is generated on ALL its faces. (If the field were only
+		// region+shell+padding, the last region voxel would sit 1 cell from the
+		// edge and its top/+X/+Z faces would never generate -> a gap between
+		// every sub-cell.)
+		//
+		// Convention (same as the whole-chunk path): lattice point (ix,iy,iz) ->
+		// LOCAL voxel (ix-1, iy-1, iz-1), where LOCAL voxel 0 = chunk-local
+		// (rx0-1, ry0-1, rz0-1) (the -X/-Y/-Z shell corner). Local voxels span
+		// 0..(wX+1) where wX = region width; the region is local 1..wX, the
+		// +1 shell is local 0 and wX+1, and the lattice padding is local -1 and
+		// wX+2 (lattice 0 and wX+3). So the lattice dims are (wX+4) per axis.
+		int wX = rx1 - rx0 + 1; // region width in voxels
+		int wY = ry1 - ry0 + 1;
+		int wZ = rz1 - rz0 + 1;
+		int px = wX + 4, py = wY + 4, pz = wZ + 4; // lattice dims (local + 2 padding)
 
 		// local voxel (lx,ly,lz) -> chunk-local voxel (rx0-1+lx, ry0-1+ly, rz0-1+lz).
 		int offX = rx0 - 1, offY = ry0 - 1, offZ = rz0 - 1;
@@ -852,25 +861,20 @@ public static class MeshBuilder
 		//    local lattice, cell (cx,cy,cz) has corners at lattice (cx..cx+1) ->
 		//    chunk-local voxels (rx0+cx-2 .. rx0+cx-1), i.e. it covers voxels
 		//    [rx0+cx-2, rx0+cx-1]. The region is [rx0, rx1]. A cell covers the
-		//    region iff [rx0+cx-2, rx0+cx-1] intersects [rx0, rx1]
-		//    <=> cx in [1, rx1-rx0+2] = [1, wX-1] (wX = region+2). So the
-		//    region's cells are cx in [1, wX-1], cy in [1, wY-1], cz in [1, wZ-1].
+		//    region iff that span intersects [rx0, rx1] <=> cx in [1, wX+1]
+		//    (cx=1 covers rx0-1..rx0, cx=wX+1 covers rx1..rx1+1). So the
+		//    region's cells are cx in [1, wX+1], cy in [1, wY+1], cz in [1, wZ+1].
 		int cx0 = 1, cy0 = 1, cz0 = 1;
-		int cx1 = wX - 1, cy1 = wY - 1, cz1 = wZ - 1;
+		int cx1 = wX + 1, cy1 = wY + 1, cz1 = wZ + 1;
 
-		// Seam ownership within the sub-cell: the +X/+Z boundary cells of the
-		// REGION are drawn only when that side's neighbour sub-cell region is
-		// present. But the seam rule is really about CHUNK borders, not sub-cell
-		// borders. Since a sub-cell's region is strictly inside one chunk (or
-		// spans a chunk border only if the sub-cell straddles it — which it
-		// doesn't; sub-cells are within a chunk), the chunk-seam ownership
-		// (east/south/diag loaded) applies only to the sub-cells on the chunk's
-		// +X/+Z border. For interior sub-cells, all cells are drawn. For the
-		// chunk's +X-border sub-cell, the region's +X boundary cells (cx == the
-		// region's max X, which equals the chunk's +X border) need eastLoaded.
-		// We approximate: a region cell on the region's +X edge is drawn only if
-		// (a) the region's +X edge is NOT the chunk's +X border (interior seam,
-		// always drawn), or (b) it IS the chunk's +X border and eastLoaded.
+		// Seam ownership: the seam rule is about CHUNK borders, not sub-cell
+		// borders. A sub-cell's region lies strictly inside one chunk, so the
+		// chunk-seam ownership (east/south/diag loaded) applies only to the
+		// sub-cells on the chunk's +X/+Z border, and only to their region cells
+		// that sit on that border. For interior sub-cells (region not on the
+		// chunk's +X/+Z border) every region cell is drawn. For the chunk's
+		// +X-border sub-cell, the region's +X boundary cells (cx == cx1, which
+		// spans the chunk's last voxel) need eastLoaded; likewise south/diag.
 		bool regionAtChunkEast = (rx1 >= sx - 1);
 		bool regionAtChunkSouth = (rz1 >= sz - 1);
 
