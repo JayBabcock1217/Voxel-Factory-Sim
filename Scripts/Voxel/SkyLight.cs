@@ -43,6 +43,13 @@ namespace FactorySim.Voxel;
 /// </summary>
 public static class SkyLight
 {
+	// Scratch buffers reused by ComputeLocal across calls (it runs on the MAIN
+	// thread for the instant-edit path, so a static is safe — no concurrency).
+	// Reusing them avoids allocating ~140 KB (boxLight float[] + boxLit byte[])
+	// on every local recompute, which was the GC churn behind the edit hitch.
+	private static float[] _localLightScratch;
+	private static byte[] _localLitScratch;
+
 	/// <summary>
 	/// Flood-fills light over a padded solid|air field: SKY light (open-sky
 	/// columns at 15, decaying through air) plus optional BLOCK light (placed
@@ -357,8 +364,21 @@ public static class SkyLight
 
 		int bx = x1 - x0 + 1, by = y1 - y0 + 1, bz = z1 - z0 + 1;
 		int total = bx * by * bz;
-		var boxLight = new float[total]; // zeroed: the interior is solved from scratch.
-		var boxLit = new byte[total];    // zeroed: the mask is recomputed (no stale flags).
+		// Reuse the scratch buffers (grow if needed) so a local recompute doesn't
+		// allocate ~140 KB on every call. Zero the box so the interior is solved
+		// from scratch (no stale interior value or block-lit flag survives).
+		if (_localLightScratch == null || _localLightScratch.Length < total)
+		{
+			_localLightScratch = new float[total];
+		}
+		if (_localLitScratch == null || _localLitScratch.Length < total)
+		{
+			_localLitScratch = new byte[total];
+		}
+		var boxLight = _localLightScratch;
+		var boxLit = _localLitScratch;
+		System.Array.Clear(boxLight, 0, total);
+		System.Array.Clear(boxLit, 0, total);
 		int G(int x, int y, int z) => x + nx * (y + ny * z);
 		int L(int lx, int ly, int lz) => lx + bx * (ly + by * lz);
 
