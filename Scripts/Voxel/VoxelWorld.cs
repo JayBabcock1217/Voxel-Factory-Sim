@@ -999,6 +999,13 @@ public partial class VoxelWorld : Node3D
 		}
 
 		_config = BuildConfig();
+		// Bind the persistent canopy-overhang store to THIS world episode. Every
+		// chunk's foliage stage and the world's drain share this one store, so a
+		// border tree's overhang survives its target chunk being freed and
+		// re-generated (the fix for clipped border trees + missing-foliage chunks).
+		// A fresh store per _Ready means a new world (new seed) never replays a
+		// previous world's overhangs.
+		TerrainGenerator.BindWorld(this);
 		Palette = new VoxelMaterialPalette();
 		_lastBuiltMode = MeshMode;
 		_chunkRoot = new Node3D { Name = "Chunks" };

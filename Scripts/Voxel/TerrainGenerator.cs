@@ -441,14 +441,86 @@ public static class TerrainGenerator
 	/// <summary>
 	/// Pending canopy-overhang writes, keyed by the chunk coord they belong to.
 	/// A chunk's foliage stage writes its trees' overhang into loaded neighbours
-	/// immediately; a neighbour that is still generating can't be written into,
-	/// so the voxel is queued here instead. When that neighbour finishes
+	/// immediately; a neighbour that is still generating (or not loaded yet) can't
+	/// be written into, so the voxel is queued here instead. The queue is PERSIST
+	/// (an instance of <see cref="OverhangStore"/>, owned by the world, shared by
+	/// every chunk's foliage stage): a queued voxel stays in the store until the
+	/// target chunk is generated and drains it — surviving the target chunk being
+	/// freed and re-generated (the old static, drained-and-discarded on each
+	/// (re-)generation, lost overhangs queued for a chunk that fell outside the
+	/// 8-chunk in-flight window, clipping border trees). When a chunk finishes
 	/// generating, <see cref="DrainOverhangs"/> applies the queued voxels to its
 	/// now-ready buffer. This is the "queue a modification for when that chunk
 	/// gets generated" half of the border-overhang fix.
 	/// </summary>
-	private static readonly System.Collections.Concurrent.ConcurrentDictionary<
-		Vector2I, System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>> _pendingOverhangs = new();
+	private static OverhangStore _overhangs;
+
+	/// <summary>
+	/// Binds the world (and its per-world overhang store) for the current
+	/// generation episode. Called once per world load / regenerate so every
+	/// chunk's foliage stage and the world's drain share ONE store that survives
+	/// individual chunk free/re-generate. A fresh store per episode means a new
+	/// world (new seed → different trees) never replays a previous world's
+	/// overhangs.
+	/// </summary>
+	public static void BindWorld(VoxelWorld world)
+	{
+		_overhangs = new OverhangStore(world);
+	}
+
+	/// <summary>
+	/// The live overhang store, or a throwaway singleton when no world is bound
+	/// (defensive: generation is always bound by the world before it runs).
+	/// </summary>
+	private static OverhangStore Store()
+		=> _overhangs ??= new OverhangStore(null);
+
+	/// <summary>
+	/// A per-world, persistent collection of pending canopy-overhang voxels,
+	/// keyed by target chunk coord. Persists across chunk free/re-generate (the
+	/// fix for clipped border trees): a voxel queued for a chunk that is not yet
+	/// in the in-flight generation window stays here until that chunk generates
+	/// and drains it. Bounded: a voxel is removed when its target drains, and a
+	/// world-episode reset clears everything.
+	/// </summary>
+	private sealed class OverhangStore
+	{
+		private readonly VoxelWorld _world;
+		private readonly System.Collections.Concurrent.ConcurrentDictionary<
+			Vector2I, System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>> _map = new();
+
+		public OverhangStore(VoxelWorld world) => _world = world;
+
+		/// <summary>Queue a voxel for a target chunk (creating its bag if needed).</summary>
+		public void Enqueue(Vector2I coord, int vx, int vy, int vz, byte mat)
+		{
+			_map.AddOrUpdate(coord,
+				_ => new System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>(
+					new OverhangVoxel[] { new OverhangVoxel(vx, vy, vz, mat) }),
+				(_, existing) =>
+				{
+					existing.Add(new OverhangVoxel(vx, vy, vz, mat));
+					return existing;
+				});
+		}
+
+		/// <summary>
+		/// Remove + return the queued voxels for <paramref name="coord"/> (null
+		/// when none). The caller applies them; removing here (not on apply) means
+		/// a chunk that is freed before draining keeps nothing, and a re-generate
+		/// of the same coord re-drains any voxels queued in the interim.
+		/// </summary>
+		public System.Collections.Concurrent.ConcurrentBag<OverhangVoxel> Take(Vector2I coord)
+			=> _map.TryRemove(coord, out var bag) ? bag : null;
+
+		/// <summary>Drop a target's entry entirely (used if a chunk is freed and we
+		/// want to avoid unbounded growth for coords the player never returns to).
+		/// Kept as a no-op by default: the store is small (a handful of border
+		/// voxels per queued tree) and a world-episode reset clears it, so we
+		/// prefer keeping overhangs over risking a leak-of-the-fix. Exposed for a
+		/// future prune if the store ever grows large.</summary>
+		public void Forget(Vector2I coord) => _map.TryRemove(coord, out _);
+	}
 
 	/// <summary>
 	/// Places foliage (trees, cacti) using the bounded worker pool. The 256
@@ -509,7 +581,8 @@ public static class TerrainGenerator
 	/// </summary>
 	public static bool DrainOverhangs(Vector2I coord, ChunkData chunk)
 	{
-		if (!_pendingOverhangs.TryRemove(coord, out var bag))
+		var bag = Store().Take(coord);
+		if (bag == null)
 			return false;
 		bool applied = false;
 		foreach (var v in bag)
@@ -588,22 +661,18 @@ public static class TerrainGenerator
 		void PutVoxel(int vx, int vy, int vz, byte mat)
 		{
 			if (vy < 0 || vy >= sy) return;
-			if (chunks == null) return;
 			Vector2I coord = new Vector2I(FloorDiv(vx, cs), FloorDiv(vz, cs));
-			if (!chunks.TryGetValue(coord, out VoxelChunk ch))
-				return; // not loaded: dropped (see above)
-			if (!ch.DataReady)
+			// Resolve the owning chunk. If it's not loaded (or still generating),
+			// QUEUE the voxel in the PERSISTENT overhang store — it is applied
+			// when that chunk generates and drains. The old code DROPPED a voxel
+			// whose target chunk was not loaded; combined with the 8-chunk
+			// in-flight window, that clipped border trees (the canopy overhang
+			// was lost when the target chunk fell outside the window and was
+			// later re-generated fresh). Persisting fixes it: the voxel survives
+			// until the target chunk actually generates.
+			if (chunks == null || !chunks.TryGetValue(coord, out VoxelChunk ch) || !ch.DataReady)
 			{
-				// Loaded but still generating: queue the voxel for that chunk
-				// (applied by DrainOverhangs once it finishes).
-				_pendingOverhangs.AddOrUpdate(coord,
-					_ => new System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>(
-						new OverhangVoxel[] { new OverhangVoxel(vx, vy, vz, mat) }),
-					(_, existing) =>
-					{
-						existing.Add(new OverhangVoxel(vx, vy, vz, mat));
-						return existing;
-					});
+				Store().Enqueue(coord, vx, vy, vz, mat);
 				return;
 			}
 			ChunkData o = ch.Data;
