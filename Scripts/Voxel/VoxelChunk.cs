@@ -412,6 +412,40 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
+	/// The neighbour chunk's wide-light value for a SHARED world voxel
+	/// (wx, wy, wz) — i.e. the value this world voxel has in the NEIGHBOUR's
+	/// wide field. The two chunks' wide fields overlap at the seam, so a world
+	/// voxel just inside this chunk's +X/+Z border also lives in the neighbour's
+	/// field (a few voxels in). Returns -1 when the neighbour can't supply it
+	/// (unloaded, no field yet, or the voxel falls outside the neighbour's wide
+	/// coverage — the "open sky" region, not a real value). Used by the seam
+	/// reconciliation to force this chunk's border voxels to match the
+	/// neighbour's (reference) light, so no dark band appears on the border.
+	/// The value is returned scaled ×1000 to survive the int round-trip.
+	/// <paramref name="nwx0"/>/<paramref name="nwz0"/>/<paramref name="nlpx"/>/
+	/// <paramref name="nlpy"/> are the neighbour's wide origin + dims — computed
+	/// once by the caller so the per-voxel call is just an index + read (no
+	/// re-lookup of the chunk or its dims). Called on the NEIGHBOUR chunk.
+	/// </summary>
+	public int NeighbourWideLight(int wx, int wy, int wz,
+		int nwx0, int nwz0, int nlpx, int nlpy)
+	{
+		if (!DataReady || _cachedLightField == null)
+		{
+			return -1;
+		}
+		int half = nlpx / 2 - 1;
+		int ix = wx - nwx0 + half;
+		int iz = wz - nwz0 + half;
+		int iy = wy + 1;
+		if (ix < 0 || ix >= nlpx || iy < 0 || iy >= nlpy || iz < 0 || iz >= nlpx)
+		{
+			return -1;
+		}
+		return (int)System.Math.Round(_cachedLightField[ix + nlpx * (iy + nlpy * iz)] * 1000f);
+	}
+
+	/// <summary>
 	/// LOCAL light recompute (Option B lighting): update the wide light field
 	/// for a box around the edit, re-applying the response curve, and return the
 	/// sub-cells whose per-vertex light changed (so the caller re-meshes exactly
@@ -674,6 +708,117 @@ public partial class VoxelChunk : Node3D
 		return false;
 	}
 
+	/// <summary>
+	/// SEAM RECONCILIATION: force this chunk's wide light field to MATCH the
+	/// neighbour's at the shared chunk border, so no dark band appears on the
+	/// chunk line. Each chunk's MC surface is built in its own chunk-local
+	/// lattice, and the instant-edit delta updates each chunk's wide field
+	/// independently — so the voxels a few in from the +X/+Z border can end up
+	/// at a slightly different light level in the two chunks' overlapping wide
+	/// fields, and the seam edge renders darker than its surroundings (the
+	/// "dark line on the border").
+	///
+	/// The neighbour's wide field is the REFERENCE (it spans this chunk's border
+	/// voxels a few voxels in, computed from the true global solid state). For
+	/// every air voxel in a 2-voxel band inside this chunk's +X and +Z borders
+	/// (the region whose MC surface sits on the seam), copy the neighbour's
+	/// light value + blockLit over this chunk's. The surface is sampled from the
+	/// wide field, so re-meshing the border sub-cells afterwards removes the
+	/// band. Cheap: a few thousand voxels × a constant number of reads.
+	///
+	/// <paramref name="world"/> supplies the chunk map + dims;
+	/// <paramref name="east"/> / <paramref name="south"/> are the loaded +X / +Z
+	/// chunks (null when unloaded — that border stays open, no reconciliation).
+	/// Returns the sub-cells whose light changed (to re-mesh).
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> ReconcileSeamLight(
+		VoxelWorld world,
+		VoxelChunk east, VoxelChunk south)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		if (_cachedLightField == null || _cachedWideSolid == null)
+		{
+			return changed; // no field yet (first build)
+		}
+		int cs = world.ChunkSizeXZ;
+		int maxL = MaxLightForClamped();
+		int lpx = 2 * cs + 2 * maxL + 2;
+		int lpy = world.ChunkHeight + 2;
+		int lpz = 2 * cs + 2 * maxL + 2;
+		int half = lpx / 2 - 1;
+		int wx0 = Coord.X * cs;
+		int wz0 = Coord.Y * cs;
+		int band = 2; // voxels inside the border whose surface samples the seam
+		// East (+X) border: world x in [wx0+cs-1-band+1, wx0+cs-1].
+		if (east != null)
+		{
+			ReconcileSeamFace(world, east, lpx, lpy, half, wx0, wz0, cs, true, band, changed);
+		}
+		// South (+Z) border: world z in [wz0+cs-1-band+1, wz0+cs-1].
+		if (south != null)
+		{
+			ReconcileSeamFace(world, south, lpx, lpy, half, wx0, wz0, cs, false, band, changed);
+		}
+		_lightChangedWide = null; // the reconciliation supersedes the last local recompute's changed set
+		return changed;
+	}
+
+	/// <summary>Reconciles one border face (east=+X or south=+Z) of the wide
+	/// light field against the neighbour's value. See
+	/// <see cref="ReconcileSeamLight"/>.</summary>
+	private void ReconcileSeamFace(
+		VoxelWorld world, VoxelChunk neighbour,
+		int lpx, int lpy, int half, int wx0, int wz0, int cs,
+		bool isEast, int band,
+		System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> changed)
+	{
+		// The neighbour's wide origin + dims, computed ONCE (the per-voxel call
+		// is then just an index + read). The neighbour's field has the SAME dims
+		// as ours (same cs/maxL/ChunkHeight), so lpx/lpy apply to it too.
+		int nwx0 = neighbour.Coord.X * cs;
+		int nwz0 = neighbour.Coord.Y * cs;
+		// isEast: the +X border — the band is the last `band` voxels in X
+		// (world x = wx0+cs-d), spanning all Z. isSouth: the +Z border — the
+		// band is the last `band` voxels in Z (world z = wz0+cs-d), spanning
+		// all X. Only air voxels in the band are reconciled (their MC surface
+		// samples the wide field; solid voxels carry no light).
+		for (int wy = 0; wy < world.ChunkHeight; wy++)
+		{
+			for (int d = 1; d <= band; d++)
+			{
+				// The band's fixed world coord on the bordered axis.
+				int bandX = isEast ? (wx0 + cs - d) : wx0;
+				int bandZ = isEast ? wz0 : (wz0 + cs - d);
+				for (int a = 0; a < cs; a++)
+				{
+					int cwx = isEast ? bandX : (wx0 + a);
+					int cwz = isEast ? (wz0 + a) : bandZ;
+					// This chunk's wide index for the world voxel.
+					int ix = cwx - wx0 + half;
+					int iz = cwz - wz0 + half;
+					int iy = wy + 1;
+					int idx = ix + lpx * (iy + lpy * iz);
+					if (_cachedWideSolid[idx] != 0)
+					{
+						continue; // solid: carries no light
+					}
+					int nb = neighbour.NeighbourWideLight(cwx, wy, cwz, nwx0, nwz0, lpx, lpy);
+					if (nb < 0)
+					{
+						continue; // neighbour can't supply it (outside its field)
+					}
+					int cur = (int)System.Math.Round(_cachedLightField[idx] * 1000f);
+					if (cur == nb)
+					{
+						continue; // already matches
+					}
+					_cachedLightField[idx] = nb / 1000f;
+					changed.UnionWith(DirtyCellsForChunkLocal(world, cwx - wx0, wy, cwz - wz0));
+				}
+			}
+		}
+	}
+
 	/// <summary>Applies the response curve to a box of the light field in place.</summary>
 	private void ApplyLightResponseBox(
 		VoxelWorld world, int total, int bx, int by, int bz,
@@ -709,6 +854,10 @@ public partial class VoxelChunk : Node3D
 		else if (m > 255) m = 255;
 		return m;
 	}
+
+	/// <summary>Public accessor for the clamped max light level (the seam
+	/// reconciliation reads the neighbour's wide-field dims from it).</summary>
+	public int MaxLightForClamped() => MaxLightFor();
 
 	/// <summary>
 	/// Returns the chunk's per-chunk raw-level buffer for the Starlight delta,

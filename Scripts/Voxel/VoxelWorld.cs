@@ -1750,6 +1750,24 @@ public partial class VoxelWorld : Node3D
 					_dirty.UnionWith(_lightChanged);
 					lightRecomputed = true;
 					EditProfile.TLight += EditProfile.Sw.ElapsedTicks - _lightStart;
+
+					// SEAM RECONCILIATION: the local recompute above updated
+					// ONLY this chunk's wide field; the +X/+Z neighbour's field
+					// still holds the pre-edit values, so the border voxels the
+					// two chunks share can disagree by a level or two — the "dark
+					// line on the border". Force this chunk's border band to match
+					// the neighbour's (reference) field and add the affected
+					// sub-cells to the re-mesh set. (The border band is thin — a
+					// few thousand air voxels — so this is cheap and runs only
+					// when the light was actually recomputed.)
+					VoxelChunk eastN = null, southN = null;
+					if (_chunks.TryGetValue(instantChunk.Coord + new Vector2I(1, 0), out var e) && e.DataReady) eastN = e;
+					if (_chunks.TryGetValue(instantChunk.Coord + new Vector2I(0, 1), out var s) && s.DataReady) southN = s;
+					var _seamChanged = instantChunk.ReconcileSeamLight(this, eastN, southN);
+					if (_seamChanged.Count > 0)
+					{
+						_dirty.UnionWith(_seamChanged);
+					}
 				}
 
 				// Re-mesh the dirty sub-cells.
