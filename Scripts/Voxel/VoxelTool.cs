@@ -96,6 +96,23 @@ public partial class VoxelTool : Node3D
 	private Vector3I _targetVoxel;
 	private Vector3 _targetNormal;
 
+	// -- Collider-based targeting (machine colliders interact with the tool) --
+	//
+	// In ADDITION to the voxel-grid raycast (RaycastVoxels), the tool now
+	// raycasts the camera ray against every machine's ACTUAL collision shape
+	// (PhysicsDirectSpaceState3D.IntersectRay). The machine whose collider is
+	// the NEAREST hit along the ray wins, and when it does the target becomes
+	// that machine: the highlight is a box over its collider AABB, mining
+	// damages it (TakeDamage), and placing is blocked against it. This makes
+	// the machine's real collider geometry the thing the interaction system
+	// reacts to — not just the voxel grid behind it. _colliderHitDistance is
+	// the distance along the ray to the winning collider hit (0 when none).
+	private bool _colliderHit;
+	private Machine _colliderMachine;
+	private Vector3 _colliderHitPoint;
+	private Vector3 _colliderHitNormal;
+	private float _colliderHitDistance;
+
 	/// <summary>
 	/// The machine the player is currently aiming at (closest machine whose
 	/// voxel is within <see cref="MaxRaycastDistance"/>), or null. Machines are
@@ -423,68 +440,92 @@ public partial class VoxelTool : Node3D
 		Vector3 from = _camera.GlobalPosition;
 		Vector3 dir = -_camera.GlobalTransform.Basis.Z; // cameras look down -Z
 
+		// COLLIDER TARGETING: raycast the camera ray against every machine's
+		// ACTUAL collision shape. The nearest collider hit along the ray wins
+		// (see RaycastMachineColliders). This is the machine-collider half of
+		// the interaction system: when it hits, the target is that machine and
+		// the highlight/mining/placing all react to its real collider geometry.
+		RaycastMachineColliders(from, dir);
+
 		if (_world.RaycastVoxels(from, dir, MaxRaycastDistance, out Vector3I hitVoxel, out Vector3 hitNormal))
 		{
 			_hasTarget = true;
 			_targetVoxel = hitVoxel;
 			_targetNormal = hitNormal;
-
-			// The highlight is a Node3D whose pivot sits at the targeted voxel's
-			// CENTER; its child mesh holds the voxel's own edge geometry in local
-			// space (0..voxelSize per axis, after the world->local translation in
-			// EnsureHighlightMesh) and is scaled 105% by the voxel size, so the
-			// wireframe reads as the voxel's shape slightly larger than the voxel,
-			// expanding around the voxel center.
-			//
-			// Orientation is locked to the world: this tool is a child of the
-			// player's CharacterBody3D, which yaws with the mouse (Player
-			// UpdateMouseLook sets the body's Y rotation). Setting only
-			// GlobalPosition would leave the highlight inheriting that yaw, so it
-			// would orbit the voxel as the camera turns. Giving it a
-			// GlobalTransform with an identity basis overrides the inherited
-			// rotation, keeping the wireframe axis-aligned with the world.
-			float vs = _world.VoxelSize;
-			_highlight.GlobalTransform = new Transform3D(
-				Basis.Identity,
-				new Vector3(hitVoxel.X, hitVoxel.Y, hitVoxel.Z) * vs
-				+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
-			// Both the wireframe and the fill box are centered on the local
-			// origin (the voxel center), so scaling each MeshInstance about its
-			// origin expands the highlight symmetrically about the voxel. 1.05x
-			// keeps the fill hugging the block (slightly larger so it's clearly
-			// the targeted one) and the wireframe reads just outside it.
-			float hs = vs * 1.05f;
-			_highlightMeshInstance.Scale = new Vector3(hs, hs, hs);
-			_highlightFill.Scale = new Vector3(hs, hs, hs);
-
-			// Re-shape the highlight to the target's own voxel geometry (cached
-			// per voxel so the mesh is only rebuilt when the target changes).
-			// Guarded: a bad target (e.g. a mid-rebuild chunk) must never spam
-			// the console — on failure we keep the previous mesh.
-			try
-			{
-				EnsureHighlightMesh(hitVoxel);
-			}
-			catch (System.Exception e)
-			{
-				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {hitVoxel}: {e.Message}");
-			}
 		}
 		else
 		{
 			_hasTarget = false;
-			// No target: stop damaging. Per-voxel damage stays in _mineDamage
-			// so re-aiming at a partially-mined voxel resumes where it left off.
+			_targetVoxel = default;
+			_targetNormal = Vector3.Zero;
+		}
+
+		// RECONCILE: the overall target is the NEAREST of the voxel hit and the
+		// machine-collider hit. The collider wins when it is a hit AND (there is
+		// no voxel hit, OR the collider is strictly nearer than the voxel's
+		// center). When a machine collider wins, the highlight becomes a box
+		// over the collider AABB and the voxel wireframe is hidden (the
+		// collider, not the voxel, is what is being aimed at).
+		bool colliderWins = _colliderHit
+			&& (!_hasTarget || _colliderHitDistance < VoxelHitDistance(from) - 0.01f);
+
+		if (colliderWins)
+		{
+			// Target is the machine collider.
+			_hasTarget = true;
+			float vs = _world.VoxelSize;
+			// The highlight box is sized to the machine's collider AABB and
+			// centered on it (the collider's world-space bounding box).
+			var (aabbMin, aabbMax) = _colliderMachine.ColliderWorldAabb();
+			_highlight.GlobalTransform = new Transform3D(Basis.Identity, (aabbMin + aabbMax) * 0.5f);
+			Vector3 boxSize = aabbMax - aabbMin + new Vector3(vs * 0.05f, vs * 0.05f, vs * 0.05f);
+			// The fill box is a unit BoxMesh scaled to the collider AABB size.
+			// The wireframe (voxel-shaped) is hidden: the collider is the target.
+			_highlightMeshInstance.Visible = false;
+			_highlightFill.Visible = true;
+			_highlightFill.Scale = boxSize;
+			_highlight.Visible = true;
+			// Record the targeted voxel as the machine's voxel so mining/placing
+			// and the HUD readout have a voxel anchor (the machine's own cell).
+			_targetVoxel = _colliderMachine.VoxelPos;
+			_targetNormal = _colliderHitNormal;
+		}
+		else if (_hasTarget)
+		{
+			// Target is the voxel (the normal voxel-grid path).
+			float vs = _world.VoxelSize;
+			_highlight.GlobalTransform = new Transform3D(
+				Basis.Identity,
+				new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * vs
+				+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
+			float hs = vs * 1.05f;
+			_highlightMeshInstance.Scale = new Vector3(hs, hs, hs);
+			_highlightFill.Scale = new Vector3(hs, hs, hs);
+
+			try
+			{
+				EnsureHighlightMesh(_targetVoxel);
+			}
+			catch (System.Exception e)
+			{
+				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {_targetVoxel}: {e.Message}");
+			}
+		}
+		else
+		{
+			// No target at all: hide the highlight. Per-voxel damage stays in
+			// _mineDamage so re-aiming at a partially-mined voxel resumes.
+			_hasTarget = false;
 			_highlight.Visible = false;
 			_highlightMeshInstance.Visible = false;
 			_highlightFill.Visible = false;
 		}
 
-		// MACHINE TARGETING: find the closest machine in the line of sight
-		// (within MaxRaycastDistance). Machines are targeted in ADDITION to
-		// voxels — if both are in sight, the nearer wins (right-click then opens
-		// the machine's UI rather than placing).
-		_targetMachine = FindTargetMachine(from, dir);
+		// MACHINE TARGETING (for the UI): the machine the player is interacting
+		// with is either the collider-hit machine (when the collider won) or the
+		// node-scan machine (the closest in the line of sight). Right-click opens
+		// its UI. The collider-hit machine takes precedence when it won.
+		_targetMachine = colliderWins ? _colliderMachine : FindTargetMachine(from, dir);
 
 		// POWER-RADIUS INDICATOR: while the player aims at a power source, show
 		// a transparent yellow sphere centered on it, sized to the live power
@@ -714,6 +755,15 @@ public partial class VoxelTool : Node3D
 			return; // tools don't place; empty does nothing
 		}
 
+		// If a MACHINE COLLIDER is the current target (the collider won the
+		// reconcile), placing is blocked: you cannot place a voxel/machine into
+		// a cell the machine's collider occupies. The collider is the thing you
+		// are looking at, not the empty cell behind it.
+		if (_colliderHit && _colliderMachine != null && IsInstanceValid(_colliderMachine))
+		{
+			return; // the machine collider is in the way — can't place here
+		}
+
 		// The cell to place into: the empty cell on the far side of the targeted
 		// face, i.e. the hit voxel stepped along the face normal (the normal
 		// points back toward the camera, into the adjacent empty cell).
@@ -893,22 +943,46 @@ public partial class VoxelTool : Node3D
 
 
 	/// <summary>
-	/// Damages the current target over time. The damage rate is
+	/// Damages the current target over time. The target is either a VOXEL (the
+	/// normal path — damage is accumulated per voxel in <see cref="_mineDamage"/>
+	/// until it reaches full health, then the voxel breaks) or a MACHINE
+	/// COLLIDER (when <see cref="_colliderHit"/> is set and the collider won the
+	/// reconcile). A machine takes <c>ToolPower × affinity × dt</c> damage per
+	/// second via <see cref="Machine.TakeDamage"/>; when its health reaches 0 it
+	/// breaks (is removed from the world).
+	///
+	/// For a voxel, the damage rate is
 	/// <c>(ToolPower × affinity / material BreakTime) × 100% per second</c>,
 	/// where the affinity comes from <see cref="ToolAffinity"/> for the held
-	/// tool type (or 1.0 when the held item is a plain material — bare-hand
-	/// mining at the base rate).
-	///
-	/// Damage is accumulated PER TARGETED VOXEL in <see cref="_mineDamage"/> and
-	/// stored immediately each frame, so it persists across frames and across
-	/// re-aiming: the moment the targeted voxel's total damage reaches its full
-	/// health (100%) the voxel breaks (is removed) and its entry is cleared.
-	/// This is the source of truth for breaking — the voxel's stored health is
-	/// reset to full by <see cref="VoxelWorld.SetVoxel"/> on every edit, so it
-	/// can't be read back to decide when to break.
+	/// tool type (or 1.0 when the held item is a plain material).
 	/// </summary>
 	private void ApplyMiningDamage(float dt)
 	{
+		// MACHINE TARGET: the collider won the reconcile, so the target is the
+		// machine (not a voxel). Damage it directly via TakeDamage.
+		if (_colliderHit && _colliderMachine != null && IsInstanceValid(_colliderMachine))
+		{
+			// Affinity: a machine is "metal" (it is built from metal parts); the
+			// held tool's affinity vs the Metal category scales the break rate.
+			float machineAffinity = 1.0f;
+			if (HeldTool is { } mTool)
+			{
+				machineAffinity = ToolAffinity.GetMultiplier(mTool, ToolAffinity.MaterialCategory.Metal);
+			}
+			float machineDamage = ToolPower * machineAffinity * dt;
+			bool broke = _colliderMachine.TakeDamage((int)System.Math.Ceiling(machineDamage));
+			if (broke)
+			{
+				// The machine broke: remove it from the world (frees the node,
+				// which triggers its _ExitTree / cleanup).
+				_colliderMachine.QueueFree();
+				_colliderHit = false;
+				_colliderMachine = null;
+			}
+			return;
+		}
+
+		// VOXEL TARGET: the normal per-voxel mining path.
 		int material = _world.GetVoxel(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z);
 		if (material == VoxelMaterialIds.Air)
 		{
@@ -1053,6 +1127,89 @@ public partial class VoxelTool : Node3D
 			}
 		}
 		return $"{name}{status}";
+	}
+
+	/// <summary>
+	/// The distance from the camera to the CURRENT voxel target's CENTER (the
+	/// same convention <see cref="BuildTargetInfo"/> uses for its readout). Used
+	/// to reconcile the voxel hit against the machine-collider hit (nearer wins).
+	/// Returns a large value when there is no voxel target.
+	/// </summary>
+	private float VoxelHitDistance(Vector3 cameraPos)
+	{
+		if (!_hasTarget)
+		{
+			return float.PositiveInfinity;
+		}
+		Vector3 center = new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * _world.VoxelSize
+			+ new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
+		return (center - cameraPos).Length();
+	}
+
+	/// <summary>
+	/// Raycasts the camera ray against every placed (non-preview) machine's
+	/// ACTUAL collision shape and records the NEAREST hit. This is what makes a
+	/// machine's collider interact with the player's interaction system: the
+	/// tool's targeting (and therefore the highlight, mining, and place-
+	/// blocking) reacts to the machine's real collider geometry, not just the
+	/// voxel grid behind it.
+	///
+	/// Uses <see cref="PhysicsDirectSpaceState3D.IntersectRay"/> with a collision
+	/// mask that matches the machines' collision layer. Machines are on a
+	/// dedicated collision layer (layer 3 / value 4) so the ray hits ONLY machine
+	/// colliders (not the voxel terrain, which is a separate body). The result
+	/// is stored in the _collider* fields; <see cref="_colliderHit"/> is set
+	/// true when a hit was found.
+	/// </summary>
+	private void RaycastMachineColliders(Vector3 from, Vector3 dir)
+	{
+		// Default to "no collider hit" each frame (the fields are reused).
+		_colliderHit = false;
+		_colliderMachine = null;
+		_colliderHitPoint = Vector3.Zero;
+		_colliderHitNormal = Vector3.Zero;
+		_colliderHitDistance = 0f;
+
+		PhysicsDirectSpaceState3D space = GetWorld3D()?.DirectSpaceState;
+		if (space == null)
+		{
+			return;
+		}
+
+		// Create the query from the camera to a point MaxRaycastDistance ahead,
+		// with a collision mask that targets ONLY the machines' collision layer
+		// (layer 3, value 4). This keeps the ray from hitting voxel terrain (a
+		// separate body on a different layer).
+		var query = PhysicsRayQueryParameters3D.Create(from, from + dir * MaxRaycastDistance, 1 << 3);
+
+		// IntersectRay returns a Godot.Collections.Dictionary (empty on a miss).
+		Godot.Collections.Dictionary result = space.IntersectRay(query);
+		if (result.Count == 0)
+		{
+			return; // no hit
+		}
+
+		// The "collider" entry is the Machine (a StaticBody3D — the
+		// CollisionShape3D's owner body). A Variant converts to a GodotObject via
+		// its implicit operator, so the pattern match resolves the Machine.
+		if (result.TryGetValue("collider", out Variant colliderV))
+		{
+			GodotObject obj = (GodotObject)colliderV;
+			if (obj is Machine machine && !machine.IsPreview)
+			{
+				_colliderHit = true;
+				_colliderMachine = machine;
+				if (result.TryGetValue("position", out Variant posV))
+				{
+					_colliderHitPoint = posV.AsVector3();
+				}
+				if (result.TryGetValue("normal", out Variant nrmV))
+				{
+					_colliderHitNormal = nrmV.AsVector3();
+				}
+				_colliderHitDistance = (_colliderHitPoint - from).Length();
+			}
+		}
 	}
 
 	/// <summary>

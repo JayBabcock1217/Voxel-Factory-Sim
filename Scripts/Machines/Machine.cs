@@ -281,6 +281,63 @@ public partial class Machine : StaticBody3D
 	}
 
 	/// <summary>
+	/// The machine's collision shape's WORLD-SPACE bounding box (min, max).
+	/// Used by the tool to size the target-highlight box to the collider's
+	/// actual geometry (the collider is the thing being aimed at). Returns
+	/// degenerate (0,0) when there is no collision shape (a preview ghost).
+	/// The box is computed from the CollisionShape3D's global transform + its
+	/// shape's local AABB, so it is exact for box shapes and a tight AABB for
+	/// any other shape type.
+	/// </summary>
+	public (Vector3 Min, Vector3 Max) ColliderWorldAabb()
+	{
+		if (_collision == null || _collision.Shape == null)
+		{
+			return (Vector3.Zero, Vector3.Zero);
+		}
+		Transform3D t = _collision.GlobalTransform;
+		// The shape's local AABB (centered on the shape origin). Shape3D has no
+		// GetAabb in the C# API, so build it from the concrete shape type: a
+		// BoxShape3D (the common case — BuildCollision always makes one) gives
+		// its size directly; other shapes fall back to a 1×1×1 box so the
+		// highlight still reads as "a collider is here".
+		Vector3 half;
+		if (_collision.Shape is BoxShape3D box)
+		{
+			half = box.Size * 0.5f;
+		}
+		else
+		{
+			half = new Vector3(0.5f, 0.5f, 0.5f);
+		}
+		// Transform the 8 corners into world space and re-derive the AABB
+		// (handles the machine's rotation, which is baked into GlobalTransform).
+		Vector3 min = -half;
+		Vector3 max = half;
+		Vector3 outMin = Vector3.Inf;
+		Vector3 outMax = -Vector3.Inf;
+		for (int cx = 0; cx <= 1; cx++)
+		for (int cy = 0; cy <= 1; cy++)
+		for (int cz = 0; cz <= 1; cz++)
+		{
+			Vector3 corner = new Vector3(
+				cx == 0 ? min.X : max.X,
+				cy == 0 ? min.Y : max.Y,
+				cz == 0 ? min.Z : max.Z);
+			Vector3 w = t * corner;
+			outMin = new Vector3(
+				System.Math.Min(outMin.X, w.X),
+				System.Math.Min(outMin.Y, w.Y),
+				System.Math.Min(outMin.Z, w.Z));
+			outMax = new Vector3(
+				System.Math.Max(outMax.X, w.X),
+				System.Math.Max(outMax.Y, w.Y),
+				System.Math.Max(outMax.Z, w.Z));
+		}
+		return (outMin, outMax);
+	}
+
+	/// <summary>
 	/// Rebuilds this machine's collision shape from its CURRENT visual. Use
 	/// this after the visual has changed (e.g. the definition's mesh or scale
 	/// was re-imported, or the machine was re-initialized with a new definition).
@@ -486,6 +543,15 @@ public partial class Machine : StaticBody3D
 			Transform = new Transform3D(Basis.Identity, boxCenter),
 		};
 		AddChild(_collision);
+
+		// Put the machine's collider on a DEDICATED collision layer (layer 3,
+		// value 4) so the tool's collider raycast (VoxelTool.
+		// RaycastMachineColliders, mask = 1 << 3) hits ONLY machine colliders and
+		// not the voxel terrain (a separate body on a different layer). The
+		// CollisionLayer is set on the StaticBody3D (this) — the CollisionShape3D
+		// inherits it. The CollisionMask is left at its default (1) so the machine
+		// still BLOCKS the player (the player's body collides with this layer).
+		CollisionLayer = 1 << 3;
 	}
 
 	/// <summary>
