@@ -182,6 +182,16 @@ public partial class VoxelChunk : Node3D
 	// ------------------------------------------------------------------
 	private readonly Dictionary<int, SubCellNode> _subCells = new();
 
+	// PERFORMANCE (draw calls): in sub-cell mode the chunk's VISUAL is rendered
+	// as ONE combined mesh on the whole-chunk _meshInstance (one draw call per
+	// chunk — Minecraft's core trick), NOT as 64 per-sub-cell MeshInstance3Ds.
+	// The per-sub-cell MeshInstance3D nodes are kept only to hold the per-sub-cell
+	// COLLISION shape (physics); their Mesh is nulled so they draw nothing. The
+	// instant-edit path rebuilds one sub-cell and then re-combines the chunk's
+	// sub-cell meshes into this combined mesh (see UpdateCombinedMesh).
+	private ArrayMesh _combinedMesh;
+	private bool _subCellCombined;
+
 	/// <summary>
 	/// One sub-cell's visual + collision nodes. Created lazily when a sub-cell
 	/// first gets geometry. <c>cellIndex</c> is 0..CellsPerChunk-1 (see
@@ -260,7 +270,11 @@ public partial class VoxelChunk : Node3D
 			CellY = cellY,
 			CellZ = cellZ,
 		};
-		node.Mesh = new MeshInstance3D { Name = $"Cell_{idx}" };
+		// The sub-cell's MeshInstance3D exists only to host the per-sub-cell
+		// COLLISION body/shape (physics). Its Mesh is never assigned (the visual
+		// is rendered by the chunk's single combined mesh on _meshInstance), so
+		// it draws nothing — this keeps the chunk to ONE draw call instead of 64.
+		node.Mesh = new MeshInstance3D { Name = $"Cell_{idx}", Visible = false };
 		node.Mesh.Layers = VoxelWorld.TerrainRenderLayer;
 		AddChild(node.Mesh);
 
@@ -319,6 +333,37 @@ public partial class VoxelChunk : Node3D
 			// costs no narrow-phase work), so re-entering the radius is cheap.
 			node.Shape.Shape = null;
 		}
+	}
+
+	/// <summary>
+	/// Rebuilds the chunk's single COMBINED visual mesh from the per-sub-cell
+	/// meshes and assigns it to the whole-chunk <c>_meshInstance</c> (one draw
+	/// call for the whole chunk — the draw-call fix). Called after a full build
+	/// wires the sub-cell meshes (ApplyBuildResult) and after each instant-edit
+	/// sub-cell rebuild (RebuildSubCell). The per-sub-cell MeshInstance3Ds are
+	/// hidden (they only host collision), so the combined mesh is the only thing
+	/// drawn for this chunk.
+	/// </summary>
+	private void UpdateCombinedMesh()
+	{
+		if (_subCells.Count == 0)
+		{
+			_meshInstance.Mesh = null;
+			_combinedMesh = null;
+			return;
+		}
+		// Collect the per-sub-cell ArrayMeshes (each is already in world-voxel
+		// space, so they merge with no offset).
+		var list = new ArrayMesh[_subCells.Count];
+		int i = 0;
+		foreach (var node in _subCells.Values)
+		{
+			// node.Mesh.Mesh is a Mesh; the sub-cell builds always produce an
+			// ArrayMesh, so cast (null stays null for an empty sub-cell).
+			list[i++] = node.Mesh.Mesh as ArrayMesh;
+		}
+		_combinedMesh = MeshBuilder.CombineMeshes(list);
+		_meshInstance.Mesh = _combinedMesh; // null when the chunk is all air
 	}
 
 	/// <summary>
@@ -1004,12 +1049,14 @@ public partial class VoxelChunk : Node3D
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
 		VoxelWorld.EditProfile.LastBuildTicks = _t0.ElapsedTicks;
 
-		// Apply to the sub-cell's nodes. The visual mesh is always set. The
-		// collision shape is stashed (BuiltShape) and the body/shape wiring is
-		// deferred to SetSubCellCollisionEnabled — which only attaches the shape
-		// to a live body when the chunk is within the player's collision radius.
-		// This keeps the instant edit from creating a Jolt body for a far sub-cell
-		// (the per-frame radius gate handles the attach when the player is near).
+		// Apply to the sub-cell's nodes. The visual mesh is set on the sub-cell's
+		// (hidden) MeshInstance3D — it is the source for the chunk's COMBINED
+		// mesh, not drawn directly. The collision shape is stashed (BuiltShape)
+		// and the body/shape wiring is deferred to SetSubCellCollisionEnabled —
+		// which only attaches the shape to a live body when the chunk is within
+		// the player's collision radius. This keeps the instant edit from
+		// creating a Jolt body for a far sub-cell (the per-frame radius gate
+		// handles the attach when the player is near).
 		var node = GetOrCreateSubCell(cellX, cellY, cellZ);
 		node.Mesh.Mesh = visual;
 		if (visual != null && collision != null && collision.Count > 0)
@@ -1029,6 +1076,12 @@ public partial class VoxelChunk : Node3D
 				node.Shape.Shape = null;
 			}
 		}
+
+		// Re-combine the chunk's sub-cell meshes into the single combined mesh
+		// (the draw-call fix). This re-reads all 64 sub-cell ArrayMeshes and
+		// re-welds them — a few ms, kept synchronous so the edit stays instant.
+		UpdateCombinedMesh();
+
 		VoxelWorld.EditProfile.LastApplyTicks = _t0.ElapsedTicks - VoxelWorld.EditProfile.LastBuildTicks;
 	}
 
@@ -1418,6 +1471,11 @@ public partial class VoxelChunk : Node3D
 				// CollisionReady, not the whole-chunk _shape) unlocks — the
 				// whole-chunk _shape stays null in sub-cell mode by design.
 				_collisionReady = true;
+				// Build the chunk's single COMBINED visual mesh from the wired
+				// sub-cell meshes (the draw-call fix): one draw call per chunk
+				// instead of 64. The per-sub-cell MeshInstance3Ds are hidden and
+				// only host their collision shapes.
+				UpdateCombinedMesh();
 				_pendingSubCells = null;
 			}
 			_pendingSubCellBuild = false;

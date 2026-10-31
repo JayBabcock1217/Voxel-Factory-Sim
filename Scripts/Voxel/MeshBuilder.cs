@@ -1013,6 +1013,123 @@ public static class MeshBuilder
 	}
 
 	/// <summary>
+	/// Combines a set of sub-cell <see cref="ArrayMesh"/>es into ONE
+	/// <see cref="ArrayMesh"/> (one surface per material, across ALL sub-cells).
+	/// This is the PERFORMANCE fix for the sub-cell (Option B) meshing: the
+	/// instant-edit path rebuilds only the touched sub-cell(s), but rendering
+	/// each of the 64 sub-cells as its own <c>MeshInstance3D</c> is 64 draw
+	/// calls per chunk — ~64,000 draw calls at a 16-chunk render distance, which
+	/// is the dominant cost (Minecraft's core trick is ONE mesh per chunk).
+	/// Combining the sub-cell meshes into a single ArrayMesh makes the chunk ONE
+	/// draw call (still far fewer surfaces than 64 nodes), while the instant-edit
+	/// path stays sub-cell-granular (it rebuilds one sub-cell and re-combines).
+	///
+	/// Each sub-cell's vertices are already in WORLD-VOXEL space (BuildSubCell
+	/// emits world positions), so they can be merged with no per-vertex offset —
+	/// the sub-cells simply tile the chunk. Surfaces are grouped by material so
+	/// the combined mesh has one surface per material (the same layout
+	/// BuildSubCell uses), which keeps the per-material draw batching intact.
+	///
+	/// Returns null when every input mesh is null/empty (the chunk is fully
+	/// air). Safe to call on the main thread (the instant-edit path) or the
+	/// build thread (the full-build path).
+	/// </summary>
+	public static ArrayMesh CombineMeshes(IList<ArrayMesh> meshes)
+	{
+		if (meshes == null || meshes.Count == 0)
+		{
+			return null;
+		}
+
+		// Collect the per-material vertex/normal/uv/light data across all
+		// sub-cells. Surfaces are grouped by material so the combined mesh has
+		// one surface per material (the same layout BuildSubCell uses). Each
+		// sub-cell's surfaces are read via MeshDataTool (the supported ArrayMesh
+		// API in Godot 4.8: SurfaceGetArrays + MeshDataTool.CreateFromArrays).
+		// Materials are tracked by a local reference-count map (the palette
+		// materials are shared resources, so the count is small).
+		var matKey = new Dictionary<Material, int>();
+		var mats = new List<Material>();
+		var byMaterial = new Dictionary<int, (List<Vector3> Verts, List<Vector3> Normals, List<Vector2> Uvs, List<float> Lights)>();
+
+		for (int mi = 0; mi < meshes.Count; mi++)
+		{
+			var mesh = meshes[mi];
+			if (mesh == null || mesh.GetSurfaceCount() == 0)
+			{
+				continue;
+			}
+			int surfaces = mesh.GetSurfaceCount();
+			for (int s = 0; s < surfaces; s++)
+			{
+				Material mat = mesh.SurfaceGetMaterial(s);
+				int key;
+				if (mat != null && matKey.TryGetValue(mat, out int k))
+				{
+					key = k;
+				}
+				else
+				{
+					key = mats.Count;
+					mats.Add(mat);
+					if (mat != null)
+					{
+						matKey[mat] = key;
+					}
+				}
+				if (!byMaterial.TryGetValue(key, out var acc))
+				{
+					acc = (new List<Vector3>(), new List<Vector3>(), new List<Vector2>(), new List<float>());
+					byMaterial[key] = acc;
+				}
+
+				// Read this surface's vertices into a MeshDataTool (the same
+				// CreateFromSurface pattern VoxelTool.BuildEdgeMesh uses).
+				var tool = new MeshDataTool();
+				if (tool.CreateFromSurface(mesh, s) != Error.Ok)
+				{
+					continue;
+				}
+				int count = tool.GetVertexCount();
+				for (int v = 0; v < count; v++)
+				{
+					acc.Item1.Add(tool.GetVertex(v));
+					acc.Item2.Add(tool.GetVertexNormal(v));
+					acc.Item3.Add(tool.GetVertexUV(v));
+					acc.Item4.Add(tool.GetVertexUV2(v).X); // light is stored in UV2.x
+				}
+			}
+		}
+
+		if (byMaterial.Count == 0)
+		{
+			return null; // all sub-cells were empty
+		}
+
+		var combined = new ArrayMesh();
+		foreach (var (key, acc) in byMaterial)
+		{
+			var (verts, normals, uvs, lights) = acc;
+			if (verts.Count == 0)
+			{
+				continue;
+			}
+			var tool = new SurfaceTool();
+			tool.Begin(Mesh.PrimitiveType.Triangles);
+			tool.SetMaterial(mats[key]);
+			for (int i = 0; i < verts.Count; i++)
+			{
+				tool.SetNormal(normals[i]);
+				tool.SetUV(uvs[i]);
+				tool.SetUV2(new Vector2(lights[i], 0f));
+				tool.AddVertex(verts[i]);
+			}
+			tool.Commit(combined);
+		}
+		return combined;
+	}
+
+	/// <summary>
 	/// Resolves one MC triangle vertex for a SUB-CELL build: position + material
 	/// (from the sub-cell's small padded field) + per-vertex light (sampled from
 	/// the CACHED wide light field by the air corner's world voxel). This is the
