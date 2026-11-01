@@ -561,77 +561,15 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
-	/// NEIGHBOUR light update for a light source that crosses a chunk seam: the
-	/// source's wide index <paramref name="wIndex"/> lies inside THIS chunk's
-	/// wide field (the wide field spans the neighbouring chunks), and the
-	/// source's solid state / block-light level just changed (a torch was
-	/// placed, broken, or swapped in the edited chunk). This runs the Starlight
-	/// delta (<see cref="SkyLight.ComputeDelta"/>) centred on the source — NOT a
-	/// box re-solve — so the neighbour's light updates instant and touches only
-	/// the voxels that actually change. No patch is applied (the neighbour's own
-	/// voxels are unchanged; its wide volumes already carry the source). Returns
-	/// the sub-cells to re-mesh (empty if the light didn't change).
-	/// </summary>
-	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightLocalAt(
-		VoxelWorld world,
-		int lpx, int lpy, int lpz,
-		int wIndex)
-	{
-		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
-		_lightChangedWide = null;
-		if (_cachedLightField == null || _cachedWideSolid == null)
-		{
-			return changed; // no light field yet (first build) — the full rebuild handles it
-		}
-		if (wIndex < 0 || wIndex >= lpx * lpy * lpz)
-		{
-			return changed; // source not in this chunk's field
-		}
-
-		// The neighbour's own voxels are unchanged (no patch); its wide volumes
-		// already carry the source. Run the Starlight delta centred on the
-		// source — it touches only the voxels whose light actually changes.
-		var deltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
-			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
-			wIndex, MaxLightFor(), MakeLightCurve(), EnsureDeltaRaw(lpx * lpy * lpz));
-		if (deltaChanged.Count == 0)
-		{
-			_lightChangedWide = null;
-			return changed;
-		}
-
-		var changedWideList = new System.Collections.Generic.List<int>(deltaChanged.Count);
-		for (int i = 0; i < deltaChanged.Count; i++)
-		{
-			changedWideList.Add(deltaChanged[i]);
-		}
-
-		int half = lpx / 2 - 1;
-		int lpySz = world.ChunkHeight + 2;
-		for (int i = 0; i < changedWideList.Count; i++)
-		{
-			int g = changedWideList[i];
-			int wz = g / (lpx * lpySz);
-			int rem = g - wz * (lpx * lpySz);
-			int wy = rem / lpx;
-			int wx = rem - wy * lpx;
-			changed.UnionWith(LightSampleCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
-		}
-
-		_lightChangedWide = changedWideList.ToArray();
-		return changed;
-	}
-
-	/// <summary>
 	/// EDITED-CHUNK light update: run the Starlight delta (<see
 	/// cref="SkyLight.ComputeDelta"/>) centred on a single edited voxel (the
 	/// <paramref name="wIndex"/> wide index of the edited voxel). Unlike <see
 	/// cref="RecomputeLightLocal"/>, there is NO box restriction — the delta runs
-	/// over the whole field, so the edited chunk gets exactly the same full,
-	/// bit-identical light update that the NEIGHBOUR chunk gets in
-	/// <see cref="RecomputeLightLocalAt"/> when a source crosses a seam. The
-	/// edited voxel's NEW solid state + block-light source are patched into the
-	/// cached wide volumes FIRST (the same patch step <see cref="RecomputeLightLocal"/>
+	/// over the whole field, so the edited chunk gets the full, bit-identical
+	/// light update. (Neighbour chunks are handled by VoxelWorld's cross-chunk
+	/// sphere-iteration + full-rebuild path, not by this method.) The edited
+	/// voxel's NEW solid state + block-light source are patched into the cached
+	/// wide volumes FIRST (the same patch step <see cref="RecomputeLightLocal"/>
 	/// performs) — without it, a just-placed source's <c>blockLight</c> is still 0
 	/// in the cache and the delta would see no source and propagate nothing.
 	/// Returns the sub-cells whose sampled light changed.
@@ -697,7 +635,7 @@ public partial class VoxelChunk : Node3D
 
 	/// <summary>
 	/// The wide-field lattice indices of the voxels whose light changed in the
-	/// most recent <see cref="RecomputeLightLocal"/> / <see cref="RecomputeLightLocalAt"/>,
+	/// most recent <see cref="RecomputeLightLocal"/> / <see cref="RecomputeLightAtSource"/>,
 	/// or null if none (or no recompute has run). The instant-edit path uses this
 	/// to re-mesh only the sub-cells whose vertices actually sample a changed
 	/// light value (see <see cref="SubCellSamplesLightChanged"/>).

@@ -1646,16 +1646,13 @@ public partial class VoxelWorld : Node3D
 
 				if (anyLightRelevant && worldSettled)
 				{
-					// (2) LIGHT: run the Starlight DELTA centred on the edited
-					//     voxel — the SAME full-field, box-free path the NEIGHBOUR
-					//     chunks use (RecomputeLightLocalAt) when a source crosses
-					//     a seam. The edited chunk is patched into the cached wide
-					//     volumes above (SetPatchVoxel), so the delta sees the new
-					//     source + solid state and propagates the change over the
-					//     whole field. Using the full-field delta (not the
-					//     box-restricted recompute) is what fixes "a torch lights
-					//     its neighbours but not the chunk it sits on": the delta
-					//     is bit-identical to the full flood fill and is already
+					// (2) LIGHT (edited chunk): run the Starlight DELTA centred on
+					//     the edited voxel — a full-field, box-free recompute. The
+					//     edited chunk is patched into the cached wide volumes above
+					//     (SetPatchVoxel), so the delta sees the new source + solid
+					//     state and propagates the change over the whole field.
+					//     (Neighbour chunks are handled separately below by the
+					//     sphere-iteration + full-rebuild path.)
 					//     proven to work (it lights the neighbouring chunks).
 					var _lightChanged = instantChunk.RecomputeLightAtSource(this,
 						lpx, lpy, lpz, _patchWide);
@@ -1681,80 +1678,64 @@ public partial class VoxelWorld : Node3D
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
 
-				// CROSS-CHUNK LIGHT: if the edit is a light source whose reach
-				// (LightRadiusFor) crosses a chunk border, the neighbouring chunk's
-				// wide field is lit by it too. The local recompute above only
-				// touched the CENTER chunk's field, so without this the neighbour
-				// would wait for the slow async full rebuild (the "delay before the
-				// other chunk computes its light"). Do an immediate LOCAL recompute
-				// on each lit neighbour, centred on the source, and re-mesh the
-				// sub-cells whose light changed. (Each neighbour's wide field
-				// already carries the source — the wide field spans neighbouring
-				// chunks — so no patch is needed; the boundary hand-off seeds it.)
+				// CROSS-CHUNK LIGHT (the direct approach): a torch's light reaches a
+				// sphere of radius lightR around it. If any of those voxels fall in a
+				// NEIGHBOUR chunk, that chunk's light field must be refreshed. The
+				// robust, terrain-independent way: iterate the sphere of world voxels
+				// around the source, collect the DISTINCT chunks they touch (excluding
+				// the edited chunk, which was already handled above), and mark each
+				// loaded neighbour for a full rebuild. A full rebuild re-runs the light
+				// flood fill reading the edited chunk's now-correct BlockLight (SetVoxel
+				// wrote the torch's level), so the neighbour converges to the exact
+				// full-flood-fill result — no wide-index mapping, no sky-column
+				// interaction, no cache staleness. This is what "iterate a sphere,
+				// update light, rebuild the touched chunks" means, and it works on
+				// flat AND rough/angled terrain alike.
 				if (_patchLight > 0 && worldSettled)
 				{
-					// The SOURCE's real reach (13 for a torch), used for the
-					// border-crossing test.
 					int lightR = Mathf.Max(1, LightRadiusFor(_patchLight));
-					if (lightR >= ChunkSizeXZ - _instantEditLocal.X - 1
-						|| lightR >= ChunkSizeXZ - _instantEditLocal.Z - 1
-						|| _instantEditLocal.X + 1 + lightR >= ChunkSizeXZ
-						|| _instantEditLocal.Z + 1 + lightR >= ChunkSizeXZ)
-					{
-						// The light crosses a border. Only the 8 ORTHOGONAL+DIAGONAL
-						// neighbours of the edited chunk can be lit (lightR <
-						// ChunkSizeXZ, so the lit region never spans two chunks on
-						// one axis). Run a local recompute on each loaded one,
-						// centred on the source, with the SAME tight box (lightR),
-						// so a torch only recomputes its 13-voxel reach — not the
-						// full MaxLightLevel box.
-						int srcWx = wx;
-						int srcWz = wz;
-						int srcWy = wy;
-						for (int dx = -1; dx <= 1; dx++)
-							for (int dz = -1; dz <= 1; dz++)
+					int srcWorldX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
+					int srcWorldY = _instantEditLocal.Y;
+					int srcWorldZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
+					// Collect the distinct neighbour chunks whose voxels are within
+					// lightR of the source. (lightR < ChunkSizeXZ, so the sphere
+					// spans at most the edited chunk + its 8 neighbours.)
+					var touched = new System.Collections.Generic.HashSet<Vector2I>();
+					for (int dy = -lightR; dy <= lightR; dy++)
+						for (int dz = -lightR; dz <= lightR; dz++)
+							for (int dx = -lightR; dx <= lightR; dx++)
 							{
-								if (dx == 0 && dz == 0)
+								if (dx * dx + dy * dy + dz * dz > lightR * lightR)
+								{
+									continue; // outside the sphere
+								}
+								int vx = srcWorldX + dx, vy = srcWorldY + dy, vz = srcWorldZ + dz;
+								if (vy < 0 || vy >= ChunkHeight)
 								{
 									continue;
 								}
-								if (!_chunks.TryGetValue(instantChunk.Coord + new Vector2I(dx, dz), out VoxelChunk neighbour))
+								var cc = ChunkCoordOf(vx, vz);
+								if (cc == instantChunk.Coord)
 								{
-									continue; // not loaded — the async full build handles it when it loads
+									continue; // the edited chunk is already handled above
 								}
-								if (!neighbour.DataReady || !neighbour.HasWideCache)
-								{
-									continue; // no light field to recompute yet (first build)
-								}
-								// NOTE: deliberately do NOT skip a neighbour that has an
-								// async build in flight (MeshBuildInFlight). The old skip
-								// made a border torch fail to light its neighbours most of
-								// the time: with a 12-chunk render distance async builds are
-								// near-constant, so the neighbour usually had a build in
-								// flight and was skipped, deferring its light to that build
-								// ("light doesn't cross the border until a moment later"). The
-								// delta is idempotent and only touches the neighbour's own
-								// field + sub-cells, so running it while the neighbour's
-								// async build is in flight is safe — the neighbour's pending
-								// full rebuild (which recomputes the field from the new solid
-								// state) will supersede the result. This is the same race-scope
-								// reasoning as the edited chunk's worldSettled fix.
-								var nChanged = neighbour.RecomputeLightLocalAt(this, lpx, lpy, lpz,
-									srcWx + lpx * (srcWy + lpy * srcWz));
-								if (nChanged.Count == 0)
-								{
-									continue;
-								}
-								// Re-mesh the neighbour's changed sub-cells (a fresh
-								// snapshot of the neighbour's neighbours; the neighbour
-								// is not the edited chunk, so its geometry is unchanged —
-								// only its light sampling changes).
-								var nSnap = neighbour.SnapshotForEdit(this);
-								foreach (var ncell in nChanged)
-								{
-									neighbour.RebuildSubCell(this, ncell.X, ncell.Y, ncell.Z, nSnap);
-								}
+								touched.Add(cc);
 							}
+					foreach (Vector2I cc in touched)
+					{
+						if (!_chunks.TryGetValue(cc, out VoxelChunk neighbour))
+						{
+							continue; // not loaded — the async full build handles it when it loads
+						}
+						if (!neighbour.DataReady)
+						{
+							continue; // no data yet — first build will light it correctly
+						}
+						// Mark for a full rebuild: it re-runs the light flood fill
+						// (reading the edited chunk's now-correct BlockLight) and
+						// re-meshes, converging the neighbour's light to the full
+						// result. The budget loop picks it up this or a soon frame.
+						neighbour.NeedsMesh = true;
 					}
 				}
 
@@ -1764,15 +1745,25 @@ public partial class VoxelWorld : Node3D
 				// safety net that converges the local recompute to the full
 				// flood-fill result (and handles any light the box didn't cover).
 				instantChunk.NeedsMesh = true;
-				// Mark the chunk INSTANT-SATISFIED: the sub-cell path just
-				// applied the mesh + collision this frame, so the budget loop
-				// must NOT launch an async full build for it this frame (that
-				// build sets MeshBuildInFlight and would starve the next
-				// instant edit's gate). The async full build is the safety net
-				// that re-converges the local light delta to the full flood
-				// fill; it still runs — but only once, on a later frame, when
-				// the instant path has settled. (Cleared by the async build.)
-				instantChunk.MarkInstantSatisfied();
+				// For a LIGHT-SOURCE edit (torch placed/broken), do NOT mark the
+				// chunk instant-satisfied: let the budget launch its full rebuild
+				// THIS frame. The instant sub-cell remesh only re-meshes sub-cells
+				// whose sampled light changed per the delta, which leaves a stale
+				// seam (a "weird line") where one sub-cell has the new light and
+				// its neighbour still has the old — especially when placing a
+				// SECOND torch near a first (the region between them was already
+				// lit, so the delta reports no change there and those sub-cells
+				// are never re-meshed). A full rebuild re-runs the authoritative
+				// flood fill and re-meshes every sub-cell, converging the chunk
+				// with no seam. For plain geometry edits (no light source), the
+				// instant-satisfied optimisation still applies (the sub-cell
+				// remesh is complete and correct).
+				if (_patchLight == 0)
+				{
+					// No light source: the sub-cell path is complete, so skip the
+					// async build this frame (it would starve the next edit's gate).
+					instantChunk.MarkInstantSatisfied();
+				}
 			}
 			else
 			{
