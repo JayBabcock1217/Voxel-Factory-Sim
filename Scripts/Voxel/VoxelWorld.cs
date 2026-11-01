@@ -1753,12 +1753,31 @@ public partial class VoxelWorld : Node3D
 						{
 							continue; // the torch was already in the converged field (no visual change)
 						}
+						// The neighbour is now lit THIS frame by the bounded
+						// delta + targeted sub-cell remesh. Clear NeedsMesh so
+						// the budget does NOT also launch a full async rebuild
+						// for it (flood fill + all 256 sub-cells — the exact
+						// half-second behaviour we are replacing). The delta is
+						// bit-identical to the full flood fill (validated), so
+						// skipping the full rebuild loses nothing; the light the
+						// delta covers is complete for a torch.
+						neighbour.NeedsMesh = false;
+						neighbour.EditPriority = 0;
 						// One shared frozen neighbour snapshot for all of this
 						// neighbour's dirty sub-cells (same as the edited-chunk
 						// instant path) — avoids re-snapshotting per cell.
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
 						foreach (var cell in nChanged)
 						{
+							// Defensive gate (the collection is already exact, so
+							// this normally never skips): only re-mesh a sub-cell
+							// whose sampled light actually changed — a full MC
+							// isosurface build is the expensive part we must
+							// avoid doing for unchanged cells.
+							if (!neighbour.SubCellSamplesLightChanged(this, cell.X, cell.Y, cell.Z))
+							{
+								continue;
+							}
 							neighbour.RebuildSubCell(this, cell.X, cell.Y, cell.Z, nSnapshot);
 						}
 					}

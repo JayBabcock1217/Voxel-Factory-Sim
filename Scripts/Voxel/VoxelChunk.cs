@@ -672,6 +672,7 @@ public partial class VoxelChunk : Node3D
 		}
 
 		int cs = world.ChunkSizeXZ;
+		int ch = world.ChunkHeight;
 		int maxLight = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
 		int lpx = 2 * cs + 2 * maxLight + 2;
 		int lpy = world.ChunkHeight + 2;
@@ -715,17 +716,57 @@ public partial class VoxelChunk : Node3D
 		{
 			changedWideList.Add(deltaChanged[i]);
 		}
+		_lightChangedWide = changedWideList.ToArray();
+
+		// Map the changed wide voxels to the sub-cells whose SURFACE actually
+		// samples them — and ONLY those. This is the gate that makes the
+		// neighbour as fast as the edited chunk: a torch's lit sphere touches
+		// thousands of wide voxels, but only the sub-cells whose sampled region
+		// (region + 2-voxel light shell + MC pad, exactly what BuildSubCell
+		// reads) contains a changed voxel get re-meshed. Without this gate the
+		// neighbour would re-mesh every sub-cell the sphere touches (hundreds of
+		// full MC builds) — the "noticeably longer" lag.
+		int lpySz = lpx * lpy;
 		for (int i = 0; i < changedWideList.Count; i++)
 		{
 			int g = changedWideList[i];
-			int wzl = g / (lpx * lpy);
-			int rem = g - wzl * (lpx * lpy);
+			int wzl = g / lpySz;
+			int rem = g - wzl * lpySz;
 			int wyL = rem / lpx;
 			int wxL = rem - wyL * lpx;
-			changed.UnionWith(LightSampleCellsForChunkLocal(world, wxL - half, wyL - 1, wzl - half));
+			// The sub-cells that COULD sample this voxel: its cell + the 2-voxel
+			// light shell (a cell's surface samples up to 2 voxels past its own
+			// region), i.e. cell coords in [c-2..c].
+			int cx0 = ((wxL - half) - 2) / 8 - ((wxL - half) % 8 != 0 ? 1 : 0);
+			int cx1 = (wxL - half) / 8;
+			int cy0 = ((wyL - 1) - 2) / 32 - ((wyL - 1) % 32 != 0 ? 1 : 0);
+			int cy1 = (wyL - 1) / 32;
+			int cz0 = ((wzl - half) - 2) / 8 - ((wzl - half) % 8 != 0 ? 1 : 0);
+			int cz1 = (wzl - half) / 8;
+			for (int cy = cy0; cy <= cy1; cy++)
+			{
+				if (cy < 0 || cy * 32 >= ch) continue;
+				int cyy = cy * 32;
+				for (int cz = cz0; cz <= cz1; cz++)
+				{
+					if (cz < 0 || cz * 8 >= cs) continue;
+					int czz = cz * 8;
+					for (int cx = cx0; cx <= cx1; cx++)
+					{
+						if (cx < 0 || cx * 8 >= cs) continue;
+						int cxx = cx * 8;
+						// Exact gate: does this cell's sampled box contain g?
+						CellLightChangedBox(cxx, cyy, czz, cs, ch, lpx, half,
+							out int bwx0, out int bwx1, out int bwy0, out int bwy1, out int bwz0, out int bwz1);
+						if (wxL >= bwx0 && wxL <= bwx1 && wyL >= bwy0 && wyL <= bwy1 && wzl >= bwz0 && wzl <= bwz1)
+						{
+							changed.Add(VoxelWorld.CellOf(cxx, cyy, czz));
+						}
+					}
+				}
+			}
 		}
 
-		_lightChangedWide = changedWideList.ToArray();
 		return changed;
 	}
 
@@ -737,6 +778,25 @@ public partial class VoxelChunk : Node3D
 	/// light value (see <see cref="SubCellSamplesLightChanged"/>).
 	/// </summary>
 	public int[] GetLightChangedWide() => _lightChangedWide;
+
+	/// <summary>
+	/// The wide-field box (inclusive, wide coords) that a sub-cell's surface
+	/// SAMPLES: its region + the 2-voxel light shell + the MC-lattice pad each
+	/// side — the EXACT lattice <see cref="SubCellSamplesLightChanged"/> tests
+	/// (see the matching <c>wx0..wz1</c> there). A static helper so the
+	/// cross-chunk neighbour path can gate its re-mesh on "did any voxel in
+	/// THIS cell's sampled box change?" without paying the per-cell
+	/// changed-list scan twice.
+	/// </summary>
+	private static void CellLightChangedBox(
+		int cellX, int cellY, int cellZ, int cs, int ch,
+		int fpx, int half, out int wx0, out int wx1, out int wy0, out int wy1, out int wz0, out int wz1)
+	{
+		var (x0, x1, y0, y1, z0, z1) = VoxelWorld.CellBoundsStatic(cellX, cellY, cellZ, cs, ch);
+		wx0 = (x0 - 2) + half; wx1 = (x1 + 2) + half;
+		wy0 = (y0 - 2) + 1; wy1 = (y1 + 2) + 1;
+		wz0 = (z0 - 2) + half; wz1 = (z1 + 2) + half;
+	}
 
 	/// <summary>
 	/// True if any of the sub-cell's sampled light values (its region + the
