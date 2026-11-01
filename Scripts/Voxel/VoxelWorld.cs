@@ -1731,22 +1731,36 @@ public partial class VoxelWorld : Node3D
 						{
 							continue; // no data yet — first build will light it correctly
 						}
-						// Treat this neighbour as if it were JUST EDITED: mark it
-						// dirty AND stamp it with a fresh rising EditPriority (the
-						// same mechanism a direct edit uses). The budget loop orders
-						// pending rebuilds by EditPriority (descending), so a freshly
-						// stamped neighbour sorts ahead of first-builds (priority 0)
-						// and far, never-edited chunks — its full rebuild (which
-						// re-runs the light flood fill reading the edited chunk's
-						// now-correct BlockLight and re-meshes, converging to the
-						// full result) happens ASAP, on the next frame. This is
-						// distinct from MarkNeighboursForRebuild (generation
-						// completions), which deliberately does NOT stamp a rising
-						// priority so far completions can't starve the inner ring;
-						// a torch edit is user-initiated, so prioritising its
-						// affected chunks is exactly what we want.
-						neighbour.NeedsMesh = true;
-						neighbour.EditPriority = ++_editPriorityCounter;
+						if (neighbour.MeshBuildInFlight)
+						{
+							// An async full build is already in flight for this
+							// neighbour: it will re-bake the field (reading the
+							// torch's BlockLight) and re-mesh everything when it
+							// completes, so skip the delta (it would race the
+							// worker's commit).
+							continue;
+						}
+						// Light this neighbour THIS frame (the "Minecraft way"):
+						// propagate the torch's block-light change into the
+						// neighbour's cached wide field with a BOUNDED, sky-free
+						// delta (no full flood fill, no whole-chunk remesh), then
+						// re-mesh only the sub-cells whose sampled light changed.
+						// The torch's BlockLight is already in the neighbour's
+						// cached wide block volume (BuildWideVolumes read the
+						// edited chunk's live BlockLight), so no patch is needed.
+						var nChanged = neighbour.RecomputeLightFromSource(this, srcWorldX, srcWorldY, srcWorldZ);
+						if (nChanged.Count == 0)
+						{
+							continue; // the torch was already in the converged field (no visual change)
+						}
+						// One shared frozen neighbour snapshot for all of this
+						// neighbour's dirty sub-cells (same as the edited-chunk
+						// instant path) — avoids re-snapshotting per cell.
+						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
+						foreach (var cell in nChanged)
+						{
+							neighbour.RebuildSubCell(this, cell.X, cell.Y, cell.Z, nSnapshot);
+						}
 					}
 				}
 

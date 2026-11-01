@@ -634,6 +634,102 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
+	/// CROSS-CHUNK torch light update: propagate a light source that lives in a
+	/// NEIGHBOURING chunk into THIS chunk's cached wide light field, using the
+	/// Starlight delta with the sky-column pass SKIPPED (<see
+	/// cref="SkyLight.ComputeDelta"/> with <c>skipSky: true</c>), and return the
+	/// sub-cells to re-mesh. Same-frame and bounded — no full flood fill, no
+	/// whole-chunk remesh — which is what makes a placed torch light its
+	/// neighbours instantly (the "Minecraft way").
+	///
+	/// Why this is correct WITHOUT patching the source: the torch's BlockLight is
+	/// ALREADY in this chunk's cached wide <c>block</c> volume. When this chunk
+	/// last did a full rebuild, <c>MeshBuilder.BuildWideVolumes</c> read the
+	/// edited chunk's live <c>BlockLight</c> (the torch's level, written by
+	/// SetVoxel) into the wide volume — so the source is present and the cached
+	/// <c>_cachedLightField</c> is already the CONVERGED result that includes it.
+	/// All that remains is to propagate that change to the sub-cells: run the
+	/// block-only delta from the torch's wide index. Because the source's solid
+	/// state did not change, the sky field is already correct, so the sky-column
+	/// pass is skipped (skipping it also fixes the rough/angled-terrain bug where
+	/// a partially-open column's topOpen walk set the air above the source to
+	/// maxLevel and defeated the block-light offer).
+	///
+	/// <paramref name="srcWorldX/Y/Z"/> are the torch's WORLD coordinates. They
+	/// are mapped to THIS chunk's wide index (relative to THIS chunk's origin),
+	/// which is the exact mapping the old patch-and-delta approach got wrong.
+	/// No-ops (returns an empty set) when the source is outside this chunk's
+	/// wide field or the cached field isn't ready.
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightFromSource(
+		VoxelWorld world, int srcWorldX, int srcWorldY, int srcWorldZ)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		_lightChangedWide = null;
+		if (_cachedLightField == null || _cachedWideSolid == null)
+		{
+			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+
+		int cs = world.ChunkSizeXZ;
+		int maxLight = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+		int lpx = 2 * cs + 2 * maxLight + 2;
+		int lpy = world.ChunkHeight + 2;
+		int lpz = 2 * cs + 2 * maxLight + 2;
+		int half = lpx / 2 - 1; // = cs + maxLight
+
+		// Map the torch's world position to THIS chunk's wide index. The wide
+		// field's center-chunk origin maps to wide (half, 1, half); a world
+		// voxel (wx,wy,wz) maps to wide (wx - (Coord.X*cs) - cs + maxLight,
+		// wy + 1, wz - (Coord.Y*cs) - cs + maxLight) — i.e. relative to THIS
+		// chunk's origin (NOT the edited chunk's; that was the old bug).
+		int wx = srcWorldX - Coord.X * cs - cs + maxLight;
+		int wy = srcWorldY + 1;
+		int wz = srcWorldZ - Coord.Y * cs - cs + maxLight;
+		if (wx < 0 || wx >= lpx || wy < 0 || wy >= lpy || wz < 0 || wz >= lpz)
+		{
+			return changed; // torch outside this chunk's wide field — it can't light it
+		}
+		int srcWideIndex = wx + lpx * (wy + lpy * wz);
+
+		// Block-only delta: propagate the source's block-light change (the source
+		// is already in _cachedWideBlock; skipSky keeps the sky field untouched).
+		// The radius clamp (level - 1, the torch's true light reach) stops the BFS
+		// from leaking past the pad of this chunk's wide field — this chunk's field
+		// is only 1 chunk + one light-range wide, but the torch's light can reach
+		// deeper than that when the torch is set far from the shared border.
+		int sourceLevel = _cachedWideBlock[srcWideIndex];
+		int radius = sourceLevel > 1 ? sourceLevel - 1 : 0;
+		var deltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
+			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+			srcWideIndex, MaxLightFor(), MakeLightCurve(), EnsureDeltaRaw(lpx * lpy * lpz),
+			skipSky: true, radius: radius);
+		if (deltaChanged.Count == 0)
+		{
+			_lightChangedWide = null;
+			return changed; // nothing changed (e.g. the torch was already in the converged field)
+		}
+
+		var changedWideList = new System.Collections.Generic.List<int>(deltaChanged.Count);
+		for (int i = 0; i < deltaChanged.Count; i++)
+		{
+			changedWideList.Add(deltaChanged[i]);
+		}
+		for (int i = 0; i < changedWideList.Count; i++)
+		{
+			int g = changedWideList[i];
+			int wzl = g / (lpx * lpy);
+			int rem = g - wzl * (lpx * lpy);
+			int wyL = rem / lpx;
+			int wxL = rem - wyL * lpx;
+			changed.UnionWith(LightSampleCellsForChunkLocal(world, wxL - half, wyL - 1, wzl - half));
+		}
+
+		_lightChangedWide = changedWideList.ToArray();
+		return changed;
+	}
+
+	/// <summary>
 	/// The wide-field lattice indices of the voxels whose light changed in the
 	/// most recent <see cref="RecomputeLightLocal"/> / <see cref="RecomputeLightAtSource"/>,
 	/// or null if none (or no recompute has run). The instant-edit path uses this

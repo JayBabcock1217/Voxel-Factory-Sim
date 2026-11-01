@@ -618,6 +618,26 @@ public static class SkyLight
 	/// <param name="maxLevel">Max light level (normalization divisor).</param>
 	/// <param name="curve">The caller's response-curve closure (exactly the ApplyLightResponseBox per-voxel expression), applied to each changed voxel's new raw level.</param>
 	/// <param name="raw">The per-chunk RAW integer light level (0..maxLevel) working state (length = nx*ny*nz), kept in sync with the chunk's NORMALIZED field by <see cref="RecomputeDeltaRaw"/>. Updated in place by the propagation.</param>
+	/// <param name="skipSky">When true, SKIP the sky-column pass entirely (the
+	/// edited column's sky openness is NOT recomputed and no column voxel is
+	/// force-set to maxLevel/0). Used for the CROSS-CHUNK torch delta: the edited
+	/// voxel is a light SOURCE whose solid state did NOT change, so the sky field
+	/// is already correct and the sky-column pass would only interfere. On rough/
+	/// angled terrain a partially-open column's topOpen walk sets the air above the
+	/// source to maxLevel, which defeats the source's block-light offer and leaves
+	/// the region under-lit — the exact bug that made the patch-and-delta approach
+	/// fail on rough terrain. With skipSky the delta propagates ONLY the block-light
+	/// change from the source, which is the only thing that actually changed.</param>
+	/// <param name="radius">When >= 0, CLAMP the propagation to a sphere of this
+	/// radius around the edited voxel (Euclidean distance, inclusive). Used for
+	/// the cross-chunk torch delta: a block source's light reaches exactly
+	/// <c>level - 1</c> voxels, so clamping to that radius prevents the BFS from
+	/// leaking past the pad of a NEIGHBOUR's wide field (the neighbour's field
+	/// is only 1 chunk + one light-range wide, but the torch's light can reach
+	/// deeper than that when the torch is set far from the border). Voxels
+	/// outside the radius keep their pre-change value. When < 0 (the default),
+	/// there is no clamp (the in-chunk edited-voxel delta uses this — its field
+	/// is large enough and the light is bounded by the solid geometry anyway).</param>
 	/// <returns>The wide-lattice indices whose CURVED light changed (empty if nothing changed).</returns>
 	public static List<int> ComputeDelta(
 		byte[] solid, byte[] blockLight, float[] light, byte[] blockLit,
@@ -625,7 +645,9 @@ public static class SkyLight
 		int ex,
 		int maxLevel,
 		Func<int, byte, float> curve,
-		int[] raw)
+		int[] raw,
+		bool skipSky = false,
+		int radius = -1)
 	{
 		if (maxLevel < 1) maxLevel = 1;
 		else if (maxLevel > 255) maxLevel = 255;
@@ -673,6 +695,20 @@ public static class SkyLight
 		int exrem = ex / nx;
 		int exy = exrem % ny;
 		int exz = exrem / ny;
+		// The sky-column pass is skipped for the cross-chunk torch delta
+		// (skipSky): the source's solid state did not change, so the sky field
+		// is already correct, and this pass would otherwise clobber the block-
+		// light on rough terrain (a partially-open column's topOpen walk sets
+		// the air above the source to maxLevel, defeating the block offer).
+		// colChanged is still declared (and left empty) so the re-derive loop
+		// below compiles on both paths.
+		var colChanged = new List<int>();
+		// topOpen is declared (but only assigned) inside the if(!skipSky) block
+		// below; it is read again in the write-back loop (also gated on !skipSky),
+		// so hoist the declaration here to keep it in scope for both.
+		int topOpen = ny;
+		if (!skipSky)
+		{
 		// topOpen = the LOWEST air voxel with a solid-free path to the top of
 		// the wide field (walk down from the top; stops at the first solid).
 		// Air at y >= topOpen is open to the sky (maxLevel) — this matches the
@@ -681,7 +717,6 @@ public static class SkyLight
 		// gets no direct sky light; it is lit only by the BFS spilling in
 		// sideways from neighbouring open columns, so we re-derive it from its
 		// neighbours (below).
-		int topOpen = ny;
 		for (int yy = ny - 1; yy >= 0; yy--)
 		{
 			if (solid[G(exx, yy, exz)] != 0) break;
@@ -694,7 +729,6 @@ public static class SkyLight
 		// open columns (light leaks in sideways), so the true level is
 		// max(sky, neighbour, source) — we must re-derive, not just set the
 		// sky value.
-		var colChanged = new List<int>();
 		for (int yy = 0; yy < ny; yy++)
 		{
 			int g = G(exx, yy, exz);
@@ -719,6 +753,7 @@ public static class SkyLight
 		{
 			changed.Add(ex);
 		}
+		} // end if (!skipSky) — sky-column pass done
 
 		// The edited voxel's own source state can change: re-offer into its
 		// 6 air neighbours (a newly placed source seeds its face air; a removed
@@ -926,6 +961,11 @@ public static class SkyLight
 			Enq(g);
 		}
 
+		// Radius clamp for the cross-chunk torch delta: the torch's light
+		// reaches exactly `radius` voxels (level - 1), so nothing beyond that
+		// sphere changes. Precompute the source's wide coords once.
+		int srcX = ex % nx, srcY = (ex / nx) % ny, srcZ = ex / (nx * ny);
+		int r2 = radius >= 0 ? radius * radius : -1;
 		while (qHead < qTail)
 		{
 			int idx = queue[qHead++];
@@ -938,6 +978,16 @@ public static class SkyLight
 			int iz = rem / ny;
 			if (iz == 0 || iz == nz - 1) continue;
 			if (solid[idx] != 0) continue;
+			// Radius clamp: skip any voxel outside the torch's light sphere
+			// (its neighbours can't be reached either — light can't jump a gap,
+			// and a blocked voxel already returned above, so everything beyond
+			// the radius is unaffected). This stops the BFS from leaking past
+			// the pad of a neighbour's wide field.
+			if (r2 >= 0)
+			{
+				int dx = ix - srcX, dy = iy - srcY, dz = iz - srcZ;
+				if (dx * dx + dy * dy + dz * dz > r2) continue;
+			}
 			int lv = raw[idx];
 			// INCREASE: a voxel that just rose offers (lv - 1) to its neighbours.
 			// (A voxel that just DROPPED does not offer its new lower value —
@@ -1022,7 +1072,11 @@ public static class SkyLight
 			int wx = g % nx;
 			int wy = (g / nx) % ny;
 			bool openSky;
-			if (wx == exx && (g / (nx * ny)) == exz)
+			// The edited column uses the precomputed topOpen shortcut ONLY when
+			// the sky-column pass ran (it recomputed that column's openness in
+			// place). With skipSky the column's sky is unchanged, so fall through
+			// to the walk-up path (exact, and the correct value here).
+			if (!skipSky && wx == exx && (g / (nx * ny)) == exz)
 			{
 				openSky = wy >= topOpen;
 			}
