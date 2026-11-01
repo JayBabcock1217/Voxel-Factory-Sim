@@ -1744,42 +1744,37 @@ public partial class VoxelWorld : Node3D
 						// propagate the torch's block-light change into the
 						// neighbour's cached wide field with a BOUNDED, sky-free
 						// delta (no full flood fill, no whole-chunk remesh), then
-						// re-mesh only the sub-cells whose sampled light changed.
-						// The torch's BlockLight is already in the neighbour's
-						// cached wide block volume (BuildWideVolumes read the
-						// edited chunk's live BlockLight), so no patch is needed.
+						// re-mesh the changed sub-cells. The torch's BlockLight is
+						// already in the neighbour's cached wide block volume
+						// (BuildWideVolumes read the edited chunk's live
+						// BlockLight), so no patch is needed.
 						var nChanged = neighbour.RecomputeLightFromSource(this, srcWorldX, srcWorldY, srcWorldZ);
 						if (nChanged.Count == 0)
 						{
 							continue; // the torch was already in the converged field (no visual change)
 						}
 						// The neighbour is now lit THIS frame by the bounded
-						// delta + targeted sub-cell remesh. Clear NeedsMesh so
-						// the budget does NOT also launch a full async rebuild
-						// for it (flood fill + all 256 sub-cells — the exact
-						// half-second behaviour we are replacing). The delta is
-						// bit-identical to the full flood fill (validated), so
-						// skipping the full rebuild loses nothing; the light the
-						// delta covers is complete for a torch.
+						// delta + targeted remesh. Clear NeedsMesh so the budget
+						// does NOT also launch a full async rebuild for it
+						// (flood fill + all 256 sub-cells — the exact half-second
+						// behaviour we are replacing). The delta is bit-identical
+						// to the full flood fill (validated), so skipping it loses
+						// nothing; the light the delta covers is complete for a
+						// torch.
 						neighbour.NeedsMesh = false;
 						neighbour.EditPriority = 0;
-						// One shared frozen neighbour snapshot for all of this
-						// neighbour's dirty sub-cells (same as the edited-chunk
-						// instant path) — avoids re-snapshotting per cell.
+						// COARSE remesh (Minecraft-style): re-mesh the changed
+						// sub-cells as a small number of region-units (one
+						// MeshInstance3D + one collision shape each) instead of
+						// one node per fine 8×32×8 sub-cell. A torch near a
+						// border touches ~100+ fine sub-cells; coarsening
+						// collapses them to ~10-16 units, so the main-thread
+						// node/collision work drops by an order of magnitude and
+						// the neighbour lights in the same frame as the edited
+						// chunk. A full async rebuild restores the fine grid and
+						// frees these region units (FreeRegionNodes).
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
-						foreach (var cell in nChanged)
-						{
-							// Defensive gate (the collection is already exact, so
-							// this normally never skips): only re-mesh a sub-cell
-							// whose sampled light actually changed — a full MC
-							// isosurface build is the expensive part we must
-							// avoid doing for unchanged cells.
-							if (!neighbour.SubCellSamplesLightChanged(this, cell.X, cell.Y, cell.Z))
-							{
-								continue;
-							}
-							neighbour.RebuildSubCell(this, cell.X, cell.Y, cell.Z, nSnapshot);
-						}
+						neighbour.RebuildRegionLight(this, nChanged, nSnapshot);
 					}
 				}
 

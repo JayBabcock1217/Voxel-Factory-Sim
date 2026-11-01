@@ -283,6 +283,40 @@ public partial class VoxelChunk : Node3D
 		{
 			SetSubCellCollisionEnabled(node.CellX, node.CellY, node.CellZ, enabled);
 		}
+		// The coarse region nodes (instant light remesh) have their own bodies,
+		// managed by the same per-frame radius gate.
+		foreach (var node in _regionNodes.Values)
+		{
+			SetRegionNodeCollisionEnabled(node, enabled);
+		}
+	}
+
+	/// <summary>
+	/// Creates a region node's collision body lazily (only while the chunk is
+	/// within the player's collision radius) and attaches its built shape, or
+	/// drops the shape when disabled. Same radius-gating as
+	/// <see cref="SetSubCellCollisionEnabled(int,int,int,bool)"/>.
+	/// </summary>
+	private void SetRegionNodeCollisionEnabled(RegionNode node, bool enabled)
+	{
+		if (enabled)
+		{
+			if (node.Body == null && node.HasGeometry && node.BuiltShape != null)
+			{
+				node.Body = new StaticBody3D { Name = $"LightCollision_{node.KeyX}_{node.KeyY}_{node.KeyZ}" };
+				AddChild(node.Body);
+				node.Shape = new CollisionShape3D { Name = "Shape" };
+				node.Body.AddChild(node.Shape);
+			}
+			if (node.Body != null)
+			{
+				node.Shape.Shape = node.HasGeometry ? node.BuiltShape : null;
+			}
+		}
+		else if (node.Body != null)
+		{
+			node.Shape.Shape = null;
+		}
 	}
 
 	/// <summary>
@@ -1081,6 +1115,227 @@ public partial class VoxelChunk : Node3D
 		}
 	}
 
+	// A coarse "region unit" for the instant cross-chunk light remesh: one
+	// MeshInstance3D (visual) + one concave collision shape covering a box of
+	// several fine sub-cells. This is the Minecraft-style coarsening — a torch
+	// near a border touches ~100+ fine 8×32×8 sub-cells; re-meshing them as
+	// ~10-16 coarse units (one node + one collision shape each) instead of
+	// ~100+ per-sub-cell node/collision updates is what makes the neighbour
+	// light up in the same frame as the edited chunk. Managed separately from
+	// the fine _subCells (see ClearCoveredSubCells); a full async rebuild
+	// restores the fine grid and frees these (FreeRegionNodes).
+	private sealed class RegionNode
+	{
+		public int KeyX, KeyY, KeyZ; // the region's lower-left cell index (identity)
+		public int X0, Y0, Z0, X1, Y1, Z1; // chunk-local voxel bounds (inclusive)
+		public MeshInstance3D Mesh;
+		public StaticBody3D Body;
+		public CollisionShape3D Shape;
+		public ConcavePolygonShape3D BuiltShape;
+		public bool HasGeometry;
+	}
+
+	// Coarse region units for the instant light remesh, keyed by lower-left cell.
+	private readonly Dictionary<int, RegionNode> _regionNodes = new();
+
+	private int RegionKey(int cx, int cy, int cz)
+		=> (cx / VoxelWorld.CellSizeX) + VoxelWorld.CellsPerChunkX * ((cy / VoxelWorld.CellSizeY) + VoxelWorld.CellsPerChunkY * (cz / VoxelWorld.CellSizeZ));
+
+	/// <summary>
+	/// Clears the fine sub-cell nodes (visual + stashed collision) covered by a
+	/// coarse region, so the region's mesh is the only thing drawn for that
+	/// volume. Called by <see cref="RebuildRegionLight"/>.
+	/// </summary>
+	private void ClearCoveredSubCells(int x0, int y0, int z0, int x1, int y1, int z1)
+	{
+		int cs = World.ChunkSizeXZ, ch = World.ChunkHeight;
+		for (int cx = x0; cx <= x1; cx += VoxelWorld.CellSizeX)
+			for (int cy = y0; cy <= y1; cy += VoxelWorld.CellSizeY)
+				for (int cz = z0; cz <= z1; cz += VoxelWorld.CellSizeZ)
+				{
+					if (cx < 0 || cy < 0 || cz < 0 || cx >= cs || cy >= ch || cz >= cs) continue;
+					if (!_subCells.TryGetValue(VoxelWorld.CellIndex(cx, cy, cz), out SubCellNode node)) continue;
+					node.Mesh.Mesh = null;
+					node.BuiltShape = null;
+					node.HasGeometry = false;
+					if (node.Body != null)
+					{
+						node.Shape.Shape = null;
+					}
+				}
+	}
+
+	/// <summary>
+	/// Instant cross-chunk light remesh, COARSED (Minecraft-style): re-mesh the
+	/// given sub-cells as a small number of coarse region-units (each one
+	// MeshInstance3D + one concave collision shape) instead of one node per
+	/// fine 8×32×8 sub-cell. This is what makes a torch light its neighbours in
+	/// the same frame — ~100+ fine sub-cells collapse to ~10-16 region units, so
+	/// the main-thread node/collision work drops by an order of magnitude.
+	///
+	/// Correctness: <see cref="MeshBuilder.BuildSubCell"/> builds an exact MC
+	/// isosurface + hidden-face culling over ANY region box, and its seam
+	/// ownership is about CHUNK borders (not sub-cell borders), so a region that
+	/// spans sub-cell borders but stays inside one chunk is identical to the
+	/// union of the fine sub-cells. The fine sub-cells the region covers are
+	/// cleared (ClearCoveredSubCells) so there is no double-draw; a full async
+	/// rebuild restores the fine grid and frees the region (FreeRegionNodes).
+	/// </summary>
+	public void RebuildRegionLight(
+		VoxelWorld world,
+		System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> cells,
+		System.Collections.Generic.Dictionary<Vector2I, ChunkData> neighbourSnapshot)
+	{
+		if (!DataReady || cells.Count == 0)
+		{
+			return;
+		}
+
+		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
+		int wx0 = Coord.X * cs;
+		int wz0 = Coord.Y * cs;
+		var data = Data;
+		var palette = world.Palette;
+		float voxelSize = world.VoxelSize;
+		Vector2I coord = Coord;
+
+		if (neighbourSnapshot == null)
+		{
+			neighbourSnapshot = world.SnapshotNeighbours(Coord, includeCentre: true);
+		}
+		System.Func<Vector2I, ChunkData> neighborQuery = c =>
+			neighbourSnapshot.TryGetValue(c, out ChunkData d) ? d : null;
+		System.Func<int, int, int, byte> materialQuery = world.Palette.BlendEnabled
+			? world.VoxelMaterialForMesh
+			: null;
+
+		if (_cachedLightField == null)
+		{
+			_cachedLightField = MeshBuilder.BuildLightFieldWide(
+				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel,
+				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock);
+			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
+		}
+		int maxLight = world.MaxLightLevel;
+		int lpx = 2 * data.SizeX + 2 * maxLight + 2;
+		int lpy = data.SizeY + 2;
+		int lpz = 2 * data.SizeZ + 2 * maxLight + 2;
+
+		bool eastLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y)) != null;
+		bool southLoaded = neighborQuery(new Vector2I(coord.X, coord.Y + 1)) != null;
+		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
+
+		// Group the changed sub-cells into coarse region-units. Each unit is the
+		// union of a 2×2×2 block of fine sub-cells (8×32×8 each -> 16×64×16
+		// voxels), clamped to the chunk. A torch's lit sub-cells form a compact
+		// ball, so they pack into a handful of these units.
+		var units = new System.Collections.Generic.List<(int x0, int y0, int z0, int x1, int y1, int z1)>();
+		var unitIdx = new System.Collections.Generic.Dictionary<(int, int, int), int>();
+		foreach (var cell in cells)
+		{
+			// Region key = the sub-cell's lower-left corner snapped to a 2-cell
+			// grid (a 2×2×2 block of fine cells per region unit).
+			int rx = cell.X - (cell.X / (2 * VoxelWorld.CellSizeX)) * (2 * VoxelWorld.CellSizeX);
+			int ry = cell.Y - (cell.Y / (2 * VoxelWorld.CellSizeY)) * (2 * VoxelWorld.CellSizeY);
+			int rz = cell.Z - (cell.Z / (2 * VoxelWorld.CellSizeZ)) * (2 * VoxelWorld.CellSizeZ);
+			if (!unitIdx.TryGetValue((rx, ry, rz), out int ui))
+			{
+				unitIdx[(rx, ry, rz)] = units.Count;
+				ui = units.Count;
+			}
+			// The unit tuple is (x0, x1, y0, y1, z0, z1) — destructure in that
+			// order, then grow the bounding box by the new cell's extent.
+			var (ux0, ux1, uy0, uy1, uz0, uz1) = units[ui];
+			units[ui] = (
+				System.Math.Min(ux0, cell.X),
+				System.Math.Max(ux1, cell.X + VoxelWorld.CellSizeX - 1),
+				System.Math.Min(uy0, cell.Y),
+				System.Math.Max(uy1, cell.Y + VoxelWorld.CellSizeY - 1),
+				System.Math.Min(uz0, cell.Z),
+				System.Math.Max(uz1, cell.Z + VoxelWorld.CellSizeZ - 1));
+		}
+
+		foreach (var (ux0, ux1, uy0, uy1, uz0, uz1) in units)
+		{
+			// Clamp to the chunk (the last region is short if the chunk isn't an
+			// exact multiple of the region size).
+			int cx0 = System.Math.Max(0, ux0), cx1 = System.Math.Min(cs - 1, ux1);
+			int cy0 = System.Math.Max(0, uy0), cy1 = System.Math.Min(ch - 1, uy1);
+			int cz0 = System.Math.Max(0, uz0), cz1 = System.Math.Min(cs - 1, uz1);
+			if (cx0 > cx1 || cy0 > cy1 || cz0 > cz1) continue;
+
+			// The exact MC build over this region (identical to the union of the
+			// fine sub-cells it covers — BuildSubCell is region-general).
+			var (visual, collision) = MeshBuilder.BuildSubCell(
+				data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
+				cx0, cy0, cz0, cx1, cy1, cz1,
+				_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+				eastLoaded, southLoaded, diagLoaded, materialQuery);
+
+			// Clear the fine sub-cells this region covers (no double-draw), then
+			// wire the region's own node.
+			ClearCoveredSubCells(cx0, cy0, cz0, cx1, cy1, cz1);
+
+			int keyX = cx0 - (cx0 / (2 * VoxelWorld.CellSizeX)) * (2 * VoxelWorld.CellSizeX);
+			int keyY = cy0 - (cy0 / (2 * VoxelWorld.CellSizeY)) * (2 * VoxelWorld.CellSizeY);
+			int keyZ = cz0 - (cz0 / (2 * VoxelWorld.CellSizeZ)) * (2 * VoxelWorld.CellSizeZ);
+			int key = RegionKey(keyX, keyY, keyZ);
+			RegionNode node;
+			if (_regionNodes.TryGetValue(key, out RegionNode existing))
+			{
+				node = existing;
+			}
+			else
+			{
+				node = new RegionNode { KeyX = keyX, KeyY = keyY, KeyZ = keyZ };
+				node.Mesh = new MeshInstance3D { Name = $"LightRegion_{key}" };
+				node.Mesh.Layers = VoxelWorld.TerrainRenderLayer;
+				AddChild(node.Mesh);
+				_regionNodes[key] = node;
+			}
+			node.X0 = cx0; node.Y0 = cy0; node.Z0 = cz0;
+			node.X1 = cx1; node.Y1 = cy1; node.Z1 = cz1;
+			node.Mesh.Mesh = visual;
+			if (visual != null && collision != null && collision.Count > 0)
+			{
+				var shape = new ConcavePolygonShape3D();
+				shape.SetFaces(collision.ToArray());
+				node.BuiltShape = shape;
+				node.HasGeometry = true;
+			}
+			else
+			{
+				node.BuiltShape = null;
+				node.HasGeometry = false;
+				if (node.Body != null)
+				{
+					node.Shape.Shape = null;
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Frees the coarse region nodes (visual + collision). Called by a full
+	/// async rebuild (ApplyBuildResult), which restores the fine sub-cell grid
+	/// — the region nodes are only the instant-path's temporary coarsening.
+	/// </summary>
+	public void FreeRegionNodes()
+	{
+		foreach (var node in _regionNodes.Values)
+		{
+			if (node.Body != null)
+			{
+				node.Body.QueueFree();
+			}
+			if (node.Mesh != null)
+			{
+				node.Mesh.QueueFree();
+			}
+		}
+		_regionNodes.Clear();
+	}
+
 	/// <summary>
 	/// Starts rebuilding this chunk's visual mesh and per-chunk concave
 	/// collision shape. The heavy CPU work (voxel math for the visual mesh +
@@ -1429,6 +1684,11 @@ public partial class VoxelChunk : Node3D
 			appliedMesh = _pendingSubCells != null;
 			if (appliedMesh)
 			{
+				// A full async rebuild restores the FINE sub-cell grid. Free the
+				// coarse region nodes the instant light path created (they are
+				// only a temporary coarsening) so the fine sub-cells are the
+				// sole owners of the volume again.
+				FreeRegionNodes();
 				foreach (var (cxx, cyy, czz, mesh, col) in _pendingSubCells)
 				{
 					var node = GetOrCreateSubCell(cxx, cyy, czz);
