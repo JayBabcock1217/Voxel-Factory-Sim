@@ -1722,10 +1722,23 @@ public partial class VoxelWorld : Node3D
 								{
 									continue; // not loaded — the async full build handles it when it loads
 								}
-								if (!neighbour.DataReady || neighbour.MeshBuildInFlight)
+								if (!neighbour.DataReady || !neighbour.HasWideCache)
 								{
-									continue; // no field to recompute yet
+									continue; // no light field to recompute yet (first build)
 								}
+								// NOTE: deliberately do NOT skip a neighbour that has an
+								// async build in flight (MeshBuildInFlight). The old skip
+								// made a border torch fail to light its neighbours most of
+								// the time: with a 12-chunk render distance async builds are
+								// near-constant, so the neighbour usually had a build in
+								// flight and was skipped, deferring its light to that build
+								// ("light doesn't cross the border until a moment later"). The
+								// delta is idempotent and only touches the neighbour's own
+								// field + sub-cells, so running it while the neighbour's
+								// async build is in flight is safe — the neighbour's pending
+								// full rebuild (which recomputes the field from the new solid
+								// state) will supersede the result. This is the same race-scope
+								// reasoning as the edited chunk's worldSettled fix.
 								var nChanged = neighbour.RecomputeLightLocalAt(this, lpx, lpy, lpz,
 									srcWx + lpx * (srcWy + lpy * srcWz));
 								if (nChanged.Count == 0)
