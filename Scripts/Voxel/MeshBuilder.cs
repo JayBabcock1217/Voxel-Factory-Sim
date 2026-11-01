@@ -344,10 +344,9 @@ public static class MeshBuilder
 		float minLight = 0f,
 		int maxLight = 15,
 		float lightFalloff = 1f,
-		bool debugVertexLight = false,
 		float darknessGamma = 1f)
 		=> BuildVisualMarchingCubesCore(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery,
-			collisionOut, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, null, null);
+			collisionOut, materialQuery, minLight, maxLight, lightFalloff, darknessGamma, null, null);
 
 	/// <summary>
 	/// Like <see cref="BuildVisualMarchingCubes"/>, but reuses a precomputed
@@ -372,12 +371,11 @@ public static class MeshBuilder
 		float minLight,
 		int maxLight,
 		float lightFalloff,
-		bool debugVertexLight,
 		float darknessGamma,
 		float[] cachedLight,
 		byte[] cachedBlockLit)
 		=> BuildVisualMarchingCubesCore(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery,
-			collisionOut, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, cachedLight, cachedBlockLit);
+			collisionOut, materialQuery, minLight, maxLight, lightFalloff, darknessGamma, cachedLight, cachedBlockLit);
 
 	private static ArrayMesh BuildVisualMarchingCubesCore(
 		ChunkData chunk,
@@ -392,7 +390,6 @@ public static class MeshBuilder
 		float minLight,
 		int maxLight,
 		float lightFalloff,
-		bool debugVertexLight,
 		float darknessGamma,
 		float[] cachedLight,
 		byte[] cachedBlockLit)
@@ -564,11 +561,6 @@ public static class MeshBuilder
 		// ShaderMaterial, so each distinct material pair gets one surface.
 		var blended = new Dictionary<ShaderMaterial, (List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<Vector2> uv2s, List<float> lights)>();
 
-		// DEBUG (one-shot): collect the per-vertex light the mesh actually
-		// emits, so we can see whether the MC surface carries a light gradient
-		// or a uniform value. Gated on debugVertexLight.
-		var dbgLight = debugVertexLight ? new List<(Vector3 p, float l)>() : null;
-
 		// (wideHalf, the wide-field X/Z offset = cs + maxLight, is already
 		// computed above for the lightQuery lambda; reuse it here.)
 		foreach (var tri in tris)
@@ -586,12 +578,6 @@ public static class MeshBuilder
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB, out pb, out mb, out lb);
 			ResolveVertex(solid, field, wideLight, blockLight, px, py, pz, lpx, lpy, lpz, wideHalf,
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC, out pc, out mc, out lc);
-			if (dbgLight != null)
-			{
-				dbgLight.Add((pa, la));
-				dbgLight.Add((pb, lb));
-				dbgLight.Add((pc, lc));
-			}
 
 			// Lattice -> world. The padding shifts the lattice by one, and the
 			// +0.5 puts every field point at its voxel's CENTER, so the
@@ -710,27 +696,6 @@ public static class MeshBuilder
 				tool.AddVertex(b.verts[i]);
 			}
 			tool.Commit(mesh);
-		}
-
-		// DEBUG (one-shot): report the per-vertex light the MC mesh emitted, so
-		// we can see whether the surface carries a light gradient or a uniform
-		// value. If the cave looks uniform, this tells us whether the vertices
-		// actually vary.
-		if (dbgLight != null)
-		{
-			float mn = float.MaxValue, mx = 0f;
-			var byLight = new Dictionary<int, int>(); // rounded light -> count
-			foreach (var (p, l) in dbgLight)
-			{
-				if (l < mn) mn = l;
-				if (l > mx) mx = l;
-				int k = (int)(l * 100f + 0.5f);
-				byLight[k] = byLight.TryGetValue(k, out int c) ? c + 1 : 1;
-			}
-			string hist = string.Join(" ", System.Linq.Enumerable
-				.Select(System.Linq.Enumerable.OrderBy(byLight, kv => kv.Key),
-					kv => $"{(kv.Key / 100f):F2}:{kv.Value}"));
-			GD.Print($"[VTEX-LIGHT] chunk {coord}: {dbgLight.Count} verts min={mn:F2} max={mx:F2} histogram(light:count)= [{hist}]");
 		}
 
 		return mesh;
@@ -1592,25 +1557,27 @@ public static class MeshBuilder
 		// pass straight to the floor stage (which only lifts values BELOW the
 		// floor, leaving the torch's real brightness intact). Sky-lit and dark
 		// voxels keep the full curve.
+		//
+		// PERFORMANCE: the falloff + dark-gamma stages are pure functions of the
+		// normalized value, so instead of calling Math.Pow (up to twice) per
+		// voxel across the whole wide field, we evaluate them ONCE per distinct
+		// value into a small LUT (CurveLut) and index into it here. The raw
+		// flood-filled field is a coarse integer level (0..maxLevel, at most 255
+		// distinct values), so the LUT has at most 255 entries.
 		float exp = exponent >= 1f ? exponent : 1f;
 		float dg = darkGamma >= 1f ? darkGamma : 1f;
 		bool hasFloor = minLight > 0f;
+		bool hasCurves = exp > 1.0001f || dg > 1.0001f;
+		float[] lut = hasCurves ? CurveLut(exp, dg) : null;
 		for (int i = 0; i < light.Length; i++)
 		{
 			float norm = light[i];
 			bool isBlock = blockLit != null && blockLit[i] == 1;
 			// Stages 1+2 apply ONLY to sky-lit / dark voxels, never to block
 			// light (see summary).
-			if (!isBlock)
+			if (!isBlock && lut != null)
 			{
-				if (exp > 1.0001f)
-				{
-					norm = (float)Math.Pow(norm, exp);
-				}
-				if (dg > 1.0001f)
-				{
-					norm = (float)Math.Pow(norm, dg);
-				}
+				norm = lut[CurveIndex(norm)];
 			}
 			// Stage 3 — dark-side floor (no-op when minLight == 0). Applied to
 			// BOTH sky and block light: it only raises values below the floor,
@@ -1621,6 +1588,43 @@ public static class MeshBuilder
 			}
 			light[i] = norm;
 		}
+	}
+
+	/// <summary>
+	/// Maps a normalized (0..1) light value to its <see cref="CurveLut"/> index.
+	/// The raw flood-filled field is a coarse integer level grid
+	/// (k / maxLevel, maxLevel &lt;= 255), so at most 255 distinct values exist;
+	/// 256 buckets gives one per value. Clamped so any out-of-range value maps
+	/// to an edge bucket (a no-op for a valid field).
+	/// </summary>
+	public static int CurveIndex(float v)
+	{
+		int idx = (int)(v * 255f);
+		return idx < 0 ? 0 : (idx > 255 ? 255 : idx);
+	}
+
+	/// <summary>
+	/// Precomputes the falloff + dark-gamma stages of the light response curve
+	/// (the two <c>Math.Pow</c> stages) once per distinct normalized value into
+	/// a 256-entry LUT, so <see cref="ApplyLightResponse"/> / the box + delta
+	/// paths index into it instead of calling <c>Math.Pow</c> up to twice per
+	/// voxel across the whole wide field (385k voxels). The curve is a pure
+	/// per-value function of the normalized input, so the LUT reproduces it
+	/// exactly for every value the field can hold.
+	/// </summary>
+	public static float[] CurveLut(float exp, float dg)
+	{
+		var lut = new float[256];
+		bool useExp = exp > 1.0001f;
+		bool useDg = dg > 1.0001f;
+		for (int i = 0; i < 256; i++)
+		{
+			float v = i / 255f;
+			if (useExp) v = (float)Math.Pow(v, exp);
+			if (useDg) v = (float)Math.Pow(v, dg);
+			lut[i] = v;
+		}
+		return lut;
 	}
 
 	/// <summary>
@@ -1648,12 +1652,11 @@ public static class MeshBuilder
 		float minLight = 0f,
 		int maxLight = 15,
 		float lightFalloff = 1f,
-		bool debugVertexLight = false,
 		float darknessGamma = 1f)
 	{
 		return Build(chunk, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery,
 			materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff,
-			debugVertexLight, darknessGamma, null, null);
+			darknessGamma, null, null);
 	}
 
 	/// <summary>
@@ -1682,7 +1685,6 @@ public static class MeshBuilder
 		float minLight,
 		int maxLight,
 		float lightFalloff,
-		bool debugVertexLight,
 		float darknessGamma,
 		float[] lightField,
 		byte[] blockLit)
@@ -1696,7 +1698,7 @@ public static class MeshBuilder
 			// both mesh modes the triangles emitted into the visual mesh are
 			// also collected (via the collisionOut sink) into the collision soup.
 			ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma)
+				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, darknessGamma)
 				: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma);
 			return (visual, collision);
 		}
@@ -1708,7 +1710,7 @@ public static class MeshBuilder
 			// geometry/collision rebuild cheap: the light stage is just an array
 			// read, not ~560k Math.Pow calls.
 			ArrayMesh visual = mode == VoxelMeshMode.MarchingCubes
-				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, lightField, blockLit)
+				? BuildVisualMarchingCubes(chunk, wx0, wz0, voxelSize, palette, coord, neighborQuery, collision, materialQuery, minLight, maxLight, lightFalloff, darknessGamma, lightField, blockLit)
 				: BuildVisual(chunk, wx0, wz0, voxelSize, palette, solidQuery, collision, materialQuery, blockLightQuery, neighborQuery, minLight, maxLight, lightFalloff, darknessGamma, lightField, blockLit);
 			return (visual, collision);
 		}

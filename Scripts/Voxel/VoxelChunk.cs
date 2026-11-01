@@ -171,12 +171,6 @@ public partial class VoxelChunk : Node3D
 	private int _patchWideIndex; // wide lattice index of the edited voxel (-1 = unknown)
 	private bool _hasPatch;
 
-	// TEMP (edit diagnosis): the last RebuildSubCell's BuildSubCell vs apply
-	// tick split, so VoxelWorld's edit profiler can split remesh into
-	// mesh-build vs node-apply. Main-thread only (edits are synchronous).
-	internal static long LastBuildTicks;
-	internal static long LastApplyTicks;
-
 	// ------------------------------------------------------------------
 	// Sub-cell (dirty-region) meshing — Option B (see VoxelWorld.SubCellMeshing).
 	// When enabled, the chunk's mesh is kept as a grid of small sub-cells; an
@@ -417,6 +411,8 @@ public partial class VoxelChunk : Node3D
 		return _cachedWideSolid[wx + lpx * (wy + lpy * wz)];
 	}
 
+
+
 	/// <summary>
 	/// LOCAL light recompute (Option B lighting): update the wide light field
 	/// for a box around the edit, re-applying the response curve, and return the
@@ -556,7 +552,7 @@ public partial class VoxelChunk : Node3D
 			int rem = g - wz * (lpx * lpySz);
 			int wy = rem / lpx;
 			int wx = rem - wy * lpx;
-			changed.UnionWith(DirtyCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+			changed.UnionWith(LightSampleCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
 		}
 
 		_lightChangedWide = changedWideList.Count > 0 ? changedWideList.ToArray() : null;
@@ -619,7 +615,80 @@ public partial class VoxelChunk : Node3D
 			int rem = g - wz * (lpx * lpySz);
 			int wy = rem / lpx;
 			int wx = rem - wy * lpx;
-			changed.UnionWith(DirtyCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+			changed.UnionWith(LightSampleCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+		}
+
+		_lightChangedWide = changedWideList.ToArray();
+		return changed;
+	}
+
+	/// <summary>
+	/// EDITED-CHUNK light update: run the Starlight delta (<see
+	/// cref="SkyLight.ComputeDelta"/>) centred on a single edited voxel (the
+	/// <paramref name="wIndex"/> wide index of the edited voxel). Unlike <see
+	/// cref="RecomputeLightLocal"/>, there is NO box restriction — the delta runs
+	/// over the whole field, so the edited chunk gets exactly the same full,
+	/// bit-identical light update that the NEIGHBOUR chunk gets in
+	/// <see cref="RecomputeLightLocalAt"/> when a source crosses a seam. The
+	/// edited voxel's NEW solid state + block-light source are patched into the
+	/// cached wide volumes FIRST (the same patch step <see cref="RecomputeLightLocal"/>
+	/// performs) — without it, a just-placed source's <c>blockLight</c> is still 0
+	/// in the cache and the delta would see no source and propagate nothing.
+	/// Returns the sub-cells whose sampled light changed.
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightAtSource(
+		VoxelWorld world, int lpx, int lpy, int lpz, int wIndex)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		_lightChangedWide = null;
+		if (_cachedLightField == null || _cachedWideSolid == null)
+		{
+			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+		if (wIndex < 0 || wIndex >= lpx * lpy * lpz)
+		{
+			return changed; // edit not in this chunk's field
+		}
+
+		// Patch the cached wide volumes at the edited voxel (its solid state and
+		// block-light source changed; everything else is unchanged). This is the
+		// SAME patch <see cref="RecomputeLightLocal"/> applies, and it MUST happen
+		// before the delta reads <c>blockLight[wIndex]</c> — a just-placed source
+		// has blockLight 0 in the pre-edit cache, so without this the delta sees
+		// no source and lights nothing (the "torch lights its neighbours but not
+		// the chunk it sits on" bug).
+		if (_hasPatch)
+		{
+			_cachedWideSolid[wIndex] = (byte)(_patchMaterial != 0 ? 1 : 0);
+			_cachedWideBlock[wIndex] = _patchLight;
+			_hasPatch = false; // the patch has been consumed by this delta
+		}
+
+		var deltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
+			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
+			wIndex, MaxLightFor(), MakeLightCurve(), EnsureDeltaRaw(lpx * lpy * lpz));
+		if (deltaChanged.Count == 0)
+		{
+			_lightChangedWide = null;
+			return changed;
+		}
+
+		var changedWideList = new System.Collections.Generic.List<int>(deltaChanged.Count);
+		for (int i = 0; i < deltaChanged.Count; i++)
+		{
+			changedWideList.Add(deltaChanged[i]);
+		}
+
+		int half = lpx / 2 - 1;
+		int lpySz = world.ChunkHeight + 2;
+		for (int i = 0; i < changedWideList.Count; i++)
+		{
+			int g = changedWideList[i];
+			int wz = g / (lpx * lpySz);
+			int rem = g - wz * (lpx * lpySz);
+			int wy = rem / lpx;
+			int wx = rem - wy * lpx;
+			changed.UnionWith(LightSampleCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
 		}
 
 		_lightChangedWide = changedWideList.ToArray();
@@ -689,6 +758,9 @@ public partial class VoxelChunk : Node3D
 		float dg = world.DarknessGamma >= 1f ? world.DarknessGamma : 1f;
 		float minL = world.MinLight;
 		bool hasFloor = minL > 0f;
+		// Curve stages via the shared LUT (no Math.Pow per voxel) — see
+		// MeshBuilder.CurveLut.
+		float[] lut = (exp > 1.0001f || dg > 1.0001f) ? MeshBuilder.CurveLut(exp, dg) : null;
 		for (int iz = 0; iz < bz; iz++)
 			for (int iy = 0; iy < by; iy++)
 				for (int ix = 0; ix < bx; ix++)
@@ -697,10 +769,9 @@ public partial class VoxelChunk : Node3D
 					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
 					float norm = _cachedLightField[g];
 					bool isBlock = _cachedBlockLit != null && _cachedBlockLit[g] == 1;
-					if (!isBlock)
+					if (!isBlock && lut != null)
 					{
-						if (exp > 1.0001f) norm = (float)Math.Pow(norm, exp);
-						if (dg > 1.0001f) norm = (float)Math.Pow(norm, dg);
+						norm = lut[MeshBuilder.CurveIndex(norm)];
 					}
 					if (hasFloor) norm = VoxelWorld.ApplyMinLight(norm, minL);
 					_cachedLightField[g] = norm;
@@ -747,13 +818,16 @@ public partial class VoxelChunk : Node3D
 		if (dg < 1f) dg = 1f;
 		bool hasFloor = minL > 0f;
 		int maxL = MaxLightFor();
+		// The curve stages via the shared LUT (no Math.Pow per changed voxel) —
+		// the exact same values MeshBuilder.ApplyLightResponse produces, so the
+		// delta's curved field stays bit-identical to the full pipeline's.
+		float[] lut = (exp > 1.0001f || dg > 1.0001f) ? MeshBuilder.CurveLut(exp, dg) : null;
 		return (int level, byte lit) =>
 		{
 			float norm = level / (float)maxL;
-			if (lit != 1)
+			if (lit != 1 && lut != null)
 			{
-				if (exp > 1.0001f) norm = (float)Math.Pow(norm, exp);
-				if (dg > 1.0001f) norm = (float)Math.Pow(norm, dg);
+				norm = lut[MeshBuilder.CurveIndex(norm)];
 			}
 			if (hasFloor) norm = VoxelWorld.ApplyMinLight(norm, minL);
 			return norm;
@@ -773,6 +847,34 @@ public partial class VoxelChunk : Node3D
 		for (int ox = -1; ox <= 1; ox++)
 			for (int oy = -1; oy <= 1; oy++)
 				for (int oz = -1; oz <= 1; oz++)
+				{
+					int px = clx + ox, py = cly + oy, pz = clz + oz;
+					if (px < 0 || py < 0 || pz < 0 || px >= cs || py >= ch || pz >= cs) continue;
+					set.Add(VoxelWorld.CellOf(px, py, pz));
+				}
+		return set;
+	}
+
+	/// <summary>
+	/// The sub-cells whose LIGHT can change when the light of chunk-local voxel
+	/// (clx,cly,clz) changes. A sub-cell's surface is re-meshed from its
+	/// 8×32×8 voxel region PLUS a 2-voxel padding (see <c>BuildSubCell</c> /
+	/// <see cref="SubCellSamplesLightChanged"/>), so a changed voxel affects
+	/// every sub-cell whose [region, region+2] contains it — a range of up to
+	/// 10 voxels, NOT the 1-voxel shell <see cref="DirtyCellsForChunkLocal"/>
+	/// uses for geometry. Using the smaller set here is what made a torch's
+	/// light fail to reach the "far" sub-cells (2..N voxels away): their sampled
+	/// light changed but they were never re-meshed, so they kept their old
+	/// (dark) per-vertex light. Returns the cells to re-mesh.
+	/// </summary>
+	private System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> LightSampleCellsForChunkLocal(
+		VoxelWorld world, int clx, int cly, int clz)
+	{
+		var set = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
+		for (int ox = -2; ox <= 2; ox++)
+			for (int oy = -2; oy <= 2; oy++)
+				for (int oz = -2; oz <= 2; oz++)
 				{
 					int px = clx + ox, py = cly + oy, pz = clz + oz;
 					if (px < 0 || py < 0 || pz < 0 || px >= cs || py >= ch || pz >= cs) continue;
@@ -851,17 +953,12 @@ public partial class VoxelChunk : Node3D
 		bool southLoaded = neighborQuery(new Vector2I(coord.X, coord.Y + 1)) != null;
 		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
 
-		// The small MC build. Split the cost into the mesh build (BuildSubCell)
-		// vs the apply (node wiring + collision shape) for the edit profiler.
-		LastBuildTicks = 0;
-		LastApplyTicks = 0;
-		var _t0 = System.Diagnostics.Stopwatch.StartNew();
+		// The small MC build: the mesh + collision for just this sub-cell.
 		var (visual, collision) = MeshBuilder.BuildSubCell(
 			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 			x0, y0, z0, x1, y1, z1,
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
 			eastLoaded, southLoaded, diagLoaded, materialQuery);
-		LastBuildTicks = _t0.ElapsedTicks;
 
 		// Apply to the sub-cell's nodes. The visual mesh is always set. The
 		// collision shape is stashed (BuiltShape) and the body/shape wiring is
@@ -888,7 +985,6 @@ public partial class VoxelChunk : Node3D
 				node.Shape.Shape = null;
 			}
 		}
-		LastApplyTicks = _t0.ElapsedTicks - LastBuildTicks;
 	}
 
 	/// <summary>
@@ -966,12 +1062,6 @@ public partial class VoxelChunk : Node3D
 		// The dark-side gamma: spreads the sparse integer light steps so the
 		// MinLight floor is perceptually fine-grained instead of jumping.
 		float darknessGamma = world.DarknessGamma;
-		// Debug: one-shot vertex-light histogram (auto-clears after first dump).
-		bool debugVertexLight = world.DebugVertexLight && VoxelWorld.VertexLightDumpPending;
-		if (debugVertexLight)
-		{
-			VoxelWorld.VertexLightDumpPending = false;
-		}
 
 		// A launched build is a chunk update in progress: treat the chunk as
 		// dirty until ApplyBuildResult clears the flag, so a drop queued for
@@ -1057,7 +1147,7 @@ public partial class VoxelChunk : Node3D
 				// is drawn. The precomputed, already-curved lightField is passed
 				// so the internal flood fill AND the response curve are both
 				// skipped (Path 1 fast path).
-				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma, pendingLight, pendingBlockLit);
+				var (visual, collision) = MeshBuilder.Build(data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery, neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery, minLight, maxLight, lightFalloff, darknessGamma, pendingLight, pendingBlockLit);
 
 				// Store the prebuilt results for the main thread. Written here,
 				// read only in ApplyBuildResult after the task completes (happens-
@@ -1137,11 +1227,6 @@ public partial class VoxelChunk : Node3D
 		int maxLight = world.MaxLightLevel;
 		float lightFalloff = world.LightFalloff;
 		float darknessGamma = world.DarknessGamma;
-		bool debugVertexLight = world.DebugVertexLight && VoxelWorld.VertexLightDumpPending;
-		if (debugVertexLight)
-		{
-			VoxelWorld.VertexLightDumpPending = false;
-		}
 
 		// Path 1 (light decoupling): if this chunk already has a cached wide
 		// light field (from a previous full build), reuse it so the expensive
@@ -1182,7 +1267,7 @@ public partial class VoxelChunk : Node3D
 		var (visual, collision) = MeshBuilder.Build(
 			data, wx0, wz0, voxelSize, palette, mode, coord, solidQuery,
 			neighborQuery, materialQuery, blockLightQuery, neighborChunkQuery,
-			minLight, maxLight, lightFalloff, debugVertexLight, darknessGamma,
+			minLight, maxLight, lightFalloff, darknessGamma,
 			lightField, blockLit);
 
 		// Apply the result NOW (same frame). The same wiring ApplyBuildResult
