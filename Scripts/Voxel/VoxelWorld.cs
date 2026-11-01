@@ -1731,11 +1731,22 @@ public partial class VoxelWorld : Node3D
 						{
 							continue; // no data yet — first build will light it correctly
 						}
-						// Mark for a full rebuild: it re-runs the light flood fill
-						// (reading the edited chunk's now-correct BlockLight) and
-						// re-meshes, converging the neighbour's light to the full
-						// result. The budget loop picks it up this or a soon frame.
+						// Treat this neighbour as if it were JUST EDITED: mark it
+						// dirty AND stamp it with a fresh rising EditPriority (the
+						// same mechanism a direct edit uses). The budget loop orders
+						// pending rebuilds by EditPriority (descending), so a freshly
+						// stamped neighbour sorts ahead of first-builds (priority 0)
+						// and far, never-edited chunks — its full rebuild (which
+						// re-runs the light flood fill reading the edited chunk's
+						// now-correct BlockLight and re-meshes, converging to the
+						// full result) happens ASAP, on the next frame. This is
+						// distinct from MarkNeighboursForRebuild (generation
+						// completions), which deliberately does NOT stamp a rising
+						// priority so far completions can't starve the inner ring;
+						// a torch edit is user-initiated, so prioritising its
+						// affected chunks is exactly what we want.
 						neighbour.NeedsMesh = true;
+						neighbour.EditPriority = ++_editPriorityCounter;
 					}
 				}
 
