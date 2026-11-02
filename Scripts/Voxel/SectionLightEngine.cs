@@ -276,6 +276,27 @@ public sealed class SectionLightEngine
 	}
 
 	/// <summary>
+	/// True if the voxel is a block-light source (emits its own light) — used
+	/// by the mesh builder to brighten a source voxel's own faces to its
+	/// source level (the wide field does the same). The wide field treats a
+	/// source voxel as solid (so the mesh samples its NEIGHBOURS for light),
+	/// but the source voxel's own faces are drawn at its source level.
+	/// </summary>
+	public bool BlockLightSource(int worldX, int worldY, int worldZ, int chunkSizeXZ)
+	{
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
+		if (!_sources.TryGetValue(key, out byte[] sources))
+		{
+			return false;
+		}
+		int idx = localX + 16 * (localY + 16 * localZ);
+		return sources[idx] > 0;
+	}
+
+	/// <summary>
 	/// Updates a single voxel's solid/air + block source state in the section
 	/// data (called after SetVoxel). This ensures the BFS sees the new state.
 	/// </summary>

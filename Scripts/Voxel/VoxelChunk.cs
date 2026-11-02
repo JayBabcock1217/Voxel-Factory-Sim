@@ -73,6 +73,30 @@ public partial class VoxelChunk : Node3D
 	public void MarkInstantSatisfied() => _instantSatisfied = true;
 
 	/// <summary>
+	/// True while the per-section light engine holds block-light edits for this
+	/// chunk that the wide field doesn't hold (a torch was placed/broken and the
+	/// full rebuild that re-bakes the wide field + section fields hasn't run
+	/// yet). The full rebuild is the one authoritative convergence pass — it
+	/// re-bakes the wide field from the post-edit data and re-registers the
+	/// section fields from it. While true, the budget loop MUST launch this
+	/// chunk's full rebuild even if it's instant-satisfied (see the budget
+	/// gate), and an unrelated chunk's full rebuild must not clobber this
+	/// chunk's section fields (see <see cref="RegisterSectionsWithEngine"/>
+	/// call sites). Cleared by the next full rebuild (ApplyBuildResult /
+	/// RebuildSynchronous).
+	/// </summary>
+	public bool SectionLightDirty => _sectionLightDirty;
+
+	/// <summary>
+	/// Marks this chunk's section light dirty: the per-section light engine just
+	/// wrote block-light changes (a torch placed/broken) into this chunk's
+	/// sections that the wide field doesn't hold. The next full rebuild
+	/// re-bakes the wide field from the post-edit data and re-registers the
+	/// section fields, converging the edits.
+	/// </summary>
+	public void MarkSectionLightDirty() => _sectionLightDirty = true;
+
+	/// <summary>
 	/// True once this chunk has a live concave collision shape (built by
 	/// <see cref="Rebuild"/>/apply). The spawn gate requires this in addition to
 	/// the mesh being built, so the player never gets physics (and can't fall
@@ -1121,37 +1145,68 @@ public partial class VoxelChunk : Node3D
 	// MeshInstance3D (visual) + one concave collision shape covering a box of
 	// several fine sub-cells. This is the Minecraft-style coarsening — a torch
 	// near a border touches ~100+ fine 8×32×8 sub-cells; re-meshing them as
+	// ------------------------------------------------------------------
+	// Per-section light sampling (the instant-edit light path)
+	// ------------------------------------------------------------------
+
+	// Sample the per-section light engine's light field at a CHUNK-LOCAL voxel.
+	// Returns null when the containing section is NOT registered (the section
+	// has never been baked into the engine) — the caller falls back to the
+	// wide field. A registered section always returns a value (even 0 — a
+	// registered dark section is dark; the engine's BFS is the authoritative
+	// block-light state for it).
+	private float? SampleSectionLight(int lx, int ly, int lz, VoxelWorld world)
+	{
+		int cs = world.ChunkSizeXZ;
+		int ch = world.ChunkHeight;
+		var engine = world.SectionLight;
+		int wx = Coord.X * cs + lx;
+		int wy = ly;
+		int wz = Coord.Y * cs + lz;
+		if (!engine.IsSectionRegistered(wx, wy, wz, cs))
+		{
+			return null;
+		}
+		int maxLight = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+		int raw = engine.SampleLight(wx, wy, wz, cs, ch);
+		// A block-light SOURCE voxel (a torch) is drawn at its own source level:
+		// the wide field does the same (blockLit lookup). Without this, a torch
+		// voxel's own faces would be black (the field is 0 on solid voxels).
+		if (raw <= 0 && engine.BlockLightSource(wx, wy, wz, cs))
+		{
+			raw = Math.Min(engine.SampleSource(wx, wy, wz, cs), maxLight);
+		}
+		return raw / (float)maxLight;
+	}
+
 	/// <summary>
 	/// Creates a light sampler function that samples the per-section light
 	/// engine for this chunk. The function takes chunk-local voxel coords
-	/// (x, y, z) and returns the normalized light level (0..1). If the section
-	/// engine has no field for the section containing the voxel (first build,
-	/// before the full rebuild has run), returns the wide field's value (the
-	/// fallback).
+	/// (x, y, z) and returns the normalized light level (0..1).
+	///
+	/// IMPORTANT: the section engine is the AUTHORITATIVE light for registered
+	/// sections. The wide field (_cachedLightField) is only a FALLBACK for
+	/// unregistered sections. The wide field is STALE after an instant edit
+	/// (the async full rebuild that refreshes it hasn't run yet), so sampling
+	/// it for a registered section would show the pre-edit light (a torch's
+	/// glow would be missing from the wide field until the async rebuild).
 	/// </summary>
 	private System.Func<int, int, int, float> MakeSectionLightSampler(VoxelWorld world)
 	{
 		int cs = world.ChunkSizeXZ;
 		int ch = world.ChunkHeight;
 		int maxLight = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
-		var engine = world.SectionLight;
-		// Capture the chunk's world origin (for mapping local → world coords).
-		int wx0 = Coord.X * cs;
-		int wz0 = Coord.Y * cs;
 		return (int lx, int ly, int lz) =>
 		{
-			int wx = wx0 + lx;
-			int wy = ly;
-			int wz = wz0 + lz;
-			// If the section is registered, use the engine's value (even if it's
-			// 0 — a registered dark section is dark).
-			if (engine.IsSectionRegistered(wx, wy, wz, cs))
+			// Registered section: the engine's value is authoritative (the
+			// instant-edit BFS has already propagated the new light).
+			float? sectionLight = SampleSectionLight(lx, ly, lz, world);
+			if (sectionLight != null)
 			{
-				int raw = engine.SampleLight(wx, wy, wz, cs, ch);
-				return raw / (float)maxLight;
+				return sectionLight.Value;
 			}
-			// Unregistered section (first build, before the full rebuild has run):
-			// fall back to the wide field (which is always computed).
+			// Unregistered section (first build, before the full rebuild has
+			// run): fall back to the wide field (which is always computed).
 			if (_cachedLightField != null)
 			{
 				int lpx2 = 2 * cs + 2 * maxLight + 2;
@@ -1184,6 +1239,17 @@ public partial class VoxelChunk : Node3D
 
 	// Coarse region units for the instant light remesh, keyed by lower-left cell.
 	private readonly Dictionary<int, RegionNode> _regionNodes = new();
+
+	// True while the per-section light engine holds light changes for this chunk
+	// that the wide field doesn't (a torch was placed/broken and the async full
+	// rebuild that re-bakes the wide field + section fields hasn't run yet).
+	// The async rebuild is the one authoritative convergence pass — it re-bakes
+	// the wide field (which re-registers the section fields from it), so until
+	// it runs, the engine's block-light edits must NOT be lost. This flag gates
+	// that: RebuildSynchronous (the whole-chunk sync path) and the budget loop
+	// both launch a full rebuild for the edited chunk in the same frame, so the
+	// flag is always cleared in the same frame it's set.
+	private bool _sectionLightDirty;
 
 	private int RegionKey(int cx, int cy, int cz)
 		=> (cx / VoxelWorld.CellSizeX) + VoxelWorld.CellsPerChunkX * ((cy / VoxelWorld.CellSizeY) + VoxelWorld.CellsPerChunkY * (cz / VoxelWorld.CellSizeZ));
@@ -1263,6 +1329,14 @@ public partial class VoxelChunk : Node3D
 				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock);
 			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
 		}
+		// The section engine's BFS just wrote block-light changes into this
+		// chunk's sections that the wide field doesn't hold. Mark the chunk so
+		// the next full rebuild (async or sync) re-bakes the wide field from the
+		// post-edit data and re-registers the section fields — converging the
+		// engine's edits into the field. Without this, an unrelated chunk's
+		// RebuildSynchronous (or the budget's async rebuild) could clobber the
+		// engine's torch light with the stale wide field.
+		_sectionLightDirty = true;
 		int maxLight = world.MaxLightLevel;
 		int lpx = 2 * data.SizeX + 2 * maxLight + 2;
 		int lpy = data.SizeY + 2;
@@ -1670,6 +1744,19 @@ public partial class VoxelChunk : Node3D
 			// changes across section borders.
 			RegisterSectionsWithEngine();
 		}
+		// On the FIRST build the wide field is freshly computed from the
+		// current data — re-register the section fields from it and clear the
+		// pending-edit flag (there's no prior edit to preserve). On a CACHED
+		// field (an edit), the field is STALE (it predates the edit's
+		// block-light changes), so do NOT re-register from it (that would
+		// clobber the engine's torch light) and do NOT clear the flag (the
+		// async full rebuild is the one that re-bakes the field from the
+		// post-edit data and re-registers).
+		if (!hasCachedLight)
+		{
+			_sectionLightDirty = false;
+			RegisterSectionsWithEngine();
+		}
 
 		// The heavy voxel math, on the main thread (synchronous fast path). The
 		// precomputed lightField is passed so the internal flood fill is skipped
@@ -1825,7 +1912,28 @@ public partial class VoxelChunk : Node3D
 		// field (authoritative light); extract this chunk's 16×16×16 sections
 		// from it and register them so the instant-edit path can propagate
 		// light changes across section borders.
-		RegisterSectionsWithEngine();
+		//
+		// SKIP the re-registration when the section engine holds pending
+		// block-light edits (a torch was placed/broken after this build
+		// launched). The build's wide field was baked from the pre-edit data, so
+		// re-registering from it would CLOBBER the engine's torch light with
+		// the pre-edit values. The engine's fields already hold the correct
+		// (BFS-propagated) light; the next full rebuild (after the edit's
+		// own full rebuild converges) will re-bake from the post-edit data.
+		// Only re-register (and clear the flag) when there are no pending
+		// edits; when the engine holds pending block-light edits, SKIP the
+		// re-registration (don't clobber the torch light) and KEEP the flag set
+		// so the budget launches a fresh rebuild (post-edit data) that
+		// converges.
+		if (!_sectionLightDirty)
+		{
+			RegisterSectionsWithEngine();
+		}
+		else
+		{
+			// Keep _sectionLightDirty = true: the field is stale, the engine's
+			// fields are authoritative, and a fresh rebuild is still needed.
+		}
 
 		// Only clear the dirty flag when a mesh was actually applied. If the
 		// build threw (see Rebuild's catch), keep NeedsMesh true so the world's

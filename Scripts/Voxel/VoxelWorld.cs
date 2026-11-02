@@ -1532,7 +1532,18 @@ public partial class VoxelWorld : Node3D
 
 		for (int i = 0; i < pending.Count && i < ChunksPerFrame; i++)
 		{
-			pending[i].Rebuild(this);
+			// A chunk whose section light is dirty MUST get its full rebuild even
+			// if it's instant-satisfied: the full rebuild is the one that
+			// re-bakes the wide field from the post-edit data and re-registers
+			// the section fields (converging the engine's block-light edits into
+			// the field). Without this exception, an edited torch chunk would
+			// stay instant-satisfied (skipped by the budget) and its section
+			// fields would never be re-registered — the cross-border glow would
+			// stay clipped at the chunk border until some unrelated rebuild ran.
+			if (pending[i].SectionLightDirty || !pending[i].InstantSatisfied)
+			{
+				pending[i].Rebuild(this);
+			}
 		}
 
 		// Item drops from edited voxels only spawn once the chunk update for
@@ -1838,12 +1849,18 @@ public partial class VoxelWorld : Node3D
 						{
 							continue;
 						}
-						// Clear NeedsMesh so the budget does NOT also launch a full
-						// async rebuild for the neighbour (the section engine's BFS
-						// is the authoritative light for a torch; the async build
-						// re-converges on a later frame).
-						neighbour.NeedsMesh = false;
-						neighbour.EditPriority = 0;
+						// Mark the neighbour's section light dirty: the BFS just
+						// wrote block-light changes into its sections that the
+						// wide field doesn't hold. The full rebuild that re-bakes
+						// the wide field for this neighbour (launched by the
+						// budget, or a later sync path) will re-register the
+						// section fields from it, converging the edits. Do NOT
+						// clear NeedsMesh here: doing so let an UNRELATED chunk's
+						// full rebuild clobber this neighbour's section fields
+						// with its own (stale) wide field before this neighbour's
+						// own rebuild ran, blacking out the torch's cross-border
+						// glow.
+						neighbour.MarkSectionLightDirty();
 						// Re-mesh the touched sub-cells (the light is already in the
 						// section engine's fields — the BFS wrote them).
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
@@ -1851,22 +1868,28 @@ public partial class VoxelWorld : Node3D
 					}
 				}
 
-				// The geometry + light are instant. Mark the chunk dirty so the
-				// async budget runs a fresh full rebuild (recomputing the wide
-				// light field with the new solid state, refreshing the cache) — a
-				// safety net that converges the local recompute to the full
-				// flood-fill result (and handles any light the box didn't cover).
+				// The geometry + light are instant (the sub-cell remesh above
+				// applied the BFS-propagated light). Mark the chunk's section
+				// light dirty: the BFS just wrote block-light changes into the
+				// chunk's sections that the wide field doesn't hold. The full
+				// rebuild (launched by the budget this frame — see below)
+				// re-bakes the wide field from the post-edit data and
+				// re-registers the section fields from it, converging the
+				// engine's edits into the field.
+				instantChunk.MarkSectionLightDirty();
+				// Mark the chunk dirty so the async budget runs a fresh full
+				// rebuild THIS frame (recomputing the wide light field with the
+				// new solid state, refreshing the cache) — the authoritative
+				// convergence pass for the section engine's block-light edits.
+				// Running it this frame (rather than a later one) keeps the
+				// torch's cross-border light consistent: the rebuild re-bakes
+				// the wide field from the post-edit data, so the section fields
+				// (re-registered from it) hold the torch's glow across borders.
 				instantChunk.NeedsMesh = true;
-				// Mark the chunk instant-satisfied for ALL edits (light-source
-				// and geometry). With the per-section light engine, the instant
-				// path is complete and correct: the BFS propagates the light
-				// (block light for torches), and the sub-cell remesh applies it.
-				// No async full rebuild is needed to converge the light — the
-				// section engine IS the authoritative light for block-light edits.
-				// The async build will still run on a later frame (when the
-				// budget picks it up) to re-bake the section fields (authoritative
-				// convergence for sky light), but it does NOT block the instant
-				// path.
+				// Mark the chunk instant-satisfied: the instant (sub-cell) path
+				// already applied the mesh + collision + light this frame, so
+				// the budget must not ALSO launch a build for it (that would be
+				// wasted work — the full rebuild above is the one that runs).
 				instantChunk.MarkInstantSatisfied();
 			}
 			else
