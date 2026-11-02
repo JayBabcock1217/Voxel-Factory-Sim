@@ -520,6 +520,12 @@ public partial class VoxelWorld : Node3D
 	public VoxelMaterialPalette Palette { get; private set; } = null!;
 
 	/// <summary>
+	/// The per-section light engine (the instant-edit light path). Chunks sample
+	/// this for per-vertex light; the full rebuild re-bakes its section fields.
+	/// </summary>
+	public SectionLightEngine SectionLight => _sectionLight;
+
+	/// <summary>
 	/// Fired for every voxel that a PLAYER EDIT removes (the pickaxe breaking a
 	/// single voxel, the remove tool carving a sphere) with the world voxel
 	/// position and the removed material. Terrain generation and the add tool
@@ -692,6 +698,12 @@ public partial class VoxelWorld : Node3D
 	private GenConfig _config;
 	private Node3D _chunkRoot;
 	private readonly Dictionary<Vector2I, VoxelChunk> _chunks = new();
+	// The per-section light engine (Minecraft/Starlight model): light is stored
+	// in per-section 16×16×16 arrays, but the BFS propagation queue is global
+	// (it crosses section/chunk borders). This is the instant-edit light path —
+	// a torch's light sphere (~3k voxels) is propagated in one bounded BFS, not
+	// the old 1.6M-voxel wide-field delta.
+	private readonly SectionLightEngine _sectionLight = new();
 	private bool _playerSpawned;
 	// The single chunk the player most recently EDITED (set by SetVoxel on every
 	// place/break). On the very next _Process frame this chunk is rebuilt
@@ -1678,106 +1690,127 @@ public partial class VoxelWorld : Node3D
 				//    = full field range.
 				//  * NEITHER changed (e.g. swapping one opaque block for another):
 				//    the light is truly unchanged -> skip the recompute entirely.
-				// LIGHT CHANGE DETECTION (WIDE FIELD): the edit's light-relevant
-				// state is its SOLID (air<->solid flips the sky line) and its
-				// BLOCK LIGHT SOURCE (a torch added/removed). Compare the CACHED
-				// wide volumes (the PRE-edit state) to the post-edit values to
-				// decide whether to recompute, and size the box to the worst case.
+				// LIGHT CHANGE DETECTION (PER-SECTION): the edit's light-relevant
+				// state is its SOLID (air<->solid) and its BLOCK LIGHT SOURCE
+				// (a torch added/removed). Compare the section engine's state
+				// (the PRE-edit state) to the post-edit values to decide whether
+				// to recompute.
 				bool lightSourceChanged = false;
 				bool solidChanged = false;
-				if (worldSettled && instantChunk.HasWideCache)
+				if (worldSettled)
 				{
-					int oldBlock = instantChunk.GetWideBlockAt(lpx, lpy, lpz, wx, wy, wz);
-					int oldSolid = instantChunk.GetWideSolidAt(lpx, lpy, lpz, wx, wy, wz);
+					int srcWX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
+					int srcWY = _instantEditLocal.Y;
+					int srcWZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
+					int oldBlock = _sectionLight.SampleSource(srcWX, srcWY, srcWZ, ChunkSizeXZ);
+					int oldSolid = _sectionLight.SampleSolid(srcWX, srcWY, srcWZ, ChunkSizeXZ);
 					int newSolid = _patchMat != 0 ? 1 : 0;
 					lightSourceChanged = oldBlock != _patchLight;
 					solidChanged = oldSolid != newSolid;
 				}
 				else
 				{
-					// No cache yet (first build) or not settled -> assume changed
-					// (recompute to be safe; the cold-start guard still skips the
-					// actual work while the world is settling).
+					// Not settled -> assume changed (recompute to be safe; the
+					// cold-start guard still skips the actual work while the
+					// world is settling).
 					lightSourceChanged = true;
 					solidChanged = true;
 				}
 				bool anyLightRelevant = lightSourceChanged || solidChanged;
+				HashSet<(int, int, int, int, int)> lightChangedSections = new();
 
 				if (anyLightRelevant && worldSettled)
 				{
-					// (2) LIGHT (edited chunk, WIDE FIELD): run the Starlight
-					// DELTA centred on the edited voxel (the box is one light-range
-					// around it) — a full-field, box-free recompute. The edited
-					// chunk is patched into the cached wide volumes above
-					// (SetPatchVoxel), so the delta sees the new source + solid
-					// state and propagates the change over the whole field.
-					// Returns the sub-cells whose sampled light actually changed.
-					var _lightChanged = instantChunk.RecomputeLightAtSource(this,
-						lpx, lpy, lpz, _patchWide);
-					_dirty.UnionWith(_lightChanged);
+					// (2) LIGHT (PER-SECTION): update the section engine's state
+					// at the edited voxel, then propagate the light change with
+					// a bounded BFS (the light sphere, ~3k voxels for a torch —
+					// NOT the 1.6M-voxel wide-field delta). The BFS crosses
+					// section/chunk borders, so the light is consistent across
+					// borders (no hand-off approximation).
+					int srcWX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
+					int srcWY = _instantEditLocal.Y;
+					int srcWZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
+					// Update the section engine's solid/air + source state at the
+					// edited voxel (so the BFS sees the new state).
+					_sectionLight.UpdateVoxel(srcWX, srcWY, srcWZ, ChunkSizeXZ,
+						(byte)(_patchMat != 0 ? 1 : 0), _patchLight);
+					// Propagate the light change.
+					if (_patchLight > 0)
+					{
+						// Source added (or brightened): increase BFS.
+						lightChangedSections = _sectionLight.PropagateIncrease(
+							srcWX, srcWY, srcWZ, _patchLight, ChunkSizeXZ, ChunkHeight);
+					}
+					else
+					{
+						// Source removed (or darkened): decrease BFS + re-light.
+						int oldLevel = _sectionLight.SampleSource(srcWX, srcWY, srcWZ, ChunkSizeXZ);
+						lightChangedSections = _sectionLight.PropagateDecrease(
+							srcWX, srcWY, srcWZ, oldLevel, ChunkSizeXZ, ChunkHeight);
+					}
+					// Map the changed sections to the sub-cells to re-mesh.
+					foreach (var (chX, chY, secX, secY, secZ) in lightChangedSections)
+					{
+						// The section's voxel bounds (chunk-local).
+						int x0 = secX * 16, x1 = System.Math.Min(x0 + 15, ChunkSizeXZ - 1);
+						int y0 = secY * 16, y1 = System.Math.Min(y0 + 15, ChunkHeight - 1);
+						int z0 = secZ * 16, z1 = System.Math.Min(z0 + 15, ChunkSizeXZ - 1);
+						// The sub-cells that cover this section (16×16×16 sub-cells,
+						// so one section = one sub-cell).
+						int cx0 = chX * ChunkSizeXZ + x0;
+						int cy0 = y0;
+						int cz0 = chY * ChunkSizeXZ + z0;
+						// Only re-mesh sub-cells in the edited chunk (the cross-chunk
+						// path handles neighbours separately below).
+						if (chX == instantChunk.Coord.X && chY == instantChunk.Coord.Y)
+						{
+							_dirty.Add(CellOf(x0, y0, z0));
+						}
+					}
 				}
 
-				// Re-mesh the dirty sub-cells (PRECISE): geometry-dirty cells
-				// ALWAYS re-mesh (their solid/air state changed). Light-dirty
-				// cells (added by the wide-field recompute above) re-mesh ONLY if
-				// their sampled light actually changed — otherwise the produced
-				// mesh is byte-identical and the expensive MC build is skipped.
-				// RebuildSubCell samples the cached WIDE field, so the new light
-				// is applied.
+				// Re-mesh the dirty sub-cells. The _dirty set contains:
+				//  * geometry-dirty cells (their solid/air state changed)
+				//  * light-dirty cells (the section engine's BFS changed their
+				//    light)
+				// Both need re-meshing (geometry changes the shape, light changes
+				// the per-vertex color). RebuildSubCell samples the per-section
+				// light engine, so the new light is applied.
 				foreach (var cell in _dirty)
 				{
-					if (!_geometryDirty.Contains(cell)
-						&& !instantChunk.SubCellSamplesLightChanged(this, cell.X, cell.Y, cell.Z))
-					{
-						continue; // light-only, and no sampled light changed -> no re-mesh
-					}
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
 
-				// CROSS-CHUNK LIGHT (the direct approach): a torch's light reaches a
-				// sphere of radius lightR around it. If any of those voxels fall in a
-				// NEIGHBOUR chunk, that chunk's light field must be refreshed. The
-				// robust, terrain-independent way: iterate the sphere of world voxels
-				// around the source, collect the DISTINCT chunks they touch (excluding
-				// the edited chunk, which was already handled above), and mark each
-				// loaded neighbour for a full rebuild. A full rebuild re-runs the light
-				// flood fill reading the edited chunk's now-correct BlockLight (SetVoxel
-				// wrote the torch's level), so the neighbour converges to the exact
-				// full-flood-fill result — no wide-index mapping, no sky-column
-				// interaction, no cache staleness. This is what "iterate a sphere,
-				// update light, rebuild the touched chunks" means, and it works on
-				// flat AND rough/angled terrain alike.
-				if (_patchLight > 0 && worldSettled)
+				// CROSS-CHUNK LIGHT (PER-SECTION): the section light engine's BFS
+				// already crosses chunk borders — when light reaches a chunk
+				// border, it crosses into the neighbouring chunk's sections. The
+				// increase/decrease BFS above already propagated the light into
+				// the neighbours' sections (the lightChangedSections set includes
+				// sections in neighbouring chunks). Now re-mesh the sub-cells in
+				// those neighbouring chunks (the light is already in the section
+				// engine's fields — the BFS wrote them).
+				if (anyLightRelevant && worldSettled)
 				{
-					int lightR = Mathf.Max(1, LightRadiusFor(_patchLight));
-					int srcWorldX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
-					int srcWorldY = _instantEditLocal.Y;
-					int srcWorldZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
-					// Collect the distinct neighbour chunks whose voxels are within
-					// lightR of the source. (lightR < ChunkSizeXZ, so the sphere
-					// spans at most the edited chunk + its 8 neighbours.)
-					var touched = new System.Collections.Generic.HashSet<Vector2I>();
-					for (int dy = -lightR; dy <= lightR; dy++)
-						for (int dz = -lightR; dz <= lightR; dz++)
-							for (int dx = -lightR; dx <= lightR; dx++)
-							{
-								if (dx * dx + dy * dy + dz * dz > lightR * lightR)
-								{
-									continue; // outside the sphere
-								}
-								int vx = srcWorldX + dx, vy = srcWorldY + dy, vz = srcWorldZ + dz;
-								if (vy < 0 || vy >= ChunkHeight)
-								{
-									continue;
-								}
-								var cc = ChunkCoordOf(vx, vz);
-								if (cc == instantChunk.Coord)
-								{
-									continue; // the edited chunk is already handled above
-								}
-								touched.Add(cc);
-							}
-					foreach (Vector2I cc in touched)
+					// The lightChangedSections set (from the increase/decrease
+					// BFS above) includes sections in neighbouring chunks. For
+					// each neighbouring chunk, re-mesh the sub-cells in the
+					// touched sections.
+					var neighbourTouched = new System.Collections.Generic.Dictionary<Vector2I, HashSet<(int, int, int)>>();
+					foreach (var (chX, chY, secX, secY, secZ) in lightChangedSections)
+					{
+						var cc = new Vector2I(chX, chY);
+						if (cc == instantChunk.Coord)
+						{
+							continue; // the edited chunk is already handled above
+						}
+						if (!neighbourTouched.TryGetValue(cc, out var sections))
+						{
+							sections = new HashSet<(int, int, int)>();
+							neighbourTouched[cc] = sections;
+						}
+						sections.Add((secX, secY, secZ));
+					}
+					foreach (var (cc, sections) in neighbourTouched)
 					{
 						if (!_chunks.TryGetValue(cc, out VoxelChunk neighbour))
 						{
@@ -1790,40 +1823,33 @@ public partial class VoxelWorld : Node3D
 						if (neighbour.MeshBuildInFlight)
 						{
 							// An async full build is already in flight for this
-							// neighbour: it will re-bake the wide light field (reading
+							// neighbour: it will re-bake the section fields (reading
 							// the torch's BlockLight) and re-mesh everything when it
-							// completes, so skip the delta (it would race the
+							// completes, so skip the re-mesh (it would race the
 							// worker's commit).
 							continue;
 						}
-						// Light this neighbour THIS frame (the "Minecraft way"):
-						// propagate the torch's block-light change into the
-						// neighbour's cached wide field with a BOUNDED, sky-free
-						// delta (no full flood fill, no whole-chunk remesh), then
-						// re-mesh the changed sub-cells. The torch's BlockLight is
-						// already in the neighbour's cached wide block volume
-						// (BuildWideVolumes read the edited chunk's live
-						// BlockLight), so no patch is needed.
-						var nChanged = neighbour.RecomputeLightFromSource(this, srcWorldX, srcWorldY, srcWorldZ);
+						// The section engine's BFS already wrote the light into the
+						// neighbour's sections. Now re-mesh the sub-cells in the
+						// touched sections (one 16×16×16 sub-cell per section).
+						var nChanged = new System.Collections.Generic.HashSet<VoxelCell>();
+						foreach (var (secX, secY, secZ) in sections)
+						{
+							int x0 = secX * 16, y0 = secY * 16, z0 = secZ * 16;
+							nChanged.Add(CellOf(x0, y0, z0));
+						}
 						if (nChanged.Count == 0)
 						{
-							continue; // the torch was already in the converged field (no visual change)
+							continue;
 						}
-						// The neighbour is now lit THIS frame by the bounded
-						// delta + targeted remesh. Clear NeedsMesh so the budget
-						// does NOT also launch a full async rebuild for it
-						// (flood fill + all sub-cells — the exact half-second
-						// behaviour we are replacing). The delta is bit-identical
-						// to the full flood fill (validated), so skipping it loses
-						// nothing; the light the delta covers is complete for a
-						// torch.
+						// Clear NeedsMesh so the budget does NOT also launch a full
+						// async rebuild for the neighbour (the section engine's BFS
+						// is the authoritative light for a torch; the async build
+						// re-converges on a later frame).
 						neighbour.NeedsMesh = false;
 						neighbour.EditPriority = 0;
-						// COARSE remesh (Minecraft-style): re-mesh the changed
-						// sub-cells as a small number of region-units instead of
-						// one node per fine sub-cell, so the main-thread
-						// node/collision work stays small and the neighbour lights
-						// in the same frame as the edited chunk.
+						// Re-mesh the touched sub-cells (the light is already in the
+						// section engine's fields — the BFS wrote them).
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
 						neighbour.RebuildRegionLight(this, nChanged, nSnapshot);
 					}

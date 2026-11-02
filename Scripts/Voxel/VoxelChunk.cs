@@ -1060,21 +1060,12 @@ public partial class VoxelChunk : Node3D
 			? world.VoxelMaterialForMesh
 			: null;
 
-		// LIGHT: the per-vertex light comes from the cached WIDE field (Path 1,
-		// the proven 3×3-chunk field), NOT a per-section field. (The per-section
-		// light with recursive hand-offs produced inconsistent lighting — "weird
-		// shadows all over" — because each section is solved independently against
-		// its neighbours' possibly-stale fields. The wide field is the single
-		// authoritative, consistent light; the 16×16×16 sub-cell remesh is still
-		// the fast path for GEOMETRY, it just samples the wide field for light.)
-		// If no wide field is cached yet (first build), compute + curve it now.
-		if (_cachedLightField == null)
-		{
-			_cachedLightField = MeshBuilder.BuildLightFieldWide(
-				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel,
-				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock);
-			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
-		}
+		// LIGHT: the per-vertex light comes from the per-section light engine
+		// (the Minecraft/Starlight model). The engine stores light in per-section
+		// 16×16×16 arrays, but the BFS propagation queue is global (it crosses
+		// section/chunk borders), so the light is consistent across borders. If
+		// the section engine has no field for this sub-cell's section yet (first
+		// build, before the full rebuild has run), fall back to the wide field.
 		int maxLight = world.MaxLightLevel;
 		int lpx = 2 * data.SizeX + 2 * maxLight + 2;
 		int lpy = data.SizeY + 2;
@@ -1088,13 +1079,16 @@ public partial class VoxelChunk : Node3D
 		bool diagLoaded = neighborQuery(new Vector2I(coord.X + 1, coord.Y + 1)) != null;
 
 		// The small MC build: the mesh + collision for just this sub-cell. The
-		// per-vertex light comes from the cached WIDE field (lightSampler = null
-		// -> BuildSubCell samples the wide field, the proven consistent light).
+		// per-vertex light comes from the per-section light engine (lightSampler
+		// samples the section engine's field). The wide field is still computed
+		// (for the full rebuild's authoritative light), but the sub-cell mesh
+		// samples the section engine (the instant-edit path).
+		System.Func<int, int, int, float> sectionLightSampler = MakeSectionLightSampler(world);
 		var (visual, collision) = MeshBuilder.BuildSubCell(
 			data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 			x0, y0, z0, x1, y1, z1,
 			_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
-			eastLoaded, southLoaded, diagLoaded, materialQuery, null);
+			eastLoaded, southLoaded, diagLoaded, materialQuery, sectionLightSampler);
 
 		// Apply to the sub-cell's nodes. The visual mesh is always set. The
 		// collision shape is stashed (BuiltShape) and the body/shape wiring is
@@ -1127,6 +1121,45 @@ public partial class VoxelChunk : Node3D
 	// MeshInstance3D (visual) + one concave collision shape covering a box of
 	// several fine sub-cells. This is the Minecraft-style coarsening — a torch
 	// near a border touches ~100+ fine 8×32×8 sub-cells; re-meshing them as
+	/// <summary>
+	/// Creates a light sampler function that samples the per-section light
+	/// engine for this chunk. The function takes chunk-local voxel coords
+	/// (x, y, z) and returns the normalized light level (0..1). If the section
+	/// engine has no field for the section containing the voxel (first build,
+	/// before the full rebuild has run), returns the wide field's value (the
+	/// fallback).
+	/// </summary>
+	private System.Func<int, int, int, float> MakeSectionLightSampler(VoxelWorld world)
+	{
+		int cs = world.ChunkSizeXZ;
+		int ch = world.ChunkHeight;
+		int maxLight = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+		var engine = world.SectionLight;
+		// Capture the chunk's world origin (for mapping local → world coords).
+		int wx0 = Coord.X * cs;
+		int wz0 = Coord.Y * cs;
+		return (int lx, int ly, int lz) =>
+		{
+			int wx = wx0 + lx;
+			int wy = ly;
+			int wz = wz0 + lz;
+			int raw = engine.SampleLight(wx, wy, wz, cs, ch);
+			// The engine returns 0 for unregistered sections. Fall back to the
+			// wide field (which is always computed by the full rebuild).
+			if (raw == 0 && _cachedLightField != null)
+			{
+				int lpx2 = 2 * cs + 2 * maxLight + 2;
+				int half = lpx2 / 2 - 1;
+				int g = (lx + half) + lpx2 * ((ly + 1) + (ch + 2) * (lz + half));
+				if (g >= 0 && g < _cachedLightField.Length)
+				{
+					return _cachedLightField[g];
+				}
+			}
+			return raw / (float)maxLight;
+		};
+	}
+
 	// ~10-16 coarse units (one node + one collision shape each) instead of
 	// ~100+ per-sub-cell node/collision updates is what makes the neighbour
 	// light up in the same frame as the edited chunk. Managed separately from
@@ -1273,12 +1306,15 @@ public partial class VoxelChunk : Node3D
 			if (cx0 > cx1 || cy0 > cy1 || cz0 > cz1) continue;
 
 			// The exact MC build over this region (identical to the union of the
-			// fine sub-cells it covers — BuildSubCell is region-general).
+			// fine sub-cells it covers — BuildSubCell is region-general). The
+			// per-vertex light comes from the per-section light engine (the
+			// instant-edit path).
+			System.Func<int, int, int, float> sectionLightSampler = MakeSectionLightSampler(world);
 			var (visual, collision) = MeshBuilder.BuildSubCell(
 				data, wx0, wz0, voxelSize, palette, coord, neighborQuery,
 				cx0, cy0, cz0, cx1, cy1, cz1,
 				_cachedLightField, _cachedBlockLit, lpx, lpy, lpz,
-				eastLoaded, southLoaded, diagLoaded, materialQuery);
+				eastLoaded, southLoaded, diagLoaded, materialQuery, sectionLightSampler);
 
 			// Clear the fine sub-cells this region covers (no double-draw), then
 			// wire the region's own node.
@@ -1616,6 +1652,12 @@ public partial class VoxelChunk : Node3D
 			_cachedBlockLit = blockLit;
 			_cachedWideSolid = wideSolid;
 			_cachedWideBlock = wideBlock;
+			// First build: register this chunk's sections with the per-section
+			// light engine (the instant-edit light path). The wide field was
+			// just computed (authoritative light); extract the sections and
+			// register them so the instant-edit path can propagate light
+			// changes across section borders.
+			RegisterSectionsWithEngine();
 		}
 
 		// The heavy voxel math, on the main thread (synchronous fast path). The
@@ -1767,6 +1809,13 @@ public partial class VoxelChunk : Node3D
 			_pendingWideBlock = null;
 		}
 
+		// Register this chunk's sections with the per-section light engine (the
+		// instant-edit light path). The full rebuild just re-baked the wide
+		// field (authoritative light); extract this chunk's 16×16×16 sections
+		// from it and register them so the instant-edit path can propagate
+		// light changes across section borders.
+		RegisterSectionsWithEngine();
+
 		// Only clear the dirty flag when a mesh was actually applied. If the
 		// build threw (see Rebuild's catch), keep NeedsMesh true so the world's
 		// per-frame budget retries the chunk instead of leaving it empty.
@@ -1774,6 +1823,72 @@ public partial class VoxelChunk : Node3D
 		{
 			NeedsMesh = false;
 		}
+	}
+
+	/// <summary>
+	/// Registers this chunk's 16×16×16 sections with the per-section light
+	/// engine. Called after a full rebuild (which re-bakes the wide field).
+	/// Extracts each section's light field, solid/air state, and block sources
+	/// from the wide volumes and the chunk data, and registers them with the
+	/// engine. This is what lets the instant-edit path propagate light across
+	/// section borders (the BFS queue is global).
+	/// </summary>
+	private void RegisterSectionsWithEngine()
+	{
+		if (World == null || _cachedLightField == null || _cachedWideSolid == null)
+		{
+			return;
+		}
+		int cs = World.ChunkSizeXZ;
+		int ch = World.ChunkHeight;
+		int maxLight = World.MaxLightLevel < 1 ? 1 : World.MaxLightLevel;
+		int lpx = 2 * cs + 2 * maxLight + 2;
+		int lpy = ch + 2;
+		int lpz = 2 * cs + 2 * maxLight + 2;
+		int half = lpx / 2 - 1;
+
+		// The chunk's section grid.
+		int secsX = System.Math.Max(1, cs / 16);
+		int secsY = System.Math.Max(1, ch / 16);
+		int secsZ = System.Math.Max(1, cs / 16);
+
+		for (int secZ = 0; secZ < secsZ; secZ++)
+			for (int secY = 0; secY < secsY; secY++)
+				for (int secX = 0; secX < secsX; secX++)
+				{
+					// The section's voxel bounds (clamped to the chunk).
+					int x0 = secX * 16, x1 = System.Math.Min(x0 + 15, cs - 1);
+					int y0 = secY * 16, y1 = System.Math.Min(y0 + 15, ch - 1);
+					int z0 = secZ * 16, z1 = System.Math.Min(z0 + 15, cs - 1);
+					int nx = x1 - x0 + 1, ny = y1 - y0 + 1, nz = z1 - z0 + 1;
+
+					var solid = new byte[4096];
+					var sources = new byte[4096];
+					var light = new int[4096];
+
+					for (int lz = 0; lz < nz; lz++)
+						for (int ly = 0; ly < ny; ly++)
+							for (int lx = 0; lx < nx; lx++)
+							{
+								int vx = x0 + lx, vy = y0 + ly, vz = z0 + lz;
+								int idx = lx + 16 * (ly + 16 * lz);
+								// Solid/air from the chunk data.
+								int mat = Data.Get(vx, vy, vz);
+								solid[idx] = (byte)(mat != 0 ? 1 : 0);
+								// Block light source from the chunk data.
+								sources[idx] = Data.GetBlockLight(vx, vy, vz);
+								// Light from the wide field (normalized 0..1 → raw 0..maxLight).
+								int wx = vx + half;
+								int wy = vy + 1;
+								int wz = vz + half;
+								int g = wx + lpx * (wy + lpy * wz);
+								light[idx] = System.Math.Clamp(
+									(int)System.Math.Round(_cachedLightField[g] * maxLight), 0, maxLight);
+							}
+
+					World.SectionLight.RegisterSection(
+						Coord.X, Coord.Y, secX, secY, secZ, solid, sources, light);
+				}
 	}
 
 	/// <summary>
