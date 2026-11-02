@@ -137,6 +137,29 @@ public sealed class SectionLightEngine
 	}
 
 	/// <summary>
+	/// Decomposes a world position into (sectionKey, localIndex) using FLOOR
+	/// division (correct for negative world coordinates). Used by the BFS
+	/// methods to enqueue neighbors.
+	/// </summary>
+	private static void WorldToSectionIndex(
+		int worldX, int worldY, int worldZ, int chunkSizeXZ,
+		out long key, out int localIndex)
+	{
+		int cx = FloorDiv(worldX, chunkSizeXZ);
+		int cz = FloorDiv(worldZ, chunkSizeXZ);
+		int secY = FloorDiv(worldY, 16);
+		int lx = worldX - cx * chunkSizeXZ;
+		int lz = worldZ - cz * chunkSizeXZ;
+		int secX = FloorDiv(lx, 16);
+		int secZ = FloorDiv(lz, 16);
+		int localX = lx - secX * 16;
+		int localY = worldY - secY * 16;
+		int localZ = lz - secZ * 16;
+		key = SectionKey(cx, cz, secX, secY, secZ);
+		localIndex = localX + 16 * (localY + 16 * localZ);
+	}
+
+	/// <summary>
 	/// Registers a section's data (solid/air + block sources) with the engine.
 	/// Called by the full rebuild after it bakes a section's light field.
 	/// </summary>
@@ -376,6 +399,12 @@ public sealed class SectionLightEngine
 			{
 				continue;
 			}
+			// Is the neighbor's section registered? If not, stop here.
+			WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long key, out int localIdx);
+			if (!_fields.ContainsKey(key))
+			{
+				continue; // unregistered section — light clipped at border
+			}
 			// Is the neighbor air?
 			if (SampleSolid(nx, ny, nz, chunkSizeXZ) != 0)
 			{
@@ -389,18 +418,7 @@ public sealed class SectionLightEngine
 			}
 			// Set the neighbor's light and enqueue it.
 			SetLight(nx, ny, nz, level, chunkSizeXZ);
-			int ncx = nx / chunkSizeXZ;
-			int ncz = nz / chunkSizeXZ;
-			int nsecY = ny / 16;
-			int nlx = nx - ncx * chunkSizeXZ;
-			int nlz = nz - ncz * chunkSizeXZ;
-			int nsecX = nlx / 16;
-			int nsecZ = nlz / 16;
-			int nlocalX = nlx - nsecX * 16;
-			int nlocalY = ny - nsecY * 16;
-			int nlocalZ = nlz - nsecZ * 16;
-			long key = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-			Enq(key, nlocalX + 16 * (nlocalY + 16 * nlocalZ), level);
+			Enq(key, localIdx, level);
 		}
 	}
 
@@ -433,6 +451,12 @@ public sealed class SectionLightEngine
 			{
 				continue;
 			}
+			// Is the neighbor's section registered? If not, stop here.
+			WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long key, out int localIdx);
+			if (!_fields.ContainsKey(key))
+			{
+				continue; // unregistered section — light clipped at border
+			}
 			int current = SampleLight(nx, ny, nz, chunkSizeXZ, chunkHeight);
 			if (current < level)
 			{
@@ -440,18 +464,7 @@ public sealed class SectionLightEngine
 			}
 			// Set to 0 and enqueue for re-lighting.
 			SetLight(nx, ny, nz, 0, chunkSizeXZ);
-			int ncx = nx / chunkSizeXZ;
-			int ncz = nz / chunkSizeXZ;
-			int nsecY = ny / 16;
-			int nlx = nx - ncx * chunkSizeXZ;
-			int nlz = nz - ncz * chunkSizeXZ;
-			int nsecX = nlx / 16;
-			int nsecZ = nlz / 16;
-			int nlocalX = nlx - nsecX * 16;
-			int nlocalY = ny - nsecY * 16;
-			int nlocalZ = nlz - nsecZ * 16;
-			long key = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-			Enq(key, nlocalX + 16 * (nlocalY + 16 * nlocalZ), current);
+			Enq(key, localIdx, current);
 		}
 	}
 
@@ -496,6 +509,16 @@ public sealed class SectionLightEngine
 				{
 					continue;
 				}
+				// Is the neighbor's section registered? If not, stop here —
+				// the light is clipped at the section border (the full rebuild
+				// will re-bake the light for the unregistered section when it
+				// runs). This prevents the BFS from losing light in unregistered
+				// sections (SetLight silently fails for unregistered sections).
+				WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long key, out int localIdx);
+				if (!_fields.ContainsKey(key))
+				{
+					continue; // unregistered section — light clipped at border
+				}
 				// Is the neighbor air?
 				if (SampleSolid(nx, ny, nz, chunkSizeXZ) != 0)
 				{
@@ -509,18 +532,9 @@ public sealed class SectionLightEngine
 				}
 				// Set the neighbor's light and enqueue it.
 				SetLight(nx, ny, nz, newLevel, chunkSizeXZ);
-				int ncx = nx / chunkSizeXZ;
-				int ncz = nz / chunkSizeXZ;
-				int nsecY = ny / 16;
-				int nlx = nx - ncx * chunkSizeXZ;
-				int nlz = nz - ncz * chunkSizeXZ;
-				int nsecX = nlx / 16;
-				int nsecZ = nlz / 16;
-				int nlocalX = nlx - nsecX * 16;
-				int nlocalY = ny - nsecY * 16;
-				int nlocalZ = nlz - nsecZ * 16;
-				long key = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-				Enq(key, nlocalX + 16 * (nlocalY + 16 * nlocalZ), newLevel);
+				Enq(key, localIdx, newLevel);
+				// Track the changed section (for the caller's re-mesh).
+				DecodeKey(key, out int ncx, out int ncz, out int nsecX, out int nsecY, out int nsecZ);
 				changed.Add((ncx, ncz, nsecX, nsecY, nsecZ));
 			}
 		}
@@ -575,18 +589,9 @@ public sealed class SectionLightEngine
 				if (current < oldLevel)
 				{
 					SetLight(nx, ny, nz, 0, chunkSizeXZ);
-					int ncx = nx / chunkSizeXZ;
-					int ncz = nz / chunkSizeXZ;
-					int nsecY = ny / 16;
-					int nlx = nx - ncx * chunkSizeXZ;
-					int nlz = nz - ncz * chunkSizeXZ;
-					int nsecX = nlx / 16;
-					int nsecZ = nlz / 16;
-					int nlocalX = nlx - nsecX * 16;
-					int nlocalY = ny - nsecY * 16;
-					int nlocalZ = nlz - nsecZ * 16;
-					long key = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-					Enq(key, nlocalX + 16 * (nlocalY + 16 * nlocalZ), current);
+					WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long key, out int localIdx);
+					Enq(key, localIdx, current);
+					DecodeKey(key, out int ncx, out int ncz, out int nsecX, out int nsecY, out int nsecZ);
 					changed.Add((ncx, ncz, nsecX, nsecY, nsecZ));
 				}
 				else if (current >= oldLevel)
@@ -594,18 +599,9 @@ public sealed class SectionLightEngine
 					// The neighbor is as bright or brighter — it may be lit by
 					// another source. Queue it for re-lighting (the increase
 					// BFS will re-evaluate it).
-					int ncx = nx / chunkSizeXZ;
-					int ncz = nz / chunkSizeXZ;
-					int nsecY = ny / 16;
-					int nlx = nx - ncx * chunkSizeXZ;
-					int nlz = nz - ncz * chunkSizeXZ;
-					int nsecX = nlx / 16;
-					int nsecZ = nlz / 16;
-					int nlocalX = nlx - nsecX * 16;
-					int nlocalY = ny - nsecY * 16;
-					int nlocalZ = nlz - nsecZ * 16;
-					long key = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-					Enq(key, nlocalX + 16 * (nlocalY + 16 * nlocalZ), current);
+					WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long key, out int localIdx);
+					Enq(key, localIdx, current);
+					DecodeKey(key, out int ncx, out int ncz, out int nsecX, out int nsecY, out int nsecZ);
 					changed.Add((ncx, ncz, nsecX, nsecY, nsecZ));
 				}
 			}
@@ -671,18 +667,8 @@ public sealed class SectionLightEngine
 								continue;
 							}
 							SetLight(nx, ny, nz, newLevel, chunkSizeXZ);
-							int ncx = nx / chunkSizeXZ;
-							int ncz = nz / chunkSizeXZ;
-							int nsecY = ny / 16;
-							int nlx = nx - ncx * chunkSizeXZ;
-							int nlz = nz - ncz * chunkSizeXZ;
-							int nsecX = nlx / 16;
-							int nsecZ = nlz / 16;
-							int nlocalX = nlx - nsecX * 16;
-							int nlocalY = ny - nsecY * 16;
-							int nlocalZ = nlz - nsecZ * 16;
-							long nkey = SectionKey(ncx, ncz, nsecX, nsecY, nsecZ);
-							Enq(nkey, nlocalX + 16 * (nlocalY + 16 * nlocalZ), newLevel);
+							WorldToSectionIndex(nx, ny, nz, chunkSizeXZ, out long nkey, out int localIdx);
+							Enq(nkey, localIdx, newLevel);
 						}
 					}
 		}
