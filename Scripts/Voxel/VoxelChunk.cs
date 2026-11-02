@@ -770,25 +770,26 @@ public partial class VoxelChunk : Node3D
 			int wxL = rem - wyL * lpx;
 			// The sub-cells that COULD sample this voxel: its cell + the 2-voxel
 			// light shell (a cell's surface samples up to 2 voxels past its own
-			// region), i.e. cell coords in [c-2..c].
-			int cx0 = ((wxL - half) - 2) / 8 - ((wxL - half) % 8 != 0 ? 1 : 0);
-			int cx1 = (wxL - half) / 8;
-			int cy0 = ((wyL - 1) - 2) / 32 - ((wyL - 1) % 32 != 0 ? 1 : 0);
-			int cy1 = (wyL - 1) / 32;
-			int cz0 = ((wzl - half) - 2) / 8 - ((wzl - half) % 8 != 0 ? 1 : 0);
-			int cz1 = (wzl - half) / 8;
+			// region), i.e. cell coords in [c-2..c]. Cell size is 16×16×16.
+			int lpx2 = wxL - half, lpy2 = wyL - 1, lpz2 = wzl - half;
+			int cx0 = (lpx2 - 2) / 16 - ((lpx2 - 2) % 16 != 0 ? 1 : 0);
+			int cx1 = lpx2 / 16;
+			int cy0 = (lpy2 - 2) / 16 - ((lpy2 - 2) % 16 != 0 ? 1 : 0);
+			int cy1 = lpy2 / 16;
+			int cz0 = (lpz2 - 2) / 16 - ((lpz2 - 2) % 16 != 0 ? 1 : 0);
+			int cz1 = lpz2 / 16;
 			for (int cy = cy0; cy <= cy1; cy++)
 			{
-				if (cy < 0 || cy * 32 >= ch) continue;
-				int cyy = cy * 32;
+				if (cy < 0 || cy * 16 >= ch) continue;
+				int cyy = cy * 16;
 				for (int cz = cz0; cz <= cz1; cz++)
 				{
-					if (cz < 0 || cz * 8 >= cs) continue;
-					int czz = cz * 8;
+					if (cz < 0 || cz * 16 >= cs) continue;
+					int czz = cz * 16;
 					for (int cx = cx0; cx <= cx1; cx++)
 					{
-						if (cx < 0 || cx * 8 >= cs) continue;
-						int cxx = cx * 8;
+						if (cx < 0 || cx * 16 >= cs) continue;
+						int cxx = cx * 16;
 						// Exact gate: does this cell's sampled box contain g?
 						CellLightChangedBox(cxx, cyy, czz, cs, ch, lpx, half,
 							out int bwx0, out int bwx1, out int bwy0, out int bwy1, out int bwz0, out int bwz1);
