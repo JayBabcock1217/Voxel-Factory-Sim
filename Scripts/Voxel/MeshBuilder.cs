@@ -742,7 +742,8 @@ public static class MeshBuilder
 		bool eastLoaded,
 		bool southLoaded,
 		bool diagLoaded,
-		System.Func<int, int, int, byte> materialQuery = null)
+		System.Func<int, int, int, byte> materialQuery = null,
+		System.Func<int, int, int, float> lightSampler = null)
 	{
 		int sx = chunk.SizeX, sy = chunk.SizeY, sz = chunk.SizeZ;
 		int lastMaterial = palette.MaterialCount;
@@ -884,17 +885,17 @@ public static class MeshBuilder
 				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
 				offX, offY, offZ,
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeA,
-				out pa, out ma, out la);
+				out pa, out ma, out la, lightSampler);
 			ResolveSubCellVertex(solid, field, wideLight, blockLight,
 				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
 				offX, offY, offZ,
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeB,
-				out pb, out mb, out lb);
+				out pb, out mb, out lb, lightSampler);
 			ResolveSubCellVertex(solid, field, wideLight, blockLight,
 				px, py, pz, lpx, lpy, lpz, wideHalf, wx0, wz0,
 				offX, offY, offZ,
 				tri.CellX, tri.CellY, tri.CellZ, tri.EdgeC,
-				out pc, out mc, out lc);
+				out pc, out mc, out lc, lightSampler);
 
 			pa = (pa - Vector3.One + localOrigin) * voxelSize + half;
 			pb = (pb - Vector3.One + localOrigin) * voxelSize + half;
@@ -1001,7 +1002,8 @@ public static class MeshBuilder
 		int edge,
 		out Vector3 position,
 		out int material,
-		out float light)
+		out float light,
+		System.Func<int, int, int, float> lightSampler = null)
 	{
 		MarchingCubes.ResolveEdge(solidField, nx, ny, nz, cx, cy, cz, edge,
 			out position, out int solidX, out int solidY, out int solidZ);
@@ -1031,11 +1033,19 @@ public static class MeshBuilder
 			return;
 		}
 
-		// Air corner's CHUNK-LOCAL voxel coords -> world voxel -> wide field.
-		// Lattice (airX,airY,airZ) maps to chunk-local voxel (fX0+airX-1, fY0+airY-1, fZ0+airZ-1).
+		// Air corner's CHUNK-LOCAL voxel coords (lattice -> chunk-local voxel).
 		int localX = fX0 + airX - 1;
 		int localY = fY0 + airY - 1;
 		int localZ = fZ0 + airZ - 1;
+		// PER-SECTION light (Minecraft's model): when a sampler is supplied, the
+		// per-vertex light comes from the small per-section field (already
+		// recomputed by the instant path), NOT the big wide field. This is the
+		// seam-safe, fast path.
+		if (lightSampler != null)
+		{
+			light = lightSampler(localX, localY, localZ);
+			return;
+		}
 		if (wideLight == null)
 		{
 			light = 1f;

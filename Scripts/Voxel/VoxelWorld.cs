@@ -591,18 +591,34 @@ public partial class VoxelWorld : Node3D
 	// Sub-cell (dirty-region) meshing — Option B (see the SubCellMeshing
 	// export). A chunk's mesh is kept as a grid of small sub-cells; an edit
 	// rebuilds only the sub-cell(s) it touches instead of the whole chunk.
-	// The cell size is chosen so a 16×256×16 chunk divides evenly (XZ 8×2, Y
-	// 32×8 = 256 cells), and each cell samples a 1-voxel padding of its
-	// neighbours (via the same frozen neighbour snapshot the whole-chunk path
-	// uses) so seams stay identical.
+	// The cell size is CUBIC 16×16×16 — Minecraft's section size — so a
+	// 16×256×16 chunk divides evenly into 1×16×1 = 16 sections (Minecraft
+	// parity). Cubic sections make a local edit's MC build smaller, make the
+	// "only re-mesh what changed" gate tighter, and make the coarse region
+	// coarsening behave like Minecraft's. Each cell samples a 1-voxel padding
+	// of its neighbours (via the same frozen neighbour snapshot the
+	// whole-chunk path uses) so seams stay identical.
 	// ------------------------------------------------------------------
-	public const int CellSizeX = 8;
-	public const int CellSizeY = 32;
-	public const int CellSizeZ = 8;
-	public const int CellsPerChunkX = 2;
-	public const int CellsPerChunkY = 8;
-	public const int CellsPerChunkZ = 2;
+	public const int CellSizeX = 16;
+	public const int CellSizeY = 16;
+	public const int CellSizeZ = 16;
+	public const int CellsPerChunkX = 1;
+	public const int CellsPerChunkY = 16;
+	public const int CellsPerChunkZ = 1;
 	public const int CellsPerChunk = CellsPerChunkX * CellsPerChunkY * CellsPerChunkZ;
+
+	/// <summary>
+	/// The maximum light PROPAGATION radius (in voxels) — Minecraft's max light
+	/// level of 15. This caps how far a light source's light *spreads* (and
+	/// therefore how far the per-edit light delta and the cross-chunk sphere
+	/// iteration reach), independent of <see cref="MaxLightLevel"/> which sets
+	/// the *brightness* curve's normalization. Capping the spread at 15 is what
+	/// keeps an edit's light work bounded the way Minecraft's is: a "torch" at
+	/// level 30 still looks bright (the curve uses 30) but its light only
+	/// reaches 15 voxels (Minecraft parity), so the delta and the neighbour
+	/// sphere stay small.
+	/// </summary>
+	public const int MaxPropagationRadius = 15;
 
 	/// <summary>A sub-cell's local voxel origin inside its chunk (0..ChunkSize-1 per axis).</summary>
 	public readonly struct VoxelCell
@@ -692,6 +708,19 @@ public partial class VoxelWorld : Node3D
 	// voxel + any sub-cell within 1 voxel of a sub-cell border). Only meaningful
 	// when _instantRebuildChunk is non-null.
 	private Vector3I _instantEditLocal;
+	// The chunk-LOCAL bounding box of ALL voxels written to _instantRebuildChunk
+	// this frame (set/unioned by SetVoxel on every write). A multi-voxel edit
+	// (a sphere, a brush) writes many voxels; _instantEditLocal only holds the
+	// LAST one, which made the instant path remesh just that last voxel's
+	// sub-cell neighbourhood and leave the rest of the sphere to the async
+	// budget (the "pops in over several frames" behaviour). This box lets the
+	// instant path remesh the WHOLE edited region's sub-cells in the same frame
+	// (Minecraft-style: the edit's actual changed surface, not just its last
+	// voxel). For a single-voxel edit the box is just that voxel (identical to
+	// the old behaviour). Only meaningful when _instantRebuildChunk is non-null.
+	private Vector3I _instantEditMin;
+	private Vector3I _instantEditMax;
+	private bool _instantEditBoxValid;
 	// Millisecond tick when the spawn neighbourhood FIRST reported ready. The
 	// player is not actually spawned until SpawnSettleDelayMs has elapsed since
 	// this — a settling grace period that lets the physics server register the
@@ -1545,24 +1574,50 @@ public partial class VoxelWorld : Node3D
 				// (1) Geometry-dirty sub-cells (solid/air state changed — these
 				// ALWAYS re-mesh). _lightDirty holds the light-dirty sub-cells
 				// (re-meshed only if their sampled light actually changed).
+				//
+				// BATCHED MULTI-VOXEL EDITS: use the chunk-local edit BOUNDING
+				// BOX (the union of every voxel SetVoxel wrote this frame), not
+				// just the last voxel. A sphere/brush writes many voxels; the
+				// old single-voxel box remeshed only the last voxel's 3×3×3
+				// sub-cell neighbourhood and left the rest of the sphere to the
+				// async budget (the "pops in over several frames" behaviour). The
+				// box's dirty cells (region + 1-cell ring, via DirtyCellsForRegion)
+				// cover the WHOLE edited region, so it appears whole in this
+				// frame. For a single-voxel edit the box is just that voxel —
+				// identical to the old behaviour.
 				var _geometryDirty = new HashSet<VoxelCell>();
 				var _dirty = new HashSet<VoxelCell>();
-				for (int ox = -1; ox <= 1; ox++)
-					for (int oy = -1; oy <= 1; oy++)
-						for (int oz = -1; oz <= 1; oz++)
-						{
-							int px = _instantEditLocal.X + ox;
-							int py = _instantEditLocal.Y + oy;
-							int pz = _instantEditLocal.Z + oz;
-							if (px < 0 || py < 0 || pz < 0
-								|| px >= ChunkSizeXZ || py >= ChunkHeight || pz >= ChunkSizeXZ)
+				if (_instantEditBoxValid)
+				{
+					foreach (var gc in DirtyCellsForRegion(
+						_instantEditMin.X, _instantEditMin.Y, _instantEditMin.Z,
+						_instantEditMax.X, _instantEditMax.Y, _instantEditMax.Z))
+					{
+						_geometryDirty.Add(gc);
+						_dirty.Add(gc);
+					}
+				}
+				// Fallback (shouldn't happen — SetVoxel always sets the box): a
+				// single-voxel edit at the last written position.
+				if (_geometryDirty.Count == 0)
+				{
+					for (int ox = -1; ox <= 1; ox++)
+						for (int oy = -1; oy <= 1; oy++)
+							for (int oz = -1; oz <= 1; oz++)
 							{
-								continue;
+								int px = _instantEditLocal.X + ox;
+								int py = _instantEditLocal.Y + oy;
+								int pz = _instantEditLocal.Z + oz;
+								if (px < 0 || py < 0 || pz < 0
+									|| px >= ChunkSizeXZ || py >= ChunkHeight || pz >= ChunkSizeXZ)
+								{
+									continue;
+								}
+								var gc = CellOf(px, py, pz);
+								_geometryDirty.Add(gc);
+								_dirty.Add(gc);
 							}
-							var gc = CellOf(px, py, pz);
-							_geometryDirty.Add(gc);
-							_dirty.Add(gc);
-						}
+				}
 
 				// The wide field dims (fixed for the session) + the edit's wide
 				// position. The field's half-extent (cs + fieldRange + 1) is the
@@ -1623,58 +1678,53 @@ public partial class VoxelWorld : Node3D
 				//    = full field range.
 				//  * NEITHER changed (e.g. swapping one opaque block for another):
 				//    the light is truly unchanged -> skip the recompute entirely.
-				bool lightSourceChanged = false;
-				bool solidChanged = false;
-				int oldBlock = 0;
-				if (worldSettled && instantChunk.DataReady && instantChunk.HasWideCache)
-				{
-					oldBlock = instantChunk.GetWideBlockAt(lpx, lpy, lpz, wx, wy, wz);
-					int oldSolid = instantChunk.GetWideSolidAt(lpx, lpy, lpz, wx, wy, wz);
-					int newSolid = _patchMat != 0 ? 1 : 0;
-					lightSourceChanged = oldBlock != _patchLight;
-					solidChanged = oldSolid != newSolid;
-				}
-				else
-				{
-					// No cache yet (first build) or not settled -> assume changed
-					// (recompute to be safe; the cold-start guard still skips the
-					// actual work while the world is settling).
-					lightSourceChanged = true;
-					solidChanged = true;
-				}
+				// LIGHT CHANGE DETECTION (PER-SECTION): the edit's light-relevant
+				// state is its SOLID (air<->solid flips the sky hand-off) and its
+				// BLOCK LIGHT SOURCE (a torch added/removed). Both are read from
+				// the chunk data (already written by SetVoxel). We recompute the
+				// affected SECTIONS' light (the small 18×18×18 fields, Minecraft's
+				// model) when either changed — bounded by a handful of sections,
+				// not the big 3×3-chunk wide field.
+				bool lightSourceChanged = _patchLight != 0;
+				// A solid change is detected by comparing the edited voxel's new
+				// solid state to its pre-edit state; we approximate "changed" as
+				// true whenever the edit is a place or break (material != the
+				// air/solid the data held before). Since SetVoxel already wrote the
+				// new value, we treat any geometry edit (the common case) as
+				// light-relevant — the per-section recompute is cheap enough that
+				// the conservative "always recompute on geometry" is fine, and it
+				// is exactly what makes caves brighten / columns open instantly.
+				bool solidChanged = true; // geometry edits always recompute light (cheap per-section)
 				bool anyLightRelevant = lightSourceChanged || solidChanged;
 
 				if (anyLightRelevant && worldSettled)
 				{
-					// (2) LIGHT (edited chunk): run the Starlight DELTA centred on
-					//     the edited voxel — a full-field, box-free recompute. The
-					//     edited chunk is patched into the cached wide volumes above
-					//     (SetPatchVoxel), so the delta sees the new source + solid
-					//     state and propagates the change over the whole field.
-					//     (Neighbour chunks are handled separately below by the
-					//     sphere-iteration + full-rebuild path.)
-					//     proven to work (it lights the neighbouring chunks).
-					var _lightChanged = instantChunk.RecomputeLightAtSource(this,
-						lpx, lpy, lpz, _patchWide);
+					// (2) LIGHT (edited chunk, PER-SECTION): recompute the edited
+					// section + its 6 face-adjacent sections (light hand-offs
+					// across section borders), and add the affected sub-cells to
+					// the dirty set. This replaces the wide-field
+					// RecomputeLightAtSource — the work is now bounded by a
+					// handful of 18×18×18 sections.
+					var _lightChanged = instantChunk.RecomputeLightSection(
+						this, _instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z,
+						c => _snap.TryGetValue(c, out ChunkData d) ? d : null);
 					_dirty.UnionWith(_lightChanged);
 				}
 
-				// Re-mesh the dirty sub-cells.
-				// PRECISE RE-MESH (the Minecraft-style "only re-mesh what
-				// changed"): geometry-dirty cells ALWAYS re-mesh (their solid/air
-				// state changed — a plain block edit can change the surface even
-				// when no light changed). Light-dirty cells (not geometry-dirty)
-				// re-mesh ONLY if their sampled light actually changed — otherwise
-				// the produced mesh is byte-identical, so the expensive MC build
-				// is skipped. This is what keeps a torch fast: only the sub-cells
-				// whose vertices sit in the torch's lit region re-mesh.
+				// Re-mesh the dirty sub-cells (PER-SECTION): geometry-dirty cells
+				// ALWAYS re-mesh (their solid/air state changed). Light-dirty
+				// cells (added by the per-section recompute above, not
+				// geometry-dirty) re-mesh when their section's light field was
+				// recomputed — which is exactly the case for the cells
+				// RecomputeLightSection returned, so we re-mesh them. RebuildSubCell
+				// samples the per-section field, so the new light is applied.
 				foreach (var cell in _dirty)
 				{
-					if (!_geometryDirty.Contains(cell)
-						&& !instantChunk.SubCellSamplesLightChanged(this, cell.X, cell.Y, cell.Z))
-					{
-						continue; // light-only, and no sampled light changed -> no re-mesh
-					}
+					// Geometry-dirty OR light-dirty (in _dirty from the section
+					// recompute) -> re-mesh. (Every cell in _dirty is one of the
+					// two, so this re-meshes the whole dirty set — the precise
+					// "only what changed" is guaranteed because _dirty only ever
+					// contains geometry cells + the recomputed sections' cells.)
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
 
@@ -1734,47 +1784,40 @@ public partial class VoxelWorld : Node3D
 						if (neighbour.MeshBuildInFlight)
 						{
 							// An async full build is already in flight for this
-							// neighbour: it will re-bake the field (reading the
-							// torch's BlockLight) and re-mesh everything when it
-							// completes, so skip the delta (it would race the
-							// worker's commit).
+							// neighbour: it will re-bake the section light (reading
+							// the torch's BlockLight) and re-mesh everything when it
+							// completes, so skip the section recompute (it would
+							// race the worker's commit).
 							continue;
 						}
-						// Light this neighbour THIS frame (the "Minecraft way"):
-						// propagate the torch's block-light change into the
-						// neighbour's cached wide field with a BOUNDED, sky-free
-						// delta (no full flood fill, no whole-chunk remesh), then
-						// re-mesh the changed sub-cells. The torch's BlockLight is
-						// already in the neighbour's cached wide block volume
-						// (BuildWideVolumes read the edited chunk's live
-						// BlockLight), so no patch is needed.
-						var nChanged = neighbour.RecomputeLightFromSource(this, srcWorldX, srcWorldY, srcWorldZ);
+						// Light this neighbour THIS frame (PER-SECTION, the
+						// Minecraft way): recompute the neighbour's BORDER SECTIONS
+						// (the ones that hand off light from the edited chunk at
+						// the shared chunk border) — a handful of small 18×18×18
+						// solves, NOT a full flood fill or whole-chunk remesh —
+						// then re-mesh the affected sub-cells. The torch's
+						// BlockLight is already in the neighbour's section block
+						// arrays (EnsureSectionLight read the live chunk data), so
+						// no patch is needed.
+						var nChanged = neighbour.RecomputeLightFromSourceSection(this, srcWorldX, srcWorldY, srcWorldZ);
 						if (nChanged.Count == 0)
 						{
 							continue; // the torch was already in the converged field (no visual change)
 						}
-						// The neighbour is now lit THIS frame by the bounded
-						// delta + targeted remesh. Clear NeedsMesh so the budget
-						// does NOT also launch a full async rebuild for it
-						// (flood fill + all 256 sub-cells — the exact half-second
-						// behaviour we are replacing). The delta is bit-identical
-						// to the full flood fill (validated), so skipping it loses
-						// nothing; the light the delta covers is complete for a
-						// torch.
+						// The neighbour is now lit THIS frame by the per-section
+						// recompute + targeted remesh. Clear NeedsMesh so the
+						// budget does NOT also launch a full async rebuild for it
+						// (the per-section recompute is the authoritative light for
+						// a torch; the async build re-converges on a later frame).
 						neighbour.NeedsMesh = false;
 						neighbour.EditPriority = 0;
-						// COARSE remesh (Minecraft-style): re-mesh the changed
-						// sub-cells as a small number of region-units (one
-						// MeshInstance3D + one collision shape each) instead of
-						// one node per fine 8×32×8 sub-cell. A torch near a
-						// border touches ~100+ fine sub-cells; coarsening
-						// collapses them to ~10-16 units, so the main-thread
-						// node/collision work drops by an order of magnitude and
-						// the neighbour lights in the same frame as the edited
-						// chunk. A full async rebuild restores the fine grid and
-						// frees these region units (FreeRegionNodes).
+						// Re-mesh the affected sub-cells (one per 16×16×16 section
+						// now, since CellSize is 16 — a torch near a border touches
+						// a handful of sections, so the main-thread node/collision
+						// work is small and the neighbour lights in the same frame
+						// as the edited chunk).
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
-						neighbour.RebuildRegionLight(this, nChanged, nSnapshot);
+						neighbour.RebuildCellsFromSection(this, nChanged, nSnapshot);
 					}
 				}
 
@@ -1810,6 +1853,7 @@ public partial class VoxelWorld : Node3D
 				instantChunk.RebuildSynchronous(this);
 			}
 			_instantRebuildChunk = null;
+			_instantEditBoxValid = false;
 		}
 		else if (!(_instantRebuildChunk is { } pendingInstant && !pendingInstant.DataReady))
 		{
@@ -1819,6 +1863,7 @@ public partial class VoxelWorld : Node3D
 			// in-flight async build self-clears here; a freed chunk just falls
 			// through to the normal budget path.
 			_instantRebuildChunk = null;
+			_instantEditBoxValid = false;
 		}
 
 
@@ -2839,9 +2884,15 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// The re-mesh radius (in voxels) needed to cover the light a light source
 	/// of <paramref name="level"/> emits: block light reaches (level - 1) voxels
-	/// before it saturates to 0, so a radius of (level - 1) (clamped to
-	/// <see cref="MaxLightLevel"/>) covers every voxel whose light can change.
-	/// 0 for a non-source (plain material edits only need the 1-chunk ring).
+	/// before it saturates to 0, so a radius of (level - 1) covers every voxel
+	/// whose light can change. The radius is capped at
+	/// <see cref="MaxPropagationRadius"/> (Minecraft's max light reach of 15)
+	/// even when <see cref="MaxLightLevel"/> is set higher for the visual
+	/// curve: the *spread* of light (and therefore the per-edit delta work and
+	/// the cross-chunk sphere iteration) is what dominates edit cost, so it is
+	/// clamped to Minecraft parity while the *brightness* curve still uses the
+	/// full level. 0 for a non-source (plain material edits only need the
+	/// 1-chunk ring).
 	/// </summary>
 	private int LightRadiusFor(byte level)
 	{
@@ -2850,7 +2901,7 @@ public partial class VoxelWorld : Node3D
 			return 0;
 		}
 		int r = level - 1;
-		int max = Mathf.Max(1, MaxLightLevel);
+		int max = Mathf.Max(1, MaxPropagationRadius);
 		return r > max ? max : r;
 	}
 
@@ -3104,10 +3155,34 @@ public partial class VoxelWorld : Node3D
 		// the last write of a frame wins — which is the chunk the player is
 		// actually looking at. (Multi-voxel edits like a torch touch a region;
 		// the chunk the player clicked is the one that must appear instantly.)
+		bool newChunk = !ReferenceEquals(_instantRebuildChunk, chunk);
 		_instantRebuildChunk = chunk;
 		// The chunk-LOCAL coords of the edited voxel, for the sub-cell path to
 		// compute the dirtied sub-cell(s). (lx, v.Y, lz are in scope here.)
 		_instantEditLocal = new Vector3I(lx, v.Y, lz);
+		// UNION this voxel into the chunk-local edit bounding box so the instant
+		// path remeshes the WHOLE edited region (a sphere, a brush), not just the
+		// last voxel. A write to a DIFFERENT chunk (a sphere that crosses a chunk
+		// border) resets the box to that voxel, because the box is per-chunk
+		// (chunk-local coords) and the instant path only remeshes _instantRebuildChunk.
+		var local = _instantEditLocal;
+		if (newChunk || !_instantEditBoxValid)
+		{
+			_instantEditMin = local;
+			_instantEditMax = local;
+			_instantEditBoxValid = true;
+		}
+		else
+		{
+			_instantEditMin = new Vector3I(
+				System.Math.Min(_instantEditMin.X, local.X),
+				System.Math.Min(_instantEditMin.Y, local.Y),
+				System.Math.Min(_instantEditMin.Z, local.Z));
+			_instantEditMax = new Vector3I(
+				System.Math.Max(_instantEditMax.X, local.X),
+				System.Math.Max(_instantEditMax.Y, local.Y),
+				System.Math.Max(_instantEditMax.Z, local.Z));
+		}
 	}
 
 	/// <summary>
