@@ -1556,6 +1556,12 @@ public partial class VoxelWorld : Node3D
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
 		{
+			// Clear the per-frame cross-chunk section stores: they are valid for
+			// THIS edit's frozen neighbour snapshot + torch state, which is
+			// constant within this frame but stale for the next edit. Without
+			// this, a throwaway section solved for one edit would be reused (and
+			// wrong) for the next.
+			VoxelChunk.ClearThrowawaySectionMemo();
 			if (SubCellMeshing)
 			{
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the

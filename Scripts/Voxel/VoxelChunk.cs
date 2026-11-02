@@ -181,6 +181,31 @@ public partial class VoxelChunk : Node3D
 	// cycle is broken, the depth is bounded by the section grid, and the async full
 	// rebuild re-converges the one missing hand-off. Main thread only.
 	private readonly System.Collections.Generic.HashSet<int> _sectionLightComputing = new();
+	// PER-FRAME memo for the CROSS-CHUNK throwaway section solves (the adjacent
+	// chunk's border sections, read for the hand-off). Without this, the same
+	// throwaway section is re-solved over and over — once per border section's
+	// hand-off AND again per dirty cell's RebuildSubCell hand-off — so a full
+	// rebuild (which dirties many cells) triggers hundreds of throwaway solves and
+	// the game freezes. Keyed by (adjacent chunk coord + section) so each distinct
+	// throwaway section is solved ONCE per frame. Static (shared by all chunks) and
+	// cleared at the start of each instant edit (VoxelWorld._Process) — it is
+	// valid for the frame's frozen neighbour snapshot and the torch edit, both of
+	// which are constant within the frame. Main thread only.
+	private static readonly System.Collections.Generic.Dictionary<long, (float[] field, int sx, int sy, int sz)> _throwawaySectionMemo = new();
+	// Per-chunk-section cache for the cross-chunk hand-off: the ADJACENT chunk's
+	// own section fields, computed on demand and reused (so the adjacent chunk's
+	// sections aren't re-solved for every border section that reads them). Keyed
+	// by (chunk coord + section). Static (shared), cleared with the throwaway
+	// memo at the start of each instant edit (same frame-validity). Main thread only.
+	private static readonly System.Collections.Generic.Dictionary<long, (float[] light, byte[] lit)> _chunkSectionCache = new();
+	private static readonly System.Collections.Generic.HashSet<long> _sectionLightComputingByChunk = new();
+	/// <summary>Clears the per-frame cross-chunk section stores (called once per instant edit).</summary>
+	public static void ClearThrowawaySectionMemo()
+	{
+		_throwawaySectionMemo.Clear();
+		_chunkSectionCache.Clear();
+		_sectionLightComputingByChunk.Clear();
+	}
 	// Option B lighting: the most-recent edited voxel (chunk-local) + its
 	// material + block-light level, recorded by the instant-edit path so
 	// RecomputeLightLocal can patch the cached wide volumes at just that voxel
@@ -1174,6 +1199,17 @@ public partial class VoxelChunk : Node3D
 		{
 			return (null, 0, 0, 0);
 		}
+		// PER-FRAME MEMO: each distinct throwaway section is solved ONCE per frame.
+		// This is what stops the quadratic blow-up (the same adjacent section is
+		// requested by many border sections' hand-offs and by each dirty cell's
+		// RebuildSubCell hand-off; without the memo it would be re-solved every
+		// time and the game would freeze).
+		long mkey = ((long)ncoord.X << 32) | (ncoord.Y & 0xFFFFFFFFL)
+			| ((long)nsecX << 12) | ((long)nsecY << 6) | (long)nsecZ;
+		if (_throwawaySectionMemo.TryGetValue(mkey, out var memo))
+		{
+			return memo;
+		}
 		// The adjacent chunk's frozen neighbour snapshot (for its border reads).
 		var nSnapshot = world.SnapshotNeighbours(ncoord, includeCentre: true);
 		System.Func<Vector2I, ChunkData> nNeighborQuery = c =>
@@ -1193,14 +1229,99 @@ public partial class VoxelChunk : Node3D
 					blockSource[idx] = SampleChunkBlockLight(world, nNeighborQuery, vx, vy, vz);
 				}
 		bool isTopSection = (y1 >= ch - 1);
-		// No hand-off neighbours: a torch is a single voxel, so the adjacent
-		// section's light is fully determined by its own sources + sky. (The
-		// adjacent section's light reaching yet another chunk is out of range for
-		// a single torch; the async full rebuild re-converges the far edge.)
+		// Bounded neighbour hand-off for the throwaway solve: same-chunk neighbours
+		// of the adjacent section read its OWN cached field (cheap, already
+		// computed); the next chunk out is NOT recursed (a single torch's light
+		// doesn't reach two chunks out — the async full rebuild re-converges the
+		// far edge). This keeps the throwaway solve to O(1) neighbour reads.
+		Func<int, int, int, (float[] field, int sx, int sy, int sz)> nNeighbour = (dx, dy, dz) =>
+		{
+			if (dx == 0 && dy == 0 && dz == 0) return (null, 0, 0, 0);
+			int nsx = nsecX + dx, nsy = nsecY + dy, nsz = nsecZ + dz;
+			if (nsx < 0 || nsx >= sX || nsy < 0 || nsy >= sY || nsz < 0 || nsz >= sZ)
+			{
+				return (null, 0, 0, 0); // next chunk out: out of range for a torch
+			}
+			// Same (adjacent) chunk: read its cached field (computed on demand).
+			var (nl, _) = EnsureSectionLightForChunk(world, ncoord, nsx, nsy, nsz, nNeighborQuery);
+			if (nl == null) return (null, 0, 0, 0);
+			var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx * 16, nsy * 16, nsz * 16, cs, ch);
+			return (nl, nx1 - nx0 + 1, ny1 - ny0 + 1, nz1 - nz0 + 1);
+		};
 		int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
-		var (light, _) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection,
-			(_, _, _) => (null, 0, 0, 0), maxL);
-		return (light, nx, ny, nz);
+		var (light, _) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection, nNeighbour, maxL);
+		var result = (light, nx, ny, nz);
+		_throwawaySectionMemo[mkey] = result;
+		return result;
+	}
+
+	/// <summary>
+	/// Computes (or reads from the per-chunk cache) a section's light field for
+	/// the chunk at <paramref name="coord"/> — the cross-chunk analogue of
+	/// <see cref="EnsureSectionLight"/>. Used by <see cref="ComputeSectionFieldThrowaway"/>
+	/// to read the adjacent chunk's OWN cached section fields for its hand-off.
+	/// Caches into a static per-chunk-section store so the adjacent chunk's
+	/// sections are computed once and reused. Main thread only.
+	/// </summary>
+	private (float[] light, byte[] lit) EnsureSectionLightForChunk(
+		VoxelWorld world, Vector2I coord, int secLx, int secLy, int secLz,
+		System.Func<Vector2I, ChunkData> neighborQuery)
+	{
+		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
+		int sX = SecsPerAxisX(cs), sY = SecsPerAxisY(ch), sZ = SecsPerAxisX(cs);
+		if (secLx < 0 || secLx >= sX || secLy < 0 || secLy >= sY || secLz < 0 || secLz >= sZ)
+		{
+			return (null, null);
+		}
+		long key = ((long)coord.X << 32) | (coord.Y & 0xFFFFFFFFL)
+			| ((long)secLx << 12) | ((long)secLy << 6) | (long)secLz;
+		if (_chunkSectionCache.TryGetValue(key, out var cached))
+		{
+			return cached;
+		}
+		if (!_sectionLightComputingByChunk.Add(key))
+		{
+			return (null, null); // in progress: break the cycle
+		}
+		try
+		{
+			var (x0, x1, y0, y1, z0, z1) = VoxelWorld.CellBoundsStatic(secLx * 16, secLy * 16, secLz * 16, cs, ch);
+			int nx = x1 - x0 + 1, ny = y1 - y0 + 1, nz = z1 - z0 + 1;
+			var solid = new byte[nx * ny * nz];
+			var blockSource = new byte[nx * ny * nz];
+			for (int iz = 0; iz < nz; iz++)
+				for (int iy = 0; iy < ny; iy++)
+					for (int ix = 0; ix < nx; ix++)
+					{
+						int vx = x0 + ix, vy = y0 + iy, vz = z0 + iz;
+						int m = SampleChunkMaterial(world, neighborQuery, vx, vy, vz);
+						int idx = ix + nx * (iy + ny * iz);
+						solid[idx] = (byte)(m != 0 ? 1 : 0);
+						blockSource[idx] = SampleChunkBlockLight(world, neighborQuery, vx, vy, vz);
+					}
+			bool isTopSection = (y1 >= ch - 1);
+			Func<int, int, int, (float[] field, int sx, int sy, int sz)> neighbour = (dx, dy, dz) =>
+			{
+				if (dx == 0 && dy == 0 && dz == 0) return (null, 0, 0, 0);
+				int nsx = secLx + dx, nsy = secLy + dy, nsz = secLz + dz;
+				if (nsx < 0 || nsx >= sX || nsy < 0 || nsy >= sY || nsz < 0 || nsz >= sZ)
+				{
+					return (null, 0, 0, 0); // next chunk out: out of range for a torch
+				}
+				var (nl, _) = EnsureSectionLightForChunk(world, coord, nsx, nsy, nsz, neighborQuery);
+				if (nl == null) return (null, 0, 0, 0);
+				var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx * 16, nsy * 16, nsz * 16, cs, ch);
+				return (nl, nx1 - nx0 + 1, ny1 - ny0 + 1, nz1 - nz0 + 1);
+			};
+			int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+			var (light, lit) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection, neighbour, maxL);
+			_chunkSectionCache[key] = (light, lit);
+			return (light, lit);
+		}
+		finally
+		{
+			_sectionLightComputingByChunk.Remove(key);
+		}
 	}
 
 	/// <summary>
