@@ -1565,8 +1565,7 @@ public partial class VoxelWorld : Node3D
 		// first edits are fast too (the light + mesh are still computed in this
 		// frame — still instant).
 		if (_instantRebuildChunk is VoxelChunk instantChunk
-			&& instantChunk.DataReady
-			&& !instantChunk.MeshBuildInFlight)
+			&& instantChunk.DataReady)
 		{
 			if (SubCellMeshing)
 			{
@@ -1668,10 +1667,12 @@ public partial class VoxelWorld : Node3D
 				// so it must not block the torch — the old "any chunk" check kept
 				// the light update off for the whole session (a 12-chunk render
 				// distance has near-constant builds in flight), so placed torches
-				// never lit until an unrelated rebuild happened to clear. The
-				// remaining purpose of the guard is just to avoid the one-frame
-				// race on the edited chunk itself.
-				bool worldSettled = !instantChunk.MeshBuildInFlight;
+				// never lit until an unrelated rebuild happened to clear.
+				// With the per-section light engine, the BFS is independent of
+				// the async build (it updates section fields, not the mesh), so
+				// no gate is needed — the edit's light is instant even while an
+				// async build is in flight.
+				bool worldSettled = true;
 
 				// LIGHT DELTA (the Minecraft-style optimisation): only recompute
 				// light when the edit's light RELEVANT STATE actually changed, and
@@ -1820,18 +1821,13 @@ public partial class VoxelWorld : Node3D
 						{
 							continue; // no data yet — first build will light it correctly
 						}
-						if (neighbour.MeshBuildInFlight)
-						{
-							// An async full build is already in flight for this
-							// neighbour: it will re-bake the section fields (reading
-							// the torch's BlockLight) and re-mesh everything when it
-							// completes, so skip the re-mesh (it would race the
-							// worker's commit).
-							continue;
-						}
 						// The section engine's BFS already wrote the light into the
 						// neighbour's sections. Now re-mesh the sub-cells in the
 						// touched sections (one 16×16×16 sub-cell per section).
+						// (No MeshBuildInFlight gate: the BFS updates section
+						// fields, not the mesh, so it doesn't race the async
+						// build. The re-mesh may be overwritten by the async
+						// build's ApplyBuildResult — benign, just wasted work.)
 						var nChanged = new System.Collections.Generic.HashSet<VoxelCell>();
 						foreach (var (secX, secY, secZ) in sections)
 						{
