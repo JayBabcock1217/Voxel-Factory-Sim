@@ -171,6 +171,16 @@ public partial class VoxelChunk : Node3D
 	// build populates all of them; the instant-edit path recomputes only the
 	// edited section (+ its light-affected neighbours).
 	private readonly System.Collections.Generic.Dictionary<int, (float[] light, byte[] lit)> _sectionLight = new();
+	// Section keys currently BEING computed (recursion guard). A section's hand-off
+	// reads its neighbours' fields, which may recursively trigger computing those
+	// neighbours. A neighbour's hand-off then points BACK at this section — but its
+	// field is not cached yet (it is only written after ComputeSection returns), so
+	// without this guard the recursion is unbounded (A -> B -> A -> B ...) and
+	// overflows the stack, crashing the game on every edit. While a section is in
+	// this set its in-progress field is reported as null (no hand-off from it); the
+	// cycle is broken, the depth is bounded by the section grid, and the async full
+	// rebuild re-converges the one missing hand-off. Main thread only.
+	private readonly System.Collections.Generic.HashSet<int> _sectionLightComputing = new();
 	// Option B lighting: the most-recent edited voxel (chunk-local) + its
 	// material + block-light level, recorded by the instant-edit path so
 	// RecomputeLightLocal can patch the cached wide volumes at just that voxel
@@ -1029,8 +1039,9 @@ public partial class VoxelChunk : Node3D
 	// 3×3-chunk wide field.
 	// ------------------------------------------------------------------
 
-	/// <summary>The chunk's section count per axis (16×256×16 -> 1×16×1).</summary>
+	/// <summary>The chunk's section count per XZ axis (16 wide -> 1; 256 wide -> 16).</summary>
 	private static int SecsPerAxisX(int cs) => System.Math.Max(1, (cs + 15) / 16);
+	/// <summary>The chunk's section count along Y (256 tall -> 16).</summary>
 	private static int SecsPerAxisY(int ch) => System.Math.Max(1, (ch + 15) / 16);
 
 	/// <summary>
@@ -1046,65 +1057,85 @@ public partial class VoxelChunk : Node3D
 		System.Func<Vector2I, ChunkData> neighborQuery)
 	{
 		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
-		int key = secLx + SecsPerAxisX(cs) * (secLy + SecsPerAxisY(ch) * secLz);
+		int sX = SecsPerAxisX(cs), sY = SecsPerAxisY(ch), sZ = SecsPerAxisX(cs);
+		// A section index outside this chunk's grid belongs to a neighbour chunk
+		// (handled by the cross-chunk path, not here) — report no field.
+		if (secLx < 0 || secLx >= sX || secLy < 0 || secLy >= sY || secLz < 0 || secLz >= sZ)
+		{
+			return (null, null);
+		}
+		int key = secLx + sX * (secLy + sY * secLz);
 		if (_sectionLight.TryGetValue(key, out var cached))
 		{
 			return cached;
 		}
-		// The section's real (unpadded) dims (clamped to the chunk).
-		var (x0, x1, y0, y1, z0, z1) = VoxelWorld.CellBoundsStatic(secLx, secLy, secLz, cs, ch);
-		int nx = x1 - x0 + 1, ny = y1 - y0 + 1, nz = z1 - z0 + 1;
-		var solid = new byte[nx * ny * nz];
-		var blockSource = new byte[nx * ny * nz];
-		int wx0 = Coord.X * cs, wz0 = Coord.Y * cs;
-		for (int iz = 0; iz < nz; iz++)
-			for (int iy = 0; iy < ny; iy++)
-				for (int ix = 0; ix < nx; ix++)
-				{
-					int vx = x0 + ix, vy = y0 + iy, vz = z0 + iz;
-					int m = SampleChunkMaterial(world, neighborQuery, vx, vy, vz);
-					int idx = ix + nx * (iy + ny * iz);
-					solid[idx] = (byte)(m != 0 ? 1 : 0);
-					blockSource[idx] = SampleChunkBlockLight(world, neighborQuery, vx, vy, vz);
-				}
-		bool isTopSection = (y1 >= ch - 1);
-		// The neighbour-section query for the hand-off: a neighbour section at
-		// offset (dx,dy,dz) is in the same chunk if it's inside the chunk's
-		// section grid; otherwise it's in an adjacent chunk (read via
-		// neighborQuery). Returns the neighbour's padded field + its padded dims.
-		Func<int, int, int, (float[] field, int sx, int sy, int sz)> neighbour = (dx, dy, dz) =>
+		// RECURSION GUARD: this section is already being computed higher up the
+		// call stack (its hand-off reached back to us). Its field is not cached
+		// yet, so return null — the caller treats that as "no hand-off from this
+		// neighbour". This is what breaks the A -> B -> A -> B ... cycle that
+		// otherwise overflows the stack and crashes the game on every edit. The
+		// one missing hand-off is conservative (dark) and the async full rebuild
+		// re-converges it.
+		if (!_sectionLightComputing.Add(key))
 		{
-			int nsx = secLx + dx, nsy = secLy + dy, nsz = secLz + dz;
-			// Same chunk?
-			if (nsx >= 0 && nsx < SecsPerAxisX(cs) && nsy >= 0 && nsy < SecsPerAxisY(ch) && nsz >= 0 && nsz < SecsPerAxisX(cs))
+			return (null, null);
+		}
+		try
+		{
+			// The section's REAL voxel origin is index * 16 (a section index is NOT
+			// a voxel origin). CellBoundsStatic clamps the far edge to the chunk,
+			// so a short last section is handled.
+			var (x0, x1, y0, y1, z0, z1) = VoxelWorld.CellBoundsStatic(secLx * 16, secLy * 16, secLz * 16, cs, ch);
+			int nx = x1 - x0 + 1, ny = y1 - y0 + 1, nz = z1 - z0 + 1;
+			var solid = new byte[nx * ny * nz];
+			var blockSource = new byte[nx * ny * nz];
+			for (int iz = 0; iz < nz; iz++)
+				for (int iy = 0; iy < ny; iy++)
+					for (int ix = 0; ix < nx; ix++)
+					{
+						int vx = x0 + ix, vy = y0 + iy, vz = z0 + iz;
+						int m = SampleChunkMaterial(world, neighborQuery, vx, vy, vz);
+						int idx = ix + nx * (iy + ny * iz);
+						solid[idx] = (byte)(m != 0 ? 1 : 0);
+						blockSource[idx] = SampleChunkBlockLight(world, neighborQuery, vx, vy, vz);
+					}
+			bool isTopSection = (y1 >= ch - 1);
+			// The neighbour-section query for the hand-off: a neighbour section at
+			// offset (dx,dy,dz) is in the same chunk if it's inside the chunk's
+			// section grid; otherwise it's in an adjacent chunk (no in-chunk field
+			// available — report null, the cross-chunk path / async rebuild cover it).
+			Func<int, int, int, (float[] field, int sx, int sy, int sz)> neighbour = (dx, dy, dz) =>
 			{
-				if (dx == 0 && dy == 0 && dz == 0) return (null, 0, 0, 0);
-				// Recompute the neighbour section (recursive, but bounded: each
-				// section is computed once and cached, so this terminates).
+				int nsx = secLx + dx, nsy = secLy + dy, nsz = secLz + dz;
+				if (nsx < 0 || nsx >= sX || nsy < 0 || nsy >= sY || nsz < 0 || nsz >= sZ)
+				{
+					return (null, 0, 0, 0); // neighbour chunk: no in-chunk field
+				}
+				if (dx == 0 && dy == 0 && dz == 0)
+				{
+					return (null, 0, 0, 0);
+				}
+				// Recompute the neighbour section. This recurses, but the
+				// _sectionLightComputing guard in EnsureSectionLight breaks any
+				// cycle (an in-progress neighbour reports a null field), so the
+				// depth is bounded by the section grid and it always terminates.
 				var (nl, _) = EnsureSectionLight(world, nsx, nsy, nsz, neighborQuery);
-				var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx, nsy, nsz, cs, ch);
+				if (nl == null)
+				{
+					return (null, 0, 0, 0); // in-progress / unavailable: no hand-off
+				}
+				var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx * 16, nsy * 16, nsz * 16, cs, ch);
 				return (nl, nx1 - nx0 + 1, ny1 - ny0 + 1, nz1 - nz0 + 1);
-			}
-			// Adjacent chunk: compute that chunk's section at the corresponding
-			// local position. (Rare: only for sections on the chunk border.)
-			int nwx0 = (Coord.X + dx) * cs, nwz0 = (Coord.Y + dz) * cs;
-			_ = nwx0; _ = nwz0;
-			// For a cross-chunk section we read the solid/block from the
-			// neighbour chunk's data at the mirrored local position and compute
-			// its field (without caching it — it belongs to the other chunk).
-			int localX = dx == 1 ? 0 : (dx == -1 ? cs - nx : secLx);
-			int localY = dy == 1 ? 0 : (dy == -1 ? ch - ny : secLy);
-			int localZ = dz == 1 ? 0 : (dz == -1 ? cs - nz : secLz);
-			// We don't have the neighbour chunk's VoxelChunk here to cache in, so
-			// compute a throwaway field (the hand-off only needs the border value).
-			// (In practice the in-chunk sections dominate; cross-chunk hand-offs
-			// are rare and the async full rebuild re-converges them.)
-			return (null, 0, 0, 0);
-		};
-		int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
-		var (light, lit) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection, neighbour, maxL);
-		_sectionLight[key] = (light, lit);
-		return (light, lit);
+			};
+			int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+			var (light, lit) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection, neighbour, maxL);
+			_sectionLight[key] = (light, lit);
+			return (light, lit);
+		}
+		finally
+		{
+			_sectionLightComputing.Remove(key);
+		}
 	}
 
 	/// <summary>
@@ -1116,11 +1147,21 @@ public partial class VoxelChunk : Node3D
 	private int SampleChunkMaterial(VoxelWorld world, System.Func<Vector2I, ChunkData> neighborQuery, int lx, int ly, int lz)
 	{
 		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
-		if (lx >= 0 && lx < cs && ly >= 0 && ly < ch && lz >= 0 && lz < cs)
+		// Y is NOT a chunk axis (it is the full world height), so it is never a
+		// cross-chunk border: out-of-range Y is simply air (below the world
+		// bottom / above the chunk top there is no data). This is what keeps the
+		// TOP section (whose real height is short when the chunk isn't an exact
+		// multiple of the section size) from reading past the end of the data
+		// array — an out-of-range read would throw IndexOutOfRangeException.
+		if (ly < 0 || ly >= ch)
+		{
+			return 0;
+		}
+		if (lx >= 0 && lx < cs && lz >= 0 && lz < cs)
 		{
 			return Data.Get(lx, ly, lz);
 		}
-		// Border shell: the neighbouring chunk's corresponding voxel.
+		// XZ border shell: the neighbouring chunk's corresponding voxel.
 		int cx = Coord.X + (lx < 0 ? -1 : (lx >= cs ? 1 : 0));
 		int cz = Coord.Y + (lz < 0 ? -1 : (lz >= cs ? 1 : 0));
 		ChunkData nd = neighborQuery(new Vector2I(cx, cz));
@@ -1137,7 +1178,13 @@ public partial class VoxelChunk : Node3D
 	private byte SampleChunkBlockLight(VoxelWorld world, System.Func<Vector2I, ChunkData> neighborQuery, int lx, int ly, int lz)
 	{
 		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
-		if (lx >= 0 && lx < cs && ly >= 0 && ly < ch && lz >= 0 && lz < cs)
+		// Y is NOT a chunk axis: out-of-range Y is simply air (no data). This
+		// keeps the short top section from reading past the end of the data array.
+		if (ly < 0 || ly >= ch)
+		{
+			return 0;
+		}
+		if (lx >= 0 && lx < cs && lz >= 0 && lz < cs)
 		{
 			return Data.GetBlockLight(lx, ly, lz);
 		}
@@ -1158,7 +1205,11 @@ public partial class VoxelChunk : Node3D
 	/// changes enough that the cached section fields are stale — i.e. on a full
 	// async rebuild, which recomputes them all).
 	/// </summary>
-	public void ClearSectionLight() => _sectionLight.Clear();
+	public void ClearSectionLight()
+	{
+		_sectionLight.Clear();
+		_sectionLightComputing.Clear();
+	}
 
 	/// <summary>
 	/// Builds a closure that samples this chunk's PER-SECTION light (the
@@ -1184,9 +1235,9 @@ public partial class VoxelChunk : Node3D
 			}
 			int secX = lx / 16, secY = ly / 16, secZ = lz / 16;
 			int key = secX + sX * (secY + sY * secZ);
-			if (!_sectionLight.TryGetValue(key, out var field))
+			if (!_sectionLight.TryGetValue(key, out var field) || field.light == null)
 			{
-				return 1f; // section not computed: full light (the async build fills it)
+				return 1f; // section not computed (or in progress): full light (the async build fills it)
 			}
 			// The section's real origin (clamped) + the voxel's local-in-section
 			// coords, mapped into the section's padded field (real (a,b,c) ->
@@ -1239,18 +1290,20 @@ public partial class VoxelChunk : Node3D
 		// Drop sections outside the chunk's section grid (they belong to a
 		// neighbour chunk — handled by the cross-chunk path, not here).
 		int sX = SecsPerAxisX(cs), sY = SecsPerAxisY(ch), sZ = SecsPerAxisX(cs);
-		// We must RECOMPUTE these sections (drop their cached field first), then
-		// re-solve them (the hand-off reads the neighbours' CURRENT fields, so we
-		// recompute the edited one and let the hand-off pull from the others).
-		foreach (var (sx, sy, sz) in toRecompute)
-		{
-			if (sx < 0 || sx >= sX || sy < 0 || sy >= sY || sz < 0 || sz >= sZ) continue;
-			int key = sx + sX * (sy + sY * sz);
-			_sectionLight.Remove(key); // drop the stale field so EnsureSectionLight recomputes
-		}
-		// Recompute (the edited section first; its hand-off reads the neighbours'
-		// current fields, which are still valid unless they were also dropped —
-		// in which case EnsureSectionLight recomputes them recursively).
+		// Drop ONLY the edited section's cached field so it re-solves. The 6
+		// face-adjacent sections are NOT dropped: they are the hand-off SOURCES
+		// for the edited section's border, and their fields are still valid (the
+		// edit is a single voxel, far from their own borders, and a light source
+		// only propagates within MaxPropagationRadius which the edited section's
+		// own re-solve + the async full rebuild handle). Dropping them too would
+		// leave them without a cached field, so the mesh sampler would fall back
+		// to full light for them and they'd be left stale.
+		int eKey = secX + sX * (secY + sY * secZ);
+		_sectionLight.Remove(eKey);
+		// Recompute the edited section. Its hand-off reads the neighbours' CURRENT
+		// (still-cached) fields; a neighbour that was never computed is filled in
+		// recursively by EnsureSectionLight (bounded by the _sectionLightComputing
+		// guard, so it always terminates).
 		var edited = EnsureSectionLight(world, secX, secY, secZ, neighborQuery);
 		_ = edited;
 		// Determine which sub-cells' sampled light changed: compare the new
@@ -1962,6 +2015,9 @@ public partial class VoxelChunk : Node3D
 			_cachedBlockLit = blockLit;
 			_cachedWideSolid = wideSolid;
 			_cachedWideBlock = wideBlock;
+			// The full build re-baked the authoritative wide field: clear the
+			// stale per-section light cache (it re-converges lazily on remesh).
+			ClearSectionLight();
 		}
 
 		// The heavy voxel math, on the main thread (synchronous fast path). The
@@ -2111,6 +2167,12 @@ public partial class VoxelChunk : Node3D
 			_pendingBlockLit = null;
 			_pendingWideSolid = null;
 			_pendingWideBlock = null;
+			// The full build re-baked the authoritative wide light field, so the
+			// per-section light cache (the instant-edit approximation) is stale —
+			// clear it. It re-converges lazily as sub-cells are remeshed (the
+			// hand-off + the next full build keep it close; the wide field is the
+			// source of truth the async path uses for the whole-chunk mesh).
+			ClearSectionLight();
 		}
 
 		// Only clear the dirty flag when a mesh was actually applied. If the
