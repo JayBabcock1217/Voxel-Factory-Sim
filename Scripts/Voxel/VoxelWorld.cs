@@ -1556,12 +1556,6 @@ public partial class VoxelWorld : Node3D
 			&& instantChunk.DataReady
 			&& !instantChunk.MeshBuildInFlight)
 		{
-			// Clear the per-frame cross-chunk section stores: they are valid for
-			// THIS edit's frozen neighbour snapshot + torch state, which is
-			// constant within this frame but stale for the next edit. Without
-			// this, a throwaway section solved for one edit would be reused (and
-			// wrong) for the next.
-			VoxelChunk.ClearThrowawaySectionMemo();
 			if (SubCellMeshing)
 			{
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
@@ -1684,53 +1678,59 @@ public partial class VoxelWorld : Node3D
 				//    = full field range.
 				//  * NEITHER changed (e.g. swapping one opaque block for another):
 				//    the light is truly unchanged -> skip the recompute entirely.
-				// LIGHT CHANGE DETECTION (PER-SECTION): the edit's light-relevant
-				// state is its SOLID (air<->solid flips the sky hand-off) and its
-				// BLOCK LIGHT SOURCE (a torch added/removed). Both are read from
-				// the chunk data (already written by SetVoxel). We recompute the
-				// affected SECTIONS' light (the small 18×18×18 fields, Minecraft's
-				// model) when either changed — bounded by a handful of sections,
-				// not the big 3×3-chunk wide field.
-				bool lightSourceChanged = _patchLight != 0;
-				// A solid change is detected by comparing the edited voxel's new
-				// solid state to its pre-edit state; we approximate "changed" as
-				// true whenever the edit is a place or break (material != the
-				// air/solid the data held before). Since SetVoxel already wrote the
-				// new value, we treat any geometry edit (the common case) as
-				// light-relevant — the per-section recompute is cheap enough that
-				// the conservative "always recompute on geometry" is fine, and it
-				// is exactly what makes caves brighten / columns open instantly.
-				bool solidChanged = true; // geometry edits always recompute light (cheap per-section)
+				// LIGHT CHANGE DETECTION (WIDE FIELD): the edit's light-relevant
+				// state is its SOLID (air<->solid flips the sky line) and its
+				// BLOCK LIGHT SOURCE (a torch added/removed). Compare the CACHED
+				// wide volumes (the PRE-edit state) to the post-edit values to
+				// decide whether to recompute, and size the box to the worst case.
+				bool lightSourceChanged = false;
+				bool solidChanged = false;
+				if (worldSettled && instantChunk.HasWideCache)
+				{
+					int oldBlock = instantChunk.GetWideBlockAt(lpx, lpy, lpz, wx, wy, wz);
+					int oldSolid = instantChunk.GetWideSolidAt(lpx, lpy, lpz, wx, wy, wz);
+					int newSolid = _patchMat != 0 ? 1 : 0;
+					lightSourceChanged = oldBlock != _patchLight;
+					solidChanged = oldSolid != newSolid;
+				}
+				else
+				{
+					// No cache yet (first build) or not settled -> assume changed
+					// (recompute to be safe; the cold-start guard still skips the
+					// actual work while the world is settling).
+					lightSourceChanged = true;
+					solidChanged = true;
+				}
 				bool anyLightRelevant = lightSourceChanged || solidChanged;
 
 				if (anyLightRelevant && worldSettled)
 				{
-					// (2) LIGHT (edited chunk, PER-SECTION): recompute the edited
-					// section + its 6 face-adjacent sections (light hand-offs
-					// across section borders), and add the affected sub-cells to
-					// the dirty set. This replaces the wide-field
-					// RecomputeLightAtSource — the work is now bounded by a
-					// handful of 18×18×18 sections.
-					var _lightChanged = instantChunk.RecomputeLightSection(
-						this, _instantEditLocal.X, _instantEditLocal.Y, _instantEditLocal.Z,
-						c => _snap.TryGetValue(c, out ChunkData d) ? d : null);
+					// (2) LIGHT (edited chunk, WIDE FIELD): run the Starlight
+					// DELTA centred on the edited voxel (the box is one light-range
+					// around it) — a full-field, box-free recompute. The edited
+					// chunk is patched into the cached wide volumes above
+					// (SetPatchVoxel), so the delta sees the new source + solid
+					// state and propagates the change over the whole field.
+					// Returns the sub-cells whose sampled light actually changed.
+					var _lightChanged = instantChunk.RecomputeLightAtSource(this,
+						lpx, lpy, lpz, _patchWide);
 					_dirty.UnionWith(_lightChanged);
 				}
 
-				// Re-mesh the dirty sub-cells (PER-SECTION): geometry-dirty cells
+				// Re-mesh the dirty sub-cells (PRECISE): geometry-dirty cells
 				// ALWAYS re-mesh (their solid/air state changed). Light-dirty
-				// cells (added by the per-section recompute above, not
-				// geometry-dirty) re-mesh when their section's light field was
-				// recomputed — which is exactly the case for the cells
-				// RecomputeLightSection returned, so we re-mesh them. RebuildSubCell
-				// samples the per-section field, so the new light is applied.
+				// cells (added by the wide-field recompute above) re-mesh ONLY if
+				// their sampled light actually changed — otherwise the produced
+				// mesh is byte-identical and the expensive MC build is skipped.
+				// RebuildSubCell samples the cached WIDE field, so the new light
+				// is applied.
 				foreach (var cell in _dirty)
 				{
-					// Geometry-dirty OR light-dirty (in _dirty from the section
-					// recompute) -> re-mesh. (Every cell in _dirty is one of the
-					// two, so this re-meshes the whole dirty set — the precise
-					// "only what changed" is guaranteed because _dirty only ever
-					// contains geometry cells + the recomputed sections' cells.)
+					if (!_geometryDirty.Contains(cell)
+						&& !instantChunk.SubCellSamplesLightChanged(this, cell.X, cell.Y, cell.Z))
+					{
+						continue; // light-only, and no sampled light changed -> no re-mesh
+					}
 					instantChunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, _snap);
 				}
 
@@ -1790,40 +1790,42 @@ public partial class VoxelWorld : Node3D
 						if (neighbour.MeshBuildInFlight)
 						{
 							// An async full build is already in flight for this
-							// neighbour: it will re-bake the section light (reading
+							// neighbour: it will re-bake the wide light field (reading
 							// the torch's BlockLight) and re-mesh everything when it
-							// completes, so skip the section recompute (it would
-							// race the worker's commit).
+							// completes, so skip the delta (it would race the
+							// worker's commit).
 							continue;
 						}
-						// Light this neighbour THIS frame (PER-SECTION, the
-						// Minecraft way): recompute the neighbour's BORDER SECTIONS
-						// (the ones that hand off light from the edited chunk at
-						// the shared chunk border) — a handful of small 18×18×18
-						// solves, NOT a full flood fill or whole-chunk remesh —
-						// then re-mesh the affected sub-cells. The torch's
-						// BlockLight is already in the neighbour's section block
-						// arrays (EnsureSectionLight read the live chunk data), so
-						// no patch is needed.
-						var nChanged = neighbour.RecomputeLightFromSourceSection(this, srcWorldX, srcWorldY, srcWorldZ);
+						// Light this neighbour THIS frame (the "Minecraft way"):
+						// propagate the torch's block-light change into the
+						// neighbour's cached wide field with a BOUNDED, sky-free
+						// delta (no full flood fill, no whole-chunk remesh), then
+						// re-mesh the changed sub-cells. The torch's BlockLight is
+						// already in the neighbour's cached wide block volume
+						// (BuildWideVolumes read the edited chunk's live
+						// BlockLight), so no patch is needed.
+						var nChanged = neighbour.RecomputeLightFromSource(this, srcWorldX, srcWorldY, srcWorldZ);
 						if (nChanged.Count == 0)
 						{
 							continue; // the torch was already in the converged field (no visual change)
 						}
-						// The neighbour is now lit THIS frame by the per-section
-						// recompute + targeted remesh. Clear NeedsMesh so the
-						// budget does NOT also launch a full async rebuild for it
-						// (the per-section recompute is the authoritative light for
-						// a torch; the async build re-converges on a later frame).
+						// The neighbour is now lit THIS frame by the bounded
+						// delta + targeted remesh. Clear NeedsMesh so the budget
+						// does NOT also launch a full async rebuild for it
+						// (flood fill + all sub-cells — the exact half-second
+						// behaviour we are replacing). The delta is bit-identical
+						// to the full flood fill (validated), so skipping it loses
+						// nothing; the light the delta covers is complete for a
+						// torch.
 						neighbour.NeedsMesh = false;
 						neighbour.EditPriority = 0;
-						// Re-mesh the affected sub-cells (one per 16×16×16 section
-						// now, since CellSize is 16 — a torch near a border touches
-						// a handful of sections, so the main-thread node/collision
-						// work is small and the neighbour lights in the same frame
-						// as the edited chunk).
+						// COARSE remesh (Minecraft-style): re-mesh the changed
+						// sub-cells as a small number of region-units instead of
+						// one node per fine sub-cell, so the main-thread
+						// node/collision work stays small and the neighbour lights
+						// in the same frame as the edited chunk.
 						var nSnapshot = SnapshotNeighbours(cc, includeCentre: true);
-						neighbour.RebuildCellsFromSection(this, nChanged, nSnapshot);
+						neighbour.RebuildRegionLight(this, nChanged, nSnapshot);
 					}
 				}
 
