@@ -223,6 +223,25 @@ public sealed class SectionLightEngine
 	}
 
 	/// <summary>
+	/// True if the section containing (worldX, worldY, worldZ) is registered
+	/// (has a light field). Used to distinguish "unregistered section" (fall
+	/// back to the wide field) from "registered section with light level 0"
+	/// (dark — use the engine's value).
+	/// </summary>
+	public bool IsSectionRegistered(int worldX, int worldY, int worldZ, int chunkSizeXZ)
+	{
+		int cx = worldX / chunkSizeXZ;
+		int cy = worldZ / chunkSizeXZ;
+		int secY = worldY / 16;
+		int lx = worldX - cx * chunkSizeXZ;
+		int lz = worldZ - cy * chunkSizeXZ;
+		int secX = lx / 16;
+		int secZ = lz / 16;
+		long key = SectionKey(cx, cy, secX, secY, secZ);
+		return _fields.ContainsKey(key);
+	}
+
+	/// <summary>
 	/// Updates a single voxel's solid/air + block source state in the section
 	/// data (called after SetVoxel). This ensures the BFS sees the new state.
 	/// </summary>

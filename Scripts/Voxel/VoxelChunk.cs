@@ -1143,10 +1143,16 @@ public partial class VoxelChunk : Node3D
 			int wx = wx0 + lx;
 			int wy = ly;
 			int wz = wz0 + lz;
-			int raw = engine.SampleLight(wx, wy, wz, cs, ch);
-			// The engine returns 0 for unregistered sections. Fall back to the
-			// wide field (which is always computed by the full rebuild).
-			if (raw == 0 && _cachedLightField != null)
+			// If the section is registered, use the engine's value (even if it's
+			// 0 — a registered dark section is dark).
+			if (engine.IsSectionRegistered(wx, wy, wz, cs))
+			{
+				int raw = engine.SampleLight(wx, wy, wz, cs, ch);
+				return raw / (float)maxLight;
+			}
+			// Unregistered section (first build, before the full rebuild has run):
+			// fall back to the wide field (which is always computed).
+			if (_cachedLightField != null)
 			{
 				int lpx2 = 2 * cs + 2 * maxLight + 2;
 				int half = lpx2 / 2 - 1;
@@ -1156,7 +1162,7 @@ public partial class VoxelChunk : Node3D
 					return _cachedLightField[g];
 				}
 			}
-			return raw / (float)maxLight;
+			return 0f;
 		};
 	}
 
