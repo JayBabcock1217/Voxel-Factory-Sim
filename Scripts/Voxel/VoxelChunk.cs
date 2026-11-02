@@ -1287,22 +1287,27 @@ public partial class VoxelChunk : Node3D
 			int rz = cell.Z - (cell.Z / (2 * VoxelWorld.CellSizeZ)) * (2 * VoxelWorld.CellSizeZ);
 			if (!unitIdx.TryGetValue((rx, ry, rz), out int ui))
 			{
-				unitIdx[(rx, ry, rz)] = units.Count;
 				ui = units.Count;
+				unitIdx[(rx, ry, rz)] = ui;
+				// Initialize the unit's bounding box to this cell's extent.
+				units.Add((cell.X, cell.Y, cell.Z,
+					cell.X + VoxelWorld.CellSizeX - 1,
+					cell.Y + VoxelWorld.CellSizeY - 1,
+					cell.Z + VoxelWorld.CellSizeZ - 1));
 			}
-			// The unit tuple is (x0, x1, y0, y1, z0, z1) — destructure in that
+			// The unit tuple is (x0, y0, z0, x1, y1, z1) — destructure in that
 			// order, then grow the bounding box by the new cell's extent.
-			var (ux0, ux1, uy0, uy1, uz0, uz1) = units[ui];
+			var (ux0, uy0, uz0, ux1, uy1, uz1) = units[ui];
 			units[ui] = (
 				System.Math.Min(ux0, cell.X),
-				System.Math.Max(ux1, cell.X + VoxelWorld.CellSizeX - 1),
 				System.Math.Min(uy0, cell.Y),
-				System.Math.Max(uy1, cell.Y + VoxelWorld.CellSizeY - 1),
 				System.Math.Min(uz0, cell.Z),
+				System.Math.Max(ux1, cell.X + VoxelWorld.CellSizeX - 1),
+				System.Math.Max(uy1, cell.Y + VoxelWorld.CellSizeY - 1),
 				System.Math.Max(uz1, cell.Z + VoxelWorld.CellSizeZ - 1));
 		}
 
-		foreach (var (ux0, ux1, uy0, uy1, uz0, uz1) in units)
+		foreach (var (ux0, uy0, uz0, ux1, uy1, uz1) in units)
 		{
 			// Clamp to the chunk (the last region is short if the chunk isn't an
 			// exact multiple of the region size).

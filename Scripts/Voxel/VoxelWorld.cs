@@ -1857,25 +1857,17 @@ public partial class VoxelWorld : Node3D
 				// safety net that converges the local recompute to the full
 				// flood-fill result (and handles any light the box didn't cover).
 				instantChunk.NeedsMesh = true;
-				// For a LIGHT-SOURCE edit (torch placed/broken), do NOT mark the
-				// chunk instant-satisfied: let the budget launch its full rebuild
-				// THIS frame. The instant sub-cell remesh only re-meshes sub-cells
-				// whose sampled light changed per the delta, which leaves a stale
-				// seam (a "weird line") where one sub-cell has the new light and
-				// its neighbour still has the old — especially when placing a
-				// SECOND torch near a first (the region between them was already
-				// lit, so the delta reports no change there and those sub-cells
-				// are never re-meshed). A full rebuild re-runs the authoritative
-				// flood fill and re-meshes every sub-cell, converging the chunk
-				// with no seam. For plain geometry edits (no light source), the
-				// instant-satisfied optimisation still applies (the sub-cell
-				// remesh is complete and correct).
-				if (_patchLight == 0)
-				{
-					// No light source: the sub-cell path is complete, so skip the
-					// async build this frame (it would starve the next edit's gate).
-					instantChunk.MarkInstantSatisfied();
-				}
+				// Mark the chunk instant-satisfied for ALL edits (light-source
+				// and geometry). With the per-section light engine, the instant
+				// path is complete and correct: the BFS propagates the light
+				// (block light for torches), and the sub-cell remesh applies it.
+				// No async full rebuild is needed to converge the light — the
+				// section engine IS the authoritative light for block-light edits.
+				// The async build will still run on a later frame (when the
+				// budget picks it up) to re-bake the section fields (authoritative
+				// convergence for sky light), but it does NOT block the instant
+				// path.
+				instantChunk.MarkInstantSatisfied();
 			}
 			else
 			{
