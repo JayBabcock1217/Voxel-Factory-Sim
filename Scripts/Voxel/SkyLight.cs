@@ -1244,17 +1244,20 @@ public static class SkyLight
 			var nb = neighbour(dx, dy, dz);
 			if (nb.field == null) return;
 			// The neighbour's REAL voxel adjacent to our shell voxel across the
-			// shared border: -X face -> neighbour's sx = nx-1 (last column);
-			// +X face -> sx = 0 (first column); same for Y/Z. The shell voxel's
-			// other two coords map directly into the neighbour (they are in the
-			// neighbour's real range, since the shell is 1 voxel past the border
-			// and the neighbour's real voxel at the border is the hand-off).
-			int sx = (dx == -1) ? nx - 1 : (dx == 1 ? 0 : pxi - 1);
-			int sy = (dy == -1) ? ny - 1 : (dy == 1 ? 0 : pyi - 1);
-			int sz = (dz == -1) ? nz - 1 : (dz == 1 ? 0 : pzi - 1);
-			if (sx < 0 || sx >= nx || sy < 0 || sy >= ny || sz < 0 || sz >= nz) return;
+			// shared border. Use the NEIGHBOUR's real dims (nb.sx/sy/sz) — the
+			// last section is short, so our own nx/ny/nz would be wrong for a
+			// cross-chunk / last-section hand-off. -X face -> neighbour's last
+			// column (nb.sx-1); +X face -> first column (0); same for Y/Z. The
+			// shell voxel's other two coords map directly into the neighbour's
+			// real range (the shell is 1 voxel past the border, so the in-plane
+			// coord is the neighbour's border coord).
+			int sx = (dx == -1) ? nb.sx - 1 : (dx == 1 ? 0 : pxi - 1);
+			int sy = (dy == -1) ? nb.sy - 1 : (dy == 1 ? 0 : pyi - 1);
+			int sz = (dz == -1) ? nb.sz - 1 : (dz == 1 ? 0 : pzi - 1);
+			if (sx < 0 || sx >= nb.sx || sy < 0 || sy >= nb.sy || sz < 0 || sz >= nb.sz) return;
 			// The neighbour's REAL voxel (sx,sy,sz) sits at padded index (sx+1, sy+1, sz+1).
 			int nidx = (sx + 1) + nb.sx * ((sy + 1) + nb.sy * (sz + 1));
+			if (nidx < 0 || nidx >= nb.field.Length) return;
 			float nl = nb.field[nidx];
 			if (nl <= 0f) return;
 			int idx = P(pxi, pyi, pzi);
