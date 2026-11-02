@@ -40,6 +40,22 @@ using System.Collections.Generic;
 /// </summary>
 public sealed class SectionLightEngine
 {
+	// Floor division: unlike C# integer division (which truncates toward zero),
+	// this rounds toward negative infinity. Required for correct chunk/section
+	// indices when world coordinates are negative (C#'s `a / b` for negative
+	// `a` gives the wrong chunk index, making the local coord negative and
+	// out-of-bounds).
+	private static int FloorDiv(int a, int b)
+	{
+		int q = a / b;
+		int r = a % b;
+		if (r != 0 && ((r < 0) != (b < 0)))
+		{
+			q--;
+		}
+		return q;
+	}
+
 	// Section key: (chunkX, chunkY, secX, secY, secZ) packed into a long.
 	// chunkX: 20 bits, chunkY: 20 bits, secX: 4 bits, secY: 4 bits, secZ: 4 bits.
 	private static long SectionKey(int cx, int cy, int sx, int sy, int sz)
@@ -146,24 +162,37 @@ public sealed class SectionLightEngine
 	}
 
 	/// <summary>
+	/// Decomposes a world position into (chunkX, chunkZ, secX, secY, secZ,
+	/// localX, localY, localZ) using FLOOR division (correct for negative
+	/// world coordinates).
+	/// </summary>
+	private static void DecomposeWorldPos(
+		int worldX, int worldY, int worldZ, int chunkSizeXZ,
+		out int cx, out int cz, out int secX, out int secY, out int secZ,
+		out int localX, out int localY, out int localZ)
+	{
+		cx = FloorDiv(worldX, chunkSizeXZ);
+		cz = FloorDiv(worldZ, chunkSizeXZ);
+		secY = FloorDiv(worldY, 16);
+		int lx = worldX - cx * chunkSizeXZ;
+		int lz = worldZ - cz * chunkSizeXZ;
+		secX = FloorDiv(lx, 16);
+		secZ = FloorDiv(lz, 16);
+		localX = lx - secX * 16;
+		localY = worldY - secY * 16;
+		localZ = lz - secZ * 16;
+	}
+
+	/// <summary>
 	/// Samples the light level (0..15) at a world position. Returns 0 if the
 	/// section is not registered.
 	/// </summary>
 	public int SampleLight(int worldX, int worldY, int worldZ, int chunkSizeXZ, int chunkHeight)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cy = worldZ / chunkSizeXZ;
-		// Y is the world height (not a chunk axis).
-		int secY = worldY / 16;
-		// Local coords within the section.
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cy * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
-		long key = SectionKey(cx, cy, secX, secY, secZ);
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
 		if (!_fields.TryGetValue(key, out int[] field))
 		{
 			return 0;
@@ -178,17 +207,10 @@ public sealed class SectionLightEngine
 	/// </summary>
 	public int SampleSolid(int worldX, int worldY, int worldZ, int chunkSizeXZ)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cy = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cy * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
-		long key = SectionKey(cx, cy, secX, secY, secZ);
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
 		if (!_solid.TryGetValue(key, out byte[] solid))
 		{
 			return 0; // unloaded = air
@@ -203,17 +225,10 @@ public sealed class SectionLightEngine
 	/// </summary>
 	public int SampleSource(int worldX, int worldY, int worldZ, int chunkSizeXZ)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cy = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cy * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
-		long key = SectionKey(cx, cy, secX, secY, secZ);
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
 		if (!_sources.TryGetValue(key, out byte[] sources))
 		{
 			return 0;
@@ -230,14 +245,10 @@ public sealed class SectionLightEngine
 	/// </summary>
 	public bool IsSectionRegistered(int worldX, int worldY, int worldZ, int chunkSizeXZ)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cy = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cy * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		long key = SectionKey(cx, cy, secX, secY, secZ);
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out _, out _, out _);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
 		return _fields.ContainsKey(key);
 	}
 
@@ -247,17 +258,10 @@ public sealed class SectionLightEngine
 	/// </summary>
 	public void UpdateVoxel(int worldX, int worldY, int worldZ, int chunkSizeXZ, byte solid, byte source)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cy = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cy * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
-		long key = SectionKey(cx, cy, secX, secY, secZ);
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
+		long key = SectionKey(cx, cz, secX, secY, secZ);
 		if (!_solid.TryGetValue(key, out byte[] solidArr))
 		{
 			return; // section not registered — the full rebuild will handle it
@@ -291,17 +295,10 @@ public sealed class SectionLightEngine
 			return changed;
 		}
 
-		// The source's section + local index.
-		int cx = worldX / chunkSizeXZ;
-		int cz = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cz * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
+		// The source's section + local index (floor division for negative coords).
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
 
 		// Seed the source's air neighbors (the source itself is solid, so light
 		// emits INTO the air around it, at level - 1).
@@ -330,16 +327,10 @@ public sealed class SectionLightEngine
 		}
 
 		// The source's section + local index.
-		int cx = worldX / chunkSizeXZ;
-		int cz = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cz * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
+		// The source's section + local index (floor division for negative coords).
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
 
 		// Decrease BFS: set the source's air neighbors to 0 (if they were lit by
 		// this source) and queue them for re-lighting.
@@ -710,16 +701,9 @@ public sealed class SectionLightEngine
 	/// </summary>
 	private void SetLight(int worldX, int worldY, int worldZ, int level, int chunkSizeXZ)
 	{
-		int cx = worldX / chunkSizeXZ;
-		int cz = worldZ / chunkSizeXZ;
-		int secY = worldY / 16;
-		int lx = worldX - cx * chunkSizeXZ;
-		int lz = worldZ - cz * chunkSizeXZ;
-		int secX = lx / 16;
-		int secZ = lz / 16;
-		int localX = lx - secX * 16;
-		int localY = worldY - secY * 16;
-		int localZ = lz - secZ * 16;
+		DecomposeWorldPos(worldX, worldY, worldZ, chunkSizeXZ,
+			out int cx, out int cz, out int secX, out int secY, out int secZ,
+			out int localX, out int localY, out int localZ);
 		long key = SectionKey(cx, cz, secX, secY, secZ);
 		if (!_fields.TryGetValue(key, out int[] field))
 		{
