@@ -1179,12 +1179,14 @@ public static class SkyLight
 		var light = new float[total];
 		var lit = new byte[total];
 		int P(int x, int y, int z) => x + px * (y + py * z);
-		// Padded solid: the real section voxels, with a 1-voxel SOLID shell
-		// (the border is opaque; the hand-off below seeds the shell's light from
-		// the neighbour fields, so light hands off across the border without
-		// leaking through a fake air shell).
-		var psolid = new byte[total];
-		for (int i = 0; i < total; i++) psolid[i] = 1;
+		// Padded solid: the real section voxels, with a 1-voxel AIR shell (the
+		// default-zero state). The shell is AIR (not solid) so that light seeded
+		// on the shell by the hand-off BELOW can propagate INWARD into the section
+		// — if the shell were solid, the max-BFS would never carry the hand-off
+		// light past the border and every non-top section (which has no direct
+		// sky seed) would render black. The shell's own light comes from the
+		// neighbour hand-off (the boundary condition), and the BFS carries it in.
+		var psolid = new byte[total]; // all 0 (air) by default = the shell
 		for (int iz = 1; iz <= nz; iz++)
 			for (int iy = 1; iy <= ny; iy++)
 				for (int ix = 1; ix <= nx; ix++)
