@@ -1102,30 +1102,45 @@ public partial class VoxelChunk : Node3D
 			bool isTopSection = (y1 >= ch - 1);
 			// The neighbour-section query for the hand-off: a neighbour section at
 			// offset (dx,dy,dz) is in the same chunk if it's inside the chunk's
-			// section grid; otherwise it's in an adjacent chunk (no in-chunk field
-			// available — report null, the cross-chunk path / async rebuild cover it).
+			// section grid (read its CACHED field, recursing to fill it if needed);
+			// otherwise it is in an ADJACENT chunk (the cross-chunk hand-off — this
+			// is what lets a torch's light cross the chunk border, see below).
 			Func<int, int, int, (float[] field, int sx, int sy, int sz)> neighbour = (dx, dy, dz) =>
 			{
-				int nsx = secLx + dx, nsy = secLy + dy, nsz = secLz + dz;
-				if (nsx < 0 || nsx >= sX || nsy < 0 || nsy >= sY || nsz < 0 || nsz >= sZ)
-				{
-					return (null, 0, 0, 0); // neighbour chunk: no in-chunk field
-				}
 				if (dx == 0 && dy == 0 && dz == 0)
 				{
 					return (null, 0, 0, 0);
 				}
-				// Recompute the neighbour section. This recurses, but the
-				// _sectionLightComputing guard in EnsureSectionLight breaks any
-				// cycle (an in-progress neighbour reports a null field), so the
-				// depth is bounded by the section grid and it always terminates.
-				var (nl, _) = EnsureSectionLight(world, nsx, nsy, nsz, neighborQuery);
-				if (nl == null)
+				int nsx = secLx + dx, nsy = secLy + dy, nsz = secLz + dz;
+				// Same chunk? Read the cached field (recursing to compute it if it
+				// isn't there yet). The _sectionLightComputing guard in
+				// EnsureSectionLight breaks any cycle (an in-progress neighbour
+				// reports a null field), so this always terminates.
+				if (nsx >= 0 && nsx < sX && nsy >= 0 && nsy < sY && nsz >= 0 && nsz < sZ)
 				{
-					return (null, 0, 0, 0); // in-progress / unavailable: no hand-off
+					var (nl, _) = EnsureSectionLight(world, nsx, nsy, nsz, neighborQuery);
+					if (nl == null)
+					{
+						return (null, 0, 0, 0); // in progress: no hand-off
+					}
+					var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx * 16, nsy * 16, nsz * 16, cs, ch);
+					return (nl, nx1 - nx0 + 1, ny1 - ny0 + 1, nz1 - nz0 + 1);
 				}
-				var (nx0, nx1, ny0, ny1, nz0, nz1) = VoxelWorld.CellBoundsStatic(nsx * 16, nsy * 16, nsz * 16, cs, ch);
-				return (nl, nx1 - nx0 + 1, ny1 - ny0 + 1, nz1 - nz0 + 1);
+				// CROSS-CHUNK hand-off: the neighbour section is in an adjacent
+				// chunk. Compute THAT chunk's section (throwaway — not cached, it
+				// belongs to the other chunk) and hand off from its border. This
+				// is what carries a torch's light across the chunk border: the
+				// edited chunk's section near the torch lights its own border
+				// shell, and the neighbour chunk's border section reads that
+				// border via this hand-off. The neighbour's own section light
+				// sources (a torch in the neighbour) are also included, so it is
+				// a faithful solve of the adjacent region.
+				int nsecX, nsecY, nsecZ;
+				if (dx == 1) nsecX = 0; else if (dx == -1) nsecX = sX - 1; else nsecX = secLx;
+				if (dy == 1) nsecY = 0; else if (dy == -1) nsecY = sY - 1; else nsecY = secLy;
+				if (dz == 1) nsecZ = 0; else if (dz == -1) nsecZ = sZ - 1; else nsecZ = secLz;
+				var (cfield, csx, csy, csz) = ComputeSectionFieldThrowaway(world, Coord + new Vector2I(dx, dz), nsecX, nsecY, nsecZ);
+				return (cfield, csx, csy, csz);
 			};
 			int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
 			var (light, lit) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection, neighbour, maxL);
@@ -1136,6 +1151,56 @@ public partial class VoxelChunk : Node3D
 		{
 			_sectionLightComputing.Remove(key);
 		}
+	}
+
+	/// <summary>
+	/// Computes a section's light field for the chunk at <paramref name="ncoord"/>
+	/// WITHOUT caching it — used for the CROSS-CHUNK hand-off, where this chunk
+	/// needs the adjacent chunk's border value but the field belongs to that other
+	/// chunk (so it must not be written into THIS chunk's cache). The section's
+	/// solid/block-source arrays are read from the adjacent chunk's own data (via
+	/// its neighbour snapshot). A light source (a torch) is a single voxel, so the
+	/// adjacent section's OWN block sources are all that matter — no deeper
+	/// recursion is needed (the adjacent section's light reaches at most one more
+	/// chunk, and that is the one being solved here). Returns the padded field +
+	/// its real (unpadded) dims, or a null field when unavailable. Main thread only.
+	/// </summary>
+	private (float[] field, int sx, int sy, int sz) ComputeSectionFieldThrowaway(
+		VoxelWorld world, Vector2I ncoord, int nsecX, int nsecY, int nsecZ)
+	{
+		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
+		int sX = SecsPerAxisX(cs), sY = SecsPerAxisY(ch), sZ = SecsPerAxisX(cs);
+		if (nsecX < 0 || nsecX >= sX || nsecY < 0 || nsecY >= sY || nsecZ < 0 || nsecZ >= sZ)
+		{
+			return (null, 0, 0, 0);
+		}
+		// The adjacent chunk's frozen neighbour snapshot (for its border reads).
+		var nSnapshot = world.SnapshotNeighbours(ncoord, includeCentre: true);
+		System.Func<Vector2I, ChunkData> nNeighborQuery = c =>
+			nSnapshot.TryGetValue(c, out ChunkData d) ? d : null;
+		var (x0, x1, y0, y1, z0, z1) = VoxelWorld.CellBoundsStatic(nsecX * 16, nsecY * 16, nsecZ * 16, cs, ch);
+		int nx = x1 - x0 + 1, ny = y1 - y0 + 1, nz = z1 - z0 + 1;
+		var solid = new byte[nx * ny * nz];
+		var blockSource = new byte[nx * ny * nz];
+		for (int iz = 0; iz < nz; iz++)
+			for (int iy = 0; iy < ny; iy++)
+				for (int ix = 0; ix < nx; ix++)
+				{
+					int vx = x0 + ix, vy = y0 + iy, vz = z0 + iz;
+					int m = SampleChunkMaterial(world, nNeighborQuery, vx, vy, vz);
+					int idx = ix + nx * (iy + ny * iz);
+					solid[idx] = (byte)(m != 0 ? 1 : 0);
+					blockSource[idx] = SampleChunkBlockLight(world, nNeighborQuery, vx, vy, vz);
+				}
+		bool isTopSection = (y1 >= ch - 1);
+		// No hand-off neighbours: a torch is a single voxel, so the adjacent
+		// section's light is fully determined by its own sources + sky. (The
+		// adjacent section's light reaching yet another chunk is out of range for
+		// a single torch; the async full rebuild re-converges the far edge.)
+		int maxL = world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel;
+		var (light, _) = SkyLight.ComputeSection(solid, blockSource, nx, ny, nz, isTopSection,
+			(_, _, _) => (null, 0, 0, 0), maxL);
+		return (light, nx, ny, nz);
 	}
 
 	/// <summary>
@@ -1326,12 +1391,12 @@ public partial class VoxelChunk : Node3D
 	/// CROSS-CHUNK torch light, PER-SECTION: recompute this chunk's BORDER
 	/// SECTIONS (the ones that hand off light from a neighbouring chunk at the
 	/// shared chunk border) so a torch placed in a neighbour lights this chunk's
-	/// border sections THIS frame. The torch's BlockLight is already in this
-	/// chunk's section block arrays (EnsureSectionLight reads the live chunk
-	/// data, which includes the torch's level written by SetVoxel), so no patch
-	/// is needed — we just drop the affected sections' cached fields and
-	/// re-solve them (the hand-off pulls the torch's light in). Returns the
-	/// sub-cells to re-mesh (one per recomputed section).
+	/// border sections THIS frame. The torch's BlockLight is in the NEIGHBOUR
+	/// chunk's data, not this one — so this chunk's border sections receive the
+	/// light via the cross-chunk hand-off (ComputeSectionFieldThrowaway solves the
+	/// adjacent chunk's section from the torch's own data). We drop the affected
+	/// border sections' cached fields and re-solve them. Returns the sub-cells to
+	/// re-mesh (one per recomputed section).
 	/// </summary>
 	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeLightFromSourceSection(
 		VoxelWorld world, int srcWorldX, int srcWorldY, int srcWorldZ)
@@ -1339,44 +1404,47 @@ public partial class VoxelChunk : Node3D
 		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
 		int cs = world.ChunkSizeXZ, ch = world.ChunkHeight;
 		int sX = SecsPerAxisX(cs), sY = SecsPerAxisY(ch), sZ = SecsPerAxisX(cs);
-		// The torch's world position relative to THIS chunk's origin.
+		// The torch's world position relative to THIS chunk's origin (it is in a
+		// neighbour chunk, so it is just outside one of this chunk's faces/corners).
 		int localX = srcWorldX - Coord.X * cs;
 		int localZ = srcWorldZ - Coord.Y * cs;
-		// Which border face is the torch on? The torch is in a NEIGHBOUR chunk, so
-		// it's just outside one of this chunk's faces. The sections on that face
-		// (within one light-range of the torch's local position) are the ones that
-		// hand off the light. Recompute the border sections along the face the
-		// torch is on, in a band around the torch's position.
+		// Which side(s) of this chunk is the torch on? For a face neighbour it is on
+		// exactly one side; for a diagonal neighbour it is on a corner (two sides).
 		bool onWest = localX < 0, onEast = localX >= cs;
 		bool onNorth = localZ < 0, onSouth = localZ >= cs;
-		// The band of sections (in XZ) that the torch's light can reach on the
-		// border: within one light-range of the torch's local XZ.
-		int band = System.Math.Max(1, (world.MaxLightLevel < 1 ? 1 : world.MaxLightLevel) / 16 + 1);
+		// The border section's index on the face the torch is on (the torch's section
+		// coordinate clamped into this chunk's grid). For a corner the torch is on two
+		// faces; the border section must sit at the intersection of BOTH.
 		int torchSecX = System.Math.Clamp(localX / 16, 0, sX - 1);
 		int torchSecZ = System.Math.Clamp(localZ / 16, 0, sZ - 1);
+		// The band of sections (in XZ) the torch's light can reach on the border.
+		// Light reaches MaxPropagationRadius (<=15) voxels, so the band is at most
+		// 1-2 sections wide around the torch's border position.
+		int band = System.Math.Max(1, VoxelWorld.MaxPropagationRadius / 16 + 1);
 		for (int sx = 0; sx < sX; sx++)
 			for (int sz = 0; sz < sZ; sz++)
 				for (int sy = 0; sy < sY; sy++)
 				{
-					// Only border sections on the face the torch is on, within the band.
-					bool isBorderFace = false;
-					if (onWest && sx == 0) isBorderFace = true;
-					if (onEast && sx == sX - 1) isBorderFace = true;
-					if (onNorth && sz == 0) isBorderFace = true;
-					if (onSouth && sz == sZ - 1) isBorderFace = true;
-					if (!isBorderFace) continue;
+					// The section must be on the face(s) the torch is on. A face
+					// neighbour: one condition. A corner neighbour: the section must
+					// be at the intersection of both faces (AND, not OR).
+					bool onCorrectFace = true;
+					if (onWest && sx != 0) onCorrectFace = false;
+					if (onEast && sx != sX - 1) onCorrectFace = false;
+					if (onNorth && sz != 0) onCorrectFace = false;
+					if (onSouth && sz != sZ - 1) onCorrectFace = false;
+					if (!onCorrectFace) continue;
+					// Within the XZ band around the torch's border position.
 					if (System.Math.Abs(sx - torchSecX) > band || System.Math.Abs(sz - torchSecZ) > band) continue;
 					// The section's Y must overlap the torch's Y (within a light range).
-					if (System.Math.Abs(sy * 16 + 8 - srcWorldY) > world.MaxLightLevel + 16) continue;
+					if (System.Math.Abs(sy * 16 + 8 - srcWorldY) > VoxelWorld.MaxPropagationRadius + 16) continue;
 					int key = sx + sX * (sy + sY * sz);
 					_sectionLight.Remove(key); // drop the stale field so it recomputes
-					var (x0, _, y0, _, z0, _) = VoxelWorld.CellBoundsStatic(sx * 16, sy * 16, sz * 16, cs, ch);
-					_ = x0; _ = y0; _ = z0;
 					changed.Add(VoxelWorld.CellOf(sx * 16, sy * 16, sz * 16));
 				}
-		// Recompute the affected sections (the hand-off pulls the torch's light).
-		// (EnsureSectionLight is called here so the fields are fresh before the
-		// caller re-meshes; RebuildCellsFromSection also ensures them.)
+		// Recompute the affected border sections. The cross-chunk hand-off inside
+		// EnsureSectionLight solves the adjacent chunk's section (from the torch's
+		// own data) and hands the light off at the shared border.
 		var _snap = world.SnapshotNeighbours(Coord, includeCentre: true);
 		System.Func<Vector2I, ChunkData> _nq = c => _snap.TryGetValue(c, out ChunkData d) ? d : null;
 		foreach (var cell in changed)
