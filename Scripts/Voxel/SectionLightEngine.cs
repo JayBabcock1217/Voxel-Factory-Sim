@@ -179,7 +179,35 @@ public sealed class SectionLightEngine
 		long key = SectionKey(chunkX, chunkY, secX, secY, secZ);
 		_solid[key] = solid;
 		_sources[key] = sources;
-		_fields[key] = light;
+		// MAX the incoming light against the EXISTING field (don't replace or
+		// clobber darker). The incoming `light` is the wide field's converged
+		// light (the authoritative lower bound — the full flood fill reads the
+		// torch from the live chunk data). The EXISTING field may hold a HIGHER
+		// value from the instant path's BFS (a torch's glow that propagated via
+		// the BFS but whose chunk's wide field was last re-baked before the
+		// torch was placed). MAX gives the correct combined light: the wide
+		// field's value where it's brighter, the engine's value where it's
+		// brighter. Applied CONSISTENTLY on both sides of every chunk border,
+		// the two chunks' engine fields still AGREE at the shared border voxel
+		// (no seam), and the engine is never clobbered darker than the wide
+		// field (no blackening). A fresh section (no existing field) just takes
+		// `light`.
+		if (_fields.TryGetValue(key, out int[] existing))
+		{
+			for (int i = 0; i < existing.Length && i < light.Length; i++)
+			{
+				if (light[i] > existing[i])
+				{
+					existing[i] = light[i];
+				}
+			}
+			// Keep the existing array (it now holds the max); solid/sources are
+			// refreshed from the live data (always post-edit, so safe to replace).
+		}
+		else
+		{
+			_fields[key] = light;
+		}
 	}
 
 	/// <summary>
@@ -901,7 +929,30 @@ public sealed class SectionLightEngine
 								// Raw level from the normalized wide field (the flood fill's integer level).
 								int raw = System.Math.Clamp(
 									(int)System.Math.Round(wideLight[g] * maxLight), 0, maxLight);
-								field[idx] = raw;
+								// MAX, not overwrite: the wide field is the AUTHORITATIVE
+								// LOWER BOUND (the full flood fill over the wide volume,
+								// which reads the torch from the live chunk data and
+								// carries the glow to the border). The engine (the instant
+								// path's BFS) can be BRIGHTER in areas the wide field
+								// hasn't re-baked yet (a torch's glow that propagated via
+								// the BFS but whose chunk's wide field was last re-baked
+								// before the torch was placed). Taking MAX gives the
+								// correct combined light: the wide field's value where it's
+								// brighter (converged), the engine's value where it's
+								// brighter (instant glow). Crucially, MAX is applied
+								// CONSISTENTLY on both sides of every chunk border (both
+								// chunks' convergence passes MAX their engine against
+								// their own wide field, and both wide fields read the same
+								// torch from the live data), so the two chunks' engine
+								// fields still AGREE at the shared border voxel — no seam —
+								// while the engine is never clobbered darker than the wide
+								// field (no blackening of areas the wide field is stale for).
+								// (A pure overwrite blackened large portions of a chunk
+								// outside the torch's radius when the wide field was re-baked
+								// before the torch was in the data; a pure MAX-against-BFS
+								// kept the 1-level border seam. MAX-against-wide is the
+								// middle ground that fixes both.)
+								field[idx] = field[idx] > raw ? field[idx] : raw;
 							}
 				}
 	}

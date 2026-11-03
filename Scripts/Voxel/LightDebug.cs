@@ -307,4 +307,33 @@ public static class LightDebug
 			GD.Print($"[LightDebug]   note: {solid} solid-voxel blocks (expected for terrain — the light is hitting blocks)");
 		}
 	}
+
+	/// <summary>
+	/// Logs a chunk-border light seam: the engine's light and the wide field's
+	/// light at a border voxel disagree by more than a level. This is the
+	/// "harsh shadow line on chunk edges" diagnostic — if the engine's per-chunk
+	/// fields disagree at the shared border, the mesh shows a hard light
+	/// transition exactly on the chunk edge. Rate-limited: at most one line per
+	/// 500 border samples so a seam doesn't flood the log.
+	/// </summary>
+	private static int _borderSeamCount;
+	public static void LogBorderSeam(Vector2I chunk, int lx, int ly, int lz, int engineRaw, int wideRaw, bool fromEngine)
+	{
+		if (!Enabled)
+		{
+			return;
+		}
+		_borderSeamCount++;
+		if (_borderSeamCount % 500 != 1)
+		{
+			return; // rate-limit: 1 line per 500 border seams
+		}
+		// fromEngine: the section is REGISTERED, so the mesh uses the ENGINE's
+		// light (engineRaw) for this voxel. The wide field (wideRaw) is only a
+		// fallback for unregistered sections. A seam with fromEngine=true means
+		// the ENGINE and the WIDE FIELD disagree at the border — the engine is
+		// the authoritative (rendered) value, and the wide field is the stale
+		// one (it doesn't carry the torch's glow to the border yet).
+		GD.Print($"[LightDebug]   BORDER SEAM chunk ({chunk.X},{chunk.Y}) local ({lx},{ly},{lz}): rendered(engine)={engineRaw} wide={wideRaw} (diff {System.Math.Abs(engineRaw - wideRaw)}) [section {(fromEngine ? "registered→engine" : "unregistered→wide")}");
+	}
 }

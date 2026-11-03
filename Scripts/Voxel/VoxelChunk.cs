@@ -1176,6 +1176,41 @@ public partial class VoxelChunk : Node3D
 		{
 			raw = Math.Min(engine.SampleSource(wx, wy, wz, cs), maxLight);
 		}
+		// DEBUG: at a chunk border, compare the engine's light to the wide field's
+		// light. A disagreement here is the "harsh shadow line on chunk edges" bug
+		// — the two chunks' engine fields disagree at the shared border voxel.
+		// Only logs when LightDebug.Enabled AND the voxel is on a chunk border AND
+		// the two values differ by more than a level (sub-level noise is from the
+		// normalized 0..1 wide field rounding, not a real seam). GUARD: the local
+		// coords must be in-bounds (0..cs-1, 0..ch-1) — an out-of-bounds local
+		// coord (e.g. lx=16 when cs=16) computes a wide index g that reads PAST
+		// the end of the field, giving a bogus wide=0 and a garbage engine value
+		// (the "BORDER SEAM ... local (16,138,0): engine=30 wide=0" false alarm).
+		if (LightDebug.Enabled && (lx == 0 || lx == cs - 1 || lz == 0 || lz == cs - 1)
+			&& lx >= 0 && lx < cs && ly >= 0 && ly < ch && lz >= 0 && lz < cs
+			&& _cachedLightField != null)
+		{
+			int lpx2 = 2 * cs + 2 * maxLight + 2;
+			int half = lpx2 / 2 - 1;
+			int g = (lx + half) + lpx2 * ((ly + 1) + (ch + 2) * (lz + half));
+			if (g >= 0 && g < _cachedLightField.Length)
+			{
+				int wideRaw = Math.Clamp((int)System.Math.Round(_cachedLightField[g] * maxLight), 0, maxLight);
+				if (System.Math.Abs(raw - wideRaw) > 1)
+				{
+					// renderedRaw = the value the MESH actually uses for this
+					// voxel (the engine's raw, which is what SampleSectionLight
+					// returns). wideRaw is the wide field's value. If renderedRaw
+					// == engine raw (it always is — the engine is authoritative
+					// for registered sections), the rendered seam comes from the
+					// ENGINE disagreeing with the wide field; the wide field is
+					// the stale one. If the section were unregistered, this
+					// method would have returned null and the wide field would be
+					// used instead (logged separately below).
+					LightDebug.LogBorderSeam(Coord, lx, ly, lz, raw, wideRaw, true);
+				}
+			}
+		}
 		return raw / (float)maxLight;
 	}
 
@@ -1214,6 +1249,24 @@ public partial class VoxelChunk : Node3D
 				int g = (lx + half) + lpx2 * ((ly + 1) + (ch + 2) * (lz + half));
 				if (g >= 0 && g < _cachedLightField.Length)
 				{
+					// DEBUG: at a chunk border, log when an UNREGISTERED section
+					// falls back to the wide field. If the wide field here is
+					// dark (no torch glow) while the neighbouring chunk's
+					// registered section is lit, the mesh shows a hard seam
+					// exactly on the border — the unregistered side uses the
+					// stale wide field, the registered side uses the engine.
+					// GUARD: in-bounds local coords only (same reason as
+					// SampleSectionLight's guard).
+					if (LightDebug.Enabled && (lx == 0 || lx == cs - 1 || lz == 0 || lz == cs - 1)
+						&& lx >= 0 && lx < cs && ly >= 0 && ly < ch && lz >= 0 && lz < cs)
+					{
+						float wv = _cachedLightField[g];
+						if (wv > 0.02f)
+						{
+							LightDebug.LogBorderSeam(Coord, lx, ly, lz,
+								Math.Clamp((int)System.Math.Round(wv * maxLight), 0, maxLight), 0, false);
+						}
+					}
 					return _cachedLightField[g];
 				}
 			}
@@ -1477,6 +1530,45 @@ public partial class VoxelChunk : Node3D
 			}
 		}
 		_regionNodes.Clear();
+	}
+
+	/// <summary>
+	/// Re-meshes EVERY fine sub-cell of this chunk, sampling per-vertex light
+	/// from the per-section light engine (the authoritative post-edit light),
+	/// and applies the results to the sub-cell nodes. Called by
+	/// <see cref="ApplyBuildResult"/> when the section light was dirty: the
+	/// worker's prebuilt sub-cells carry a PRE-EDIT wide field (the neighbour's
+	/// data is unchanged by the torch, so its field has no torch glow), and
+	/// applying them would paint a harsh shadow line exactly on the chunk border
+	/// where the torch's glow ends. Re-meshing through the converged section
+	/// engine instead yields light consistent with the neighbouring chunk's
+	/// instant-path remesh, so the border is continuous.
+	///
+	/// This is the safe whole-chunk remesh: every sub-cell is rebuilt, so no
+	/// sub-cell is left on a different (stale) light source. It only runs for a
+	/// chunk whose section light is dirty (the edited chunk + the neighbour(s)
+	/// whose glow was touched by the instant path's BFS), never for an ordinary
+	/// terrain rebuild (no light change -> the worker's meshes are applied as
+	/// usual, and the engine holds no light the field lacks).
+	/// </summary>
+	public void RebuildAllSubCellsFromSectionEngine()
+	{
+		if (World == null || !DataReady || _cachedLightField == null)
+		{
+			return;
+		}
+		int cs = World.ChunkSizeXZ, ch = World.ChunkHeight;
+		var snapshot = World.SnapshotNeighbours(Coord, includeCentre: true);
+		for (int cxx = 0; cxx < cs; cxx += VoxelWorld.CellSizeX)
+		{
+			for (int cyy = 0; cyy < ch; cyy += VoxelWorld.CellSizeY)
+			{
+				for (int czz = 0; czz < cs; czz += VoxelWorld.CellSizeZ)
+				{
+					RebuildSubCell(World, cxx, cyy, czz, snapshot);
+				}
+			}
+		}
 	}
 
 	/// <summary>
@@ -1833,6 +1925,16 @@ public partial class VoxelChunk : Node3D
 		// applied" mark is stale — clear it so the NEXT edit re-runs the instant
 		// path and the budget can skip it again.
 		_instantSatisfied = false;
+		// Was the section light dirty BEFORE this build (an instant edit wrote
+		// light — a torch placed/broken — into the section engine that the wide
+		// field doesn't hold)? Captured before the convergence pass below clears
+		// it. When true, this build's worker baked a PRE-EDIT wide field (the
+		// neighbour's data is unchanged by the torch) and its prebuilt sub-cells
+		// carry that pre-edit light — applying them would clobber the instant
+		// path's correct glow with a dark border (the "harsh shadow line on the
+		// chunk edge" bug). Instead we re-mesh every sub-cell through the
+		// (now-converged) section engine below.
+		bool sectionLightWasDirty = _sectionLightDirty;
 		bool appliedMesh;
 
 		// Option B (sub-cell mode): wire up the prebuilt sub-cell results. The
@@ -1851,26 +1953,47 @@ public partial class VoxelChunk : Node3D
 				// only a temporary coarsening) so the fine sub-cells are the
 				// sole owners of the volume again.
 				FreeRegionNodes();
-				foreach (var (cxx, cyy, czz, mesh, col) in _pendingSubCells)
+				if (sectionLightWasDirty)
 				{
-					var node = GetOrCreateSubCell(cxx, cyy, czz);
-					node.Mesh.Mesh = mesh;
-					// Collision is stashed, not attached: the per-frame
-					// collision-radius gate (SetSubCellCollisionEnabled) only
-					// creates the body + attaches the shape while this chunk is
-					// near the player. This is what keeps the total Jolt body
-					// count under the cap (far chunks have no bodies).
-					if (mesh != null && col != null && col.Count > 0)
+					// The instant edit wrote block light (a torch) into the
+					// section engine that this build's wide field doesn't hold
+					// (for a NEIGHBOUR chunk its data is unchanged, so its baked
+					// field has no torch glow). The worker's _pendingSubCells
+					// carry that PRE-EDIT light, and applying them would paint a
+					// harsh shadow line exactly on the chunk border where the
+					// glow ends. Re-mesh every sub-cell through the section
+					// engine instead — it already holds the post-edit glow (the
+					// instant path's BFS wrote it, and the wide field only ever
+					// MAXes it upward, so it is never clobbered darker), and it
+					// matches the neighbouring chunk's instant-path remesh, so
+					// the border is continuous. The convergence pass later in
+					// this method re-seeds the engine from the post-edit field,
+					// keeping the engine and the field in agreement.
+					RebuildAllSubCellsFromSectionEngine();
+				}
+				else
+				{
+					foreach (var (cxx, cyy, czz, mesh, col) in _pendingSubCells)
 					{
-						var shape = new ConcavePolygonShape3D();
-						shape.SetFaces(col.ToArray());
-						node.BuiltShape = shape;
-						node.HasGeometry = true;
-					}
-					else
-					{
-						node.BuiltShape = null;
-						node.HasGeometry = false;
+						var node = GetOrCreateSubCell(cxx, cyy, czz);
+						node.Mesh.Mesh = mesh;
+						// Collision is stashed, not attached: the per-frame
+						// collision-radius gate (SetSubCellCollisionEnabled) only
+						// creates the body + attaches the shape while this chunk is
+						// near the player. This is what keeps the total Jolt body
+						// count under the cap (far chunks have no bodies).
+						if (mesh != null && col != null && col.Count > 0)
+						{
+							var shape = new ConcavePolygonShape3D();
+							shape.SetFaces(col.ToArray());
+							node.BuiltShape = shape;
+							node.HasGeometry = true;
+						}
+						else
+						{
+							node.BuiltShape = null;
+							node.HasGeometry = false;
+						}
 					}
 				}
 				// The sub-cell shapes are live concave collision now. Flag the
@@ -1909,17 +2032,31 @@ public partial class VoxelChunk : Node3D
 		// delta's per-chunk raw-level state was already re-synced (from the
 		// NORMALIZED field, before the curve) on the build thread, so nothing
 		// to do here.
-		if (_pendingLight != null)
+		//
+		// EXCEPTION: if this chunk's section light is DIRTY (the instant edit
+		// path ran — a torch was placed/broken), the INSTANT path already
+		// patched the cached wide field correctly (RecomputeLightAtSource ran
+		// the Starlight delta on the wide field, reading the torch from the
+		// live chunk data). The async build's re-baked field is STALE: its
+		// snapshot was taken at build LAUNCH (before the edit), so it does not
+		// include the torch's glow. Committing it would clobber the instant
+		// path's correct patch with the stale (dark) field — the "large
+		// portions of a chunk outside the torch's radius get turned completely
+		// black" bug. Skip the commit when the section light is dirty; the
+		// patched field (from the instant path) is the correct one. The
+		// convergence pass below re-registers the engine from the (patched)
+		// field, so the engine and field agree.
+		if (_pendingLight != null && !_sectionLightDirty)
 		{
 			_cachedLightField = _pendingLight;
 			_cachedBlockLit = _pendingBlockLit;
 			_cachedWideSolid = _pendingWideSolid;
 			_cachedWideBlock = _pendingWideBlock;
-			_pendingLight = null;
-			_pendingBlockLit = null;
-			_pendingWideSolid = null;
-			_pendingWideBlock = null;
 		}
+		_pendingLight = null;
+		_pendingBlockLit = null;
+		_pendingWideSolid = null;
+		_pendingWideBlock = null;
 
 		// CONVERGENCE PASS (the one place the section engine and the wide
 		// field agree). This chunk's wide field was JUST re-baked by this build

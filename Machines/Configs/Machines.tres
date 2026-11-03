@@ -2,8 +2,8 @@
 
 [ext_resource type="Resource" uid="uid://ds32bat8tkrjs" path="res://Machines/Conveyor.tres" id="1_2aiml"]
 [ext_resource type="Script" uid="uid://d1020urv3ilhg" path="res://Scripts/Machines/MachineDefConfig.cs" id="1_q1vid"]
-[ext_resource type="Resource" path="res://Machines/Crafter.tres" id="2_crafter"]
-[ext_resource type="Resource" path="res://Machines/PowerSource.tres" id="3_powersrc"]
+[ext_resource type="Resource" uid="uid://c4n3760h4uyrn" path="res://Machines/Crafter.tres" id="2_crafter"]
+[ext_resource type="Resource" uid="uid://b2kcdyj2m3sa0" path="res://Machines/PowerSource.tres" id="3_powersrc"]
 
 [resource]
 script = ExtResource("1_q1vid")

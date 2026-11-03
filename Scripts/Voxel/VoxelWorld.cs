@@ -1793,6 +1793,30 @@ public partial class VoxelWorld : Node3D
 						dbgOldSource, (int)_patchLight,
 						lightChangedSections,
 						_sectionLight, ChunkSizeXZ, ChunkHeight, (int)_patchLight);
+					// WIDE-FIELD PATCH (the fix for the chunk-border light seam):
+					// the section-engine BFS above wrote the new light into the
+					// section fields, but the chunk's cached WIDE field
+					// (_cachedLightField) still holds the PRE-edit light — it is
+					// only re-baked by the async full rebuild, which runs on a
+					// LATER frame (the budget loop ran before this instant path
+					// this frame). Until then the engine and the wide field
+					// DISAGREE at the chunk border (the engine has the torch's
+					// glow, the wide field doesn't), and the convergence pass's
+					// re-seed + the sub-cell mesh's unregistered-section fallback
+					// both read the wide field — a harsh shadow line exactly on
+					// the chunk edge. Patch the torch into the wide field NOW
+					// (RecomputeLightAtSource runs the Starlight delta centred on
+					// the edited voxel, bit-identical to the full flood fill over
+					// the field) so the engine and the wide field agree from the
+					// moment of the edit. The async full rebuild still runs (the
+					// authoritative convergence pass) — it re-bakes the wide field
+					// from the post-edit data and re-registers the section fields,
+					// so this patch is just the instant hand-off that keeps the
+					// two in sync in the meantime.
+					if (_patchWide >= 0)
+					{
+						instantChunk.RecomputeLightAtSource(this, lpx, lpy, lpz, _patchWide);
+					}
 					// Map the changed sections to the sub-cells to re-mesh.
 					foreach (var (chX, chY, secX, secY, secZ) in lightChangedSections)
 					{
