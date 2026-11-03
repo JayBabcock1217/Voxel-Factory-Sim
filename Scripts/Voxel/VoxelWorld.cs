@@ -514,6 +514,16 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	[Export]
 	public bool DebugGenTiming { get; set; } = false;
+	/// <summary>
+	/// When enabled, logs the full light state on every voxel edit and every
+	/// full-rebuild convergence pass to the console as <c>[LightDebug]</c>
+	/// lines (the edit's old/new solid + source, the BFS's changed sections,
+	/// and a histogram comparing the section engine's light to the wide field).
+	/// This is the tool for tracking down "weird lighting issues". Off by
+	/// default; purely diagnostic. Mirrors <see cref="LightDebug.Enabled"/>.
+	/// </summary>
+	[Export]
+	public bool DebugLight { get; set; } = false;
 
 	// ------------------------------------------------------------------
 
@@ -924,6 +934,12 @@ public partial class VoxelWorld : Node3D
 
 		// VoxelTool (and any other systems) can locate us via this group.
 		AddToGroup("voxel_world");
+
+		// The DebugLight export drives the static LightDebug.Enabled flag (the
+		// diagnostic reads the static, the world reads the export). Syncing here
+		// means toggling the export in the inspector (or the scene) turns the
+		// [LightDebug] logging on/off.
+		LightDebug.Enabled = DebugLight;
 
 		// Seed the biome .tres if the export is still the empty in-memory
 		// default: a fresh project has no saved biome file, so writing the code
@@ -1742,6 +1758,11 @@ public partial class VoxelWorld : Node3D
 					int srcWX = instantChunk.Coord.X * ChunkSizeXZ + _instantEditLocal.X;
 					int srcWY = _instantEditLocal.Y;
 					int srcWZ = instantChunk.Coord.Y * ChunkSizeXZ + _instantEditLocal.Z;
+					// DEBUG: capture the PRE-edit engine state (old solid + source)
+					// before UpdateVoxel overwrites it, so the edit log can show
+					// old -> new. (LightDebug is a no-op when disabled.)
+					int dbgOldSolid = _sectionLight.SampleSolid(srcWX, srcWY, srcWZ, ChunkSizeXZ);
+					int dbgOldSource = _sectionLight.SampleSource(srcWX, srcWY, srcWZ, ChunkSizeXZ);
 					// Update the section engine's solid/air + source state at the
 					// edited voxel (so the BFS sees the new state).
 					_sectionLight.UpdateVoxel(srcWX, srcWY, srcWZ, ChunkSizeXZ,
@@ -1760,6 +1781,18 @@ public partial class VoxelWorld : Node3D
 						lightChangedSections = _sectionLight.PropagateDecrease(
 							srcWX, srcWY, srcWZ, oldLevel, ChunkSizeXZ, ChunkHeight);
 					}
+					// DEBUG: log the edit's light-relevant state + BFS result +
+					// section registration check, and record the edit's world
+					// position on the chunk so the convergence pass
+					// (ApplyBuildResult) can center its histogram on it.
+					instantChunk.SetDebugEditPos(new Vector3I(srcWX, srcWY, srcWZ));
+					LightDebug.LogEdit(
+						_patchLight > 0 ? "source-added" : (_patchMat == 0 ? "source-removed" : "solid-only"),
+						new Vector3I(srcWX, srcWY, srcWZ),
+						dbgOldSolid, (int)(_patchMat != 0 ? 1 : 0),
+						dbgOldSource, (int)_patchLight,
+						lightChangedSections,
+						_sectionLight, ChunkSizeXZ, ChunkHeight, (int)_patchLight);
 					// Map the changed sections to the sub-cells to re-mesh.
 					foreach (var (chX, chY, secX, secY, secZ) in lightChangedSections)
 					{

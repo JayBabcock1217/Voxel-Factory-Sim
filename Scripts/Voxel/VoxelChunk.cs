@@ -1251,6 +1251,20 @@ public partial class VoxelChunk : Node3D
 	// flag is always cleared in the same frame it's set.
 	private bool _sectionLightDirty;
 
+	// The WORLD position of the most recent edit to this chunk (for the
+	// LightDebug convergence histogram — it centers the light comparison on
+	// the edited voxel). Set by SetDebugEditPos from the instant-edit path.
+	// Only read when LightDebug.Enabled, so it's inert otherwise.
+	private Vector3I _debugEditWorldPos;
+
+	/// <summary>
+	/// Records the world position of the most recent edit to this chunk, for
+	/// the LightDebug convergence histogram. Called by the instant-edit path
+	/// (VoxelWorld._Process) right after the BFS. No-op for behaviour; only
+	/// read when LightDebug.Enabled.
+	/// </summary>
+	public void SetDebugEditPos(Vector3I worldPos) => _debugEditWorldPos = worldPos;
+
 	private int RegionKey(int cx, int cy, int cz)
 		=> (cx / VoxelWorld.CellSizeX) + VoxelWorld.CellsPerChunkX * ((cy / VoxelWorld.CellSizeY) + VoxelWorld.CellsPerChunkY * (cz / VoxelWorld.CellSizeZ));
 
@@ -1745,13 +1759,13 @@ public partial class VoxelChunk : Node3D
 			RegisterSectionsWithEngine();
 		}
 		// On the FIRST build the wide field is freshly computed from the
-		// current data — re-register the section fields from it and clear the
-		// pending-edit flag (there's no prior edit to preserve). On a CACHED
-		// field (an edit), the field is STALE (it predates the edit's
-		// block-light changes), so do NOT re-register from it (that would
-		// clobber the engine's torch light) and do NOT clear the flag (the
-		// async full rebuild is the one that re-bakes the field from the
-		// post-edit data and re-registers).
+		// current data (no prior edit) — register the section fields from it
+		// and clear the pending-edit flag (there's nothing to preserve). On a
+		// CACHED field (an edit), the field is STALE (it predates the edit's
+		// block-light changes), so leave the flag set: the async full rebuild's
+		// convergence pass (ApplyBuildResult) re-bakes the field from the
+		// post-edit data, runs the delta, and re-seeds the engine — that is
+		// the one place the engine and the field agree.
 		if (!hasCachedLight)
 		{
 			_sectionLightDirty = false;
@@ -1907,33 +1921,110 @@ public partial class VoxelChunk : Node3D
 			_pendingWideBlock = null;
 		}
 
-		// Register this chunk's sections with the per-section light engine (the
-		// instant-edit light path). The full rebuild just re-baked the wide
-		// field (authoritative light); extract this chunk's 16×16×16 sections
-		// from it and register them so the instant-edit path can propagate
-		// light changes across section borders.
+		// CONVERGENCE PASS (the one place the section engine and the wide
+		// field agree). This chunk's wide field was JUST re-baked by this build
+		// from the chunk's LIVE ChunkData (which the instant-edit path keeps up
+		// to date), so it is the AUTHORITATIVE light: sky + block light, all
+		// sources, converged. Make the section engine match it:
 		//
-		// SKIP the re-registration when the section engine holds pending
-		// block-light edits (a torch was placed/broken after this build
-		// launched). The build's wide field was baked from the pre-edit data, so
-		// re-registering from it would CLOBBER the engine's torch light with
-		// the pre-edit values. The engine's fields already hold the correct
-		// (BFS-propagated) light; the next full rebuild (after the edit's
-		// own full rebuild converges) will re-bake from the post-edit data.
-		// Only re-register (and clear the flag) when there are no pending
-		// edits; when the engine holds pending block-light edits, SKIP the
-		// re-registration (don't clobber the torch light) and KEEP the flag set
-		// so the budget launches a fresh rebuild (post-edit data) that
-		// converges.
-		if (!_sectionLightDirty)
+		//  1. Re-register this chunk's sections from its OWN field. Registering
+		//     from own data is ALWAYS safe — it is the definition of the engine
+		//     converging. (The "neighbour's rebuild clobbers this chunk's
+		//     sections" scenario does not exist in this codebase: a full
+		//     rebuild only registers ITS OWN sections, never a neighbour's.
+		//     Neighbour sections get the torch's light two ways: the instant
+		//     path's cross-chunk BFS writes it immediately, and each
+		//     neighbour's own rebuild bakes it in because the wide volumes
+		//     read the neighbour's LIVE data, which includes the torch.)
+		//  2. Run the Starlight delta over the whole field, centred on this
+		//     chunk's edited voxel (when known). The field is post-edit EXCEPT
+		//     for this one voxel: the build read it at LAUNCH (pre-edit), so
+		//     its solid + block-light state is the pre-edit one. The delta
+		//     patches the cached wide volumes at that voxel (post-edit state)
+		//     and propagates the change — making the field fully post-edit.
+		//     For non-light-source edits nothing propagates (the delta sees
+		//     no source and no solid change to propagate: it just patches),
+		//     which costs one queue pass and keeps the code uniform.
+		//  3. Re-seed the engine's LIGHT from the converged field (solid and
+		//     sources already came from the live chunk data in step 1, so they
+		//     are already post-edit). After this the engine and the field are
+		//     derived from the same post-edit data and AGREE — the instant
+		//     path's BFS (which reads/writes the engine) now starts from the
+		//     converged state, and the mesh's per-vertex light (the engine)
+		//     and the wide field match.
+		//
+		// This replaces the old _sectionLightDirty skip: the skip existed
+		// because the build's field was stale (pre-edit) and re-registering
+		// from it clobbered the engine's torch light. With the delta the
+		// field is post-edit by the time we register, so the skip is
+		// unnecessary — and skipping was itself a bug: a build that ran while
+		// the flag was set left the field stale and the engine converged to
+		// the STALE state, so later rebuilds converged to the wrong light
+		// (the "lighting gets messed up as neighbouring chunks update"
+		// behaviour). The convergence pass now ALWAYS runs, so the engine
+		// always ends up agreeing with the freshest field.
+		if (_cachedLightField != null && _cachedWideSolid != null)
 		{
+			int cs = World.ChunkSizeXZ;
+			int ch = World.ChunkHeight;
+			int maxLight = World.MaxLightLevel < 1 ? 1 : World.MaxLightLevel;
+			int lpx = 2 * cs + 2 * maxLight + 2;
+			int lpy = ch + 2;
+			int lpz = 2 * cs + 2 * maxLight + 2;
 			RegisterSectionsWithEngine();
+			// Patch this chunk's edited voxel into the field and propagate the
+			// delta (no-op when the edit's light-relevant state didn't change).
+			// The delta ONLY runs when this chunk has a pending patch — i.e. it
+			// is the chunk that was EDITED (the instant path called
+			// SetPatchVoxel on it). Every other chunk's rebuild re-bakes its
+			// field from its own live data and has no patch, so no delta.
+			bool dbgDeltaRan = false;
+			int dbgDeltaChanged = 0;
+			bool hasPatch = _hasPatch && _patchWideIndex >= 0;
+			if (hasPatch)
+			{
+				dbgDeltaRan = true;
+				dbgDeltaChanged = SkyLight.ComputeDelta(_cachedWideSolid, _cachedWideBlock,
+					_cachedLightField, _cachedBlockLit,
+					lpx, lpy, lpz,
+					_patchWideIndex, MaxLightFor(), MakeLightCurve(),
+					EnsureDeltaRaw(_cachedLightField.Length)).Count;
+			}
+			// The engine's LIGHT must match the converged field (the delta may
+			// have changed it). Solid + sources were registered from the live
+			// chunk data (post-edit) and don't need re-seeding.
+			World.SectionLight.ReSeedLightFromWideField(
+				Coord.X, Coord.Y, _cachedLightField,
+				lpx, lpy, lpz, cs, ch, maxLight);
+			// DEBUG: log the convergence result. Only the EDITED chunk (the one
+			// with a pending patch) gets the full histogram; unrelated chunks
+			// get a single line. The histogram compares the engine's light
+			// (just re-seeded) to the wide field over a box around the edited
+			// voxel; a non-zero diff means they disagree (the bug).
+			if (LightDebug.Enabled)
+			{
+				if (hasPatch)
+				{
+					// Edited chunk: full histogram + field source check.
+					int fieldSrc = _cachedWideBlock[_patchWideIndex];
+					var (eMin, eMax, fMin, fMax, diff) = LightDebug.Histogram(
+						this, _debugEditWorldPos, LightDebug.HistogramRadius,
+						cs, ch, maxLight, World.SectionLight, _cachedLightField);
+					LightDebug.LogConvergence(this, true, _debugEditWorldPos,
+						dbgDeltaRan, dbgDeltaChanged, eMin, eMax, fMin, fMax, diff, fieldSrc);
+					// Clear the patch so a later unrelated rebuild of this same
+					// chunk doesn't re-run the delta (it's already converged).
+					_hasPatch = false;
+				}
+				else
+				{
+					// Unrelated chunk: one line, no histogram.
+					LightDebug.LogConvergence(this, false, _debugEditWorldPos,
+						dbgDeltaRan, dbgDeltaChanged, 0, 0, 0, 0, 0, 0);
+				}
+			}
 		}
-		else
-		{
-			// Keep _sectionLightDirty = true: the field is stale, the engine's
-			// fields are authoritative, and a fresh rebuild is still needed.
-		}
+		_sectionLightDirty = false;
 
 		// Only clear the dirty flag when a mesh was actually applied. If the
 		// build threw (see Rebuild's catch), keep NeedsMesh true so the world's
