@@ -97,7 +97,7 @@ public partial class InventoryUI : CanvasLayer
 	// single tool). It is the debug/god-mode way to give yourself any item so
 	// you can test placement, breaking, and tool affinities without crafting.
 	private Panel _devPanel;
-	private VBoxContainer _devList;
+	private TabContainer _devTabs;
 	private readonly List<FactorySim.Items.ItemEntry> _devItems = new();
 	// Dev-pane hover tooltip: shows the item's name + description when a dev
 	// row is hovered (mirrors the recipe tooltip). The row->button map is used
@@ -417,8 +417,8 @@ public partial class InventoryUI : CanvasLayer
 		// explicit CustomMinimumSize, so the container sizes it correctly.
 		const float pad = 12f;          // panel padding (StyleBoxFlat content margin)
 		const float gap = 16f;          // HBoxContainer separation between sections
-		const float devW = 240f;        // dev pane width
-		const float craftW = 320f;      // craft pane width
+		const float devW = 320f;        // dev pane width (widened: room for item names + tabs)
+		const float craftW = 400f;      // craft pane width (widened to match)
 		float gridW = Math.Max(
 			Inventory.StorageCols, Inventory.HotbarSize) * SlotSize
 			+ (Math.Max(Inventory.StorageCols, Inventory.HotbarSize) - 1) * SlotGap;
@@ -944,13 +944,14 @@ public partial class InventoryUI : CanvasLayer
 	}
 
 	/// <summary>
-	/// Fills in the dev pane's inner content: a title, a short hint, and a
-	/// vertically scrollable list of every item in the game (all placeable
-	/// materials + all tools, from <see cref="FactorySim.Items.ItemRegistry"/>).
-	/// Each row is a button: clicking it grants one of that item into the
-	/// inventory (a full stack of the material, or a single tool). This is the
-	/// god-mode way to hand yourself any item to test placing / breaking / tool
-	/// affinities without having to craft or mine first.
+	/// Fills in the dev pane's inner content: a title and a <see
+	/// cref="TabContainer"/> with one tab per item category (Blocks / Tools /
+	/// Machines / Light). Each tab is a scrollable list of that category's items
+	/// (from <see cref="FactorySim.Items.ItemRegistry"/>); clicking a row grants
+	/// one of that item into the inventory (a full stack of the material, or a
+	/// single tool/machine). This is the god-mode way to hand yourself any item
+	/// to test placing / breaking / tool affinities without crafting or mining.
+	/// The TabContainer's top tab buttons switch between the categories.
 	///
 	/// The dev pane Panel itself is created and added to the HBox in
 	/// <see cref="BuildUi"/> (at index 0, leftmost) so the HBox child order is
@@ -959,16 +960,13 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private void BuildDevPanel()
 	{
-		const float devW = 240f;
+		const float devW = 320f;   // must match BuildUi's devW (the dev pane Panel's width)
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		float paneH = gridH + 12f;   // match the craft pane height (see BuildCrafting)
 
 		const float innerPad = 8f;
 		float innerW = devW - innerPad * 2f;
 		const float titleH = 20f;
-		const float hintH = 16f;
-		const float listTop = 6f + titleH + 4f + hintH + 4f;
-		float listH = paneH - listTop - innerPad;
 
 		var devTitle = new Label
 		{
@@ -983,55 +981,150 @@ public partial class InventoryUI : CanvasLayer
 		devTitle.AddThemeColorOverride("font_color", new Color(0.95f, 0.85f, 0.4f));
 		_devPanel.AddChild(devTitle);
 
-		var devHint = new Label
+		// Collect every item, then bucket it by category (the TabContainer pages).
+		// The ItemEntry flags decide the bucket: IsTool -> Tools, IsMachine ->
+		// Machines, LightLevel > 0 -> Light, everything else (placeable
+		// materials) -> Blocks. Future items land in a bucket automatically.
+		_devItems.Clear();
+		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig));
+		var blocks = new List<FactorySim.Items.ItemEntry>();
+		var tools = new List<FactorySim.Items.ItemEntry>();
+		var machines = new List<FactorySim.Items.ItemEntry>();
+		var light = new List<FactorySim.Items.ItemEntry>();
+		foreach (var item in _devItems)
 		{
-			Name = "DevHint",
+			if (item.IsTool) tools.Add(item);
+			else if (item.IsMachine) machines.Add(item);
+			else if (item.LightLevel > 0) light.Add(item);
+			else blocks.Add(item);
+		}
+
+		// The TabContainer: top tab buttons, one page per category. It fills the
+		// pane below the title. Each page is pinned to this size (the TabContainer
+		// leaves room for the tab bar on top, so a page is the container's size
+		// minus the bar height).
+		float tabsTopY = 6f + titleH + 4f;
+		Vector2 tabsSize = new Vector2(innerW, paneH - tabsTopY - innerPad);
+		float tabBarH = 28f; // approx tab-bar height (the page is smaller than the container)
+		_devTabs = new TabContainer
+		{
+			Name = "DevTabs",
 			LayoutMode = 3, // Position
+			Position = new Vector2(innerPad, tabsTopY),
+			Size = tabsSize,
+			TabsPosition = TabContainer.TabPosition.Top,
+		};
+		Vector2 pageSize = new Vector2(tabsSize.X, System.Math.Max(20f, tabsSize.Y - tabBarH));
+		_devTabs.AddChild(MakeDevTabPage("Blocks", blocks, pageSize));
+		_devTabs.AddChild(MakeDevTabPage("Tools", tools, pageSize));
+		_devTabs.AddChild(MakeDevTabPage("Machines", machines, pageSize));
+		_devTabs.AddChild(MakeDevTabPage("Light", light, pageSize));
+		_devPanel.AddChild(_devTabs);
+
+		BuildDevTooltip();
+	}
+
+	/// <summary>
+	/// Builds one dev-pane tab page: a titled, scrollable list of
+	/// <paramref name="items"/>. Returns the page's root node (a Panel named
+	/// after the tab, so the TabContainer uses its Name as the tab label).
+	/// Empty categories still get a page (with a "none" note) so the tab set is
+	/// stable regardless of how many items a category has.
+	/// </summary>
+	private Control MakeDevTabPage(string tabName, List<FactorySim.Items.ItemEntry> items, Vector2 pageSize)
+	{
+		var page = new Panel
+		{
+			Name = tabName,
+			LayoutMode = 3, // Position
+			// Explicitly pin the page's size. A TabContainer page is a leaf
+			// container sized to its minimum, and a ScrollContainer reports ~0
+			// minimum — so without a pinned size the page collapses to ~0x0 and
+			// its rows are drawn outside it (invisible, though hit-testable,
+			// which is why the tooltip worked). Pinned size + Disabled clip
+			// makes the rows visible no matter how Godot lays the page out.
+			Size = pageSize,
+			CustomMinimumSize = pageSize,
+			ClipChildren = Control.ClipChildrenMode.Disabled,
+		};
+
+		// The content is a VBoxContainer (the project's proven layout pattern)
+		// anchored to the page's full rect with a small inset. Using a container
+		// (not positioned children) is what actually sizes the ScrollContainer:
+		// positioned children with negative Size (the old approach) don't size,
+		// so the scroll area — and every row in it — collapsed to 0x0 (invisible
+		// but still hit-testable, which is why the tooltip worked). The VBox lays
+		// out the hint at its natural height and stretches the scroll to fill the
+		// rest, exactly like the recipe list.
+		const float pad = 6f;
+		var content = new VBoxContainer
+		{
+			Name = "Content",
+			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		content.AddThemeConstantOverride("separation", 4);
+		content.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		content.OffsetLeft = pad;
+		content.OffsetTop = pad;
+		content.OffsetRight = -pad;
+		content.OffsetBottom = -pad;
+		page.AddChild(content);
+
+		// A short hint above the list (the old dev-pane hint, now per-page).
+		var hint = new Label
+		{
+			Name = "Hint",
+			LayoutMode = 2,
+			SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
 			Text = "click = give a stack",
-			Position = new Vector2(innerPad, 6f + titleH + 4f),
-			Size = new Vector2(innerW, hintH),
 			HorizontalAlignment = HorizontalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		devHint.AddThemeFontSizeOverride("font_size", 11);
-		devHint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
-		_devPanel.AddChild(devHint);
+		hint.AddThemeFontSizeOverride("font_size", 11);
+		hint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+		content.AddChild(hint);
 
-		// Vertically scrollable list of every item. FollowFocus stretches the
-		// single VBox child to the full scroll area (same trick as the recipe
-		// list), so the rows span the pane's width.
-		var devScroll = new ScrollContainer
+		var scroll = new ScrollContainer
 		{
-			Name = "DevScroll",
-			LayoutMode = 3, // Position
-			Position = new Vector2(innerPad, listTop),
-			Size = new Vector2(innerW, listH),
+			Name = "Scroll",
+			LayoutMode = 2,
+			SizeFlagsVertical = Control.SizeFlags.ExpandFill,
 			FollowFocus = true,
 			HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled,
 		};
-		_devPanel.AddChild(devScroll);
+		content.AddChild(scroll);
 
-		_devList = new VBoxContainer
+		var list = new VBoxContainer
 		{
-			Name = "DevList",
+			Name = "List",
 			LayoutMode = 2,
 		};
-		_devList.AddThemeConstantOverride("separation", 3);
-		devScroll.AddChild(_devList);
+		list.AddThemeConstantOverride("separation", 3);
+		scroll.AddChild(list);
 
-		// Populate the list from the registry: every placeable material (from the
-		// world's material config) + every tool + every machine. Future items
-		// appear here automatically as they're added to the config / tool /
-		// machine tables. The machine config (if the world has one) lets machine
-		// rows use the user's custom definition names.
-		_devItems.Clear();
-		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig));
-		foreach (var item in _devItems)
+		if (items.Count == 0)
 		{
-			_devList.AddChild(CreateDevRow(item));
+			var empty = new Label
+			{
+				Name = "Empty",
+				LayoutMode = 2,
+				SizeFlagsHorizontal = Control.SizeFlags.ExpandFill,
+				Text = "(none)",
+				HorizontalAlignment = HorizontalAlignment.Center,
+				MouseFilter = Control.MouseFilterEnum.Ignore,
+			};
+			empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.5f, 0.55f));
+			list.AddChild(empty);
 		}
-
-		BuildDevTooltip();
+		else
+		{
+			foreach (var item in items)
+			{
+				list.AddChild(CreateDevRow(item));
+			}
+		}
+		return page;
 	}
 
 	/// <summary>
@@ -1099,17 +1192,22 @@ public partial class InventoryUI : CanvasLayer
 	/// <summary>
 	/// The dev item whose row is under <paramref name="viewportPos"/>, or null.
 	/// Mirrors <see cref="RecipeAt"/>: walks each row's ancestor chain up to the
-	/// dev panel, accumulating positions, to compute the row's on-screen rect
-	/// (robust to the ScrollContainer / VBoxContainer nesting).
+	/// TabContainer, accumulating positions, to compute the row's on-screen rect
+	/// (robust to the Page / ScrollContainer / VBoxContainer nesting). Rows in
+	/// a non-visible tab page are off-screen (or their page is hidden), so their
+	/// rects won't contain the mouse — no special handling needed.
 	/// </summary>
 	private FactorySim.Items.ItemEntry? DevItemAt(Vector2 viewportPos)
 	{
-		if (_devPanel == null || _panel == null)
+		if (_devTabs == null || _devPanel == null || _panel == null)
 		{
 			return null;
 		}
 
-		Vector2 panelOrigin = _panel.Position + _devPanel.Position;
+		// The TabContainer is the common ancestor of every row; positions are
+		// accumulated from each row up to it, then offset by the TabContainer's
+		// own on-screen position (dev panel + panel origins).
+		Vector2 tabOrigin = _panel.Position + _devPanel.Position + _devTabs.Position;
 
 		foreach (var (item, row) in _devHoverRects)
 		{
@@ -1120,13 +1218,13 @@ public partial class InventoryUI : CanvasLayer
 
 			Vector2 offset = Vector2.Zero;
 			var node = row;
-			while (node != null && node != _devPanel)
+			while (node != null && node != _devTabs)
 			{
 				offset += node.Position;
 				node = node.GetParent() as Control;
 			}
 
-			Vector2 rowTopLeft = panelOrigin + offset;
+			Vector2 rowTopLeft = tabOrigin + offset;
 			if (new Rect2(rowTopLeft, row.Size).HasPoint(viewportPos))
 			{
 				return item;
