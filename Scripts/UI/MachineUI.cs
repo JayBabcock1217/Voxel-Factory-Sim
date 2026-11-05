@@ -481,7 +481,7 @@ public partial class MachineUI : CanvasLayer
 			: _machine.Definition.Name;
 		_titleLabel.Text = name;
 
-		// Status line: power state / output.
+		// Status line: power state / output / flow direction.
 		string status = "";
 		var def = _machine.Definition;
 		if (def.PowerConsumption > 0f)
@@ -493,6 +493,15 @@ public partial class MachineUI : CanvasLayer
 		else if (def.PowerOutput > 0f)
 		{
 			status += $"Outputs {def.PowerOutput:0.#} power";
+		}
+		if (_machine is ConveyorMachine belt)
+		{
+			// A conveyor is passive (no power); show its flow direction so the
+			// player knows which way the belt carries items (front = +FlowAxis).
+			string axis = belt.FlowAxis.X != 0 ? "X" : belt.FlowAxis.Y != 0 ? "Y" : "Z";
+			string sign = (belt.FlowAxis.X != 0 ? belt.FlowAxis.X
+				: belt.FlowAxis.Y != 0 ? belt.FlowAxis.Y : belt.FlowAxis.Z) > 0 ? "+" : "−";
+			status += (status.Length > 0 ? "  ·  " : "") + $"Flows {sign}{axis}";
 		}
 		_statusLabel.Text = status;
 
@@ -563,6 +572,20 @@ public partial class MachineUI : CanvasLayer
 				inputMats.Add(recipe.Input);
 			}
 		}
+		else if (_machine is ConveyorMachine conveyor)
+		{
+			// A conveyor has no recipe: it just carries whatever is on its belt.
+			// Show a single INPUT slot and a single OUTPUT slot, both backed by
+			// the conveyor's one belt Slot (its InputBuffer == OutputBuffer ==
+			// Slot, capacity 1). Both accept any item (bound material 0) so the
+			// player can see what's on the belt and manually load/unload it.
+			// The input represents where items ENTER the belt (its back face)
+			// and the output where they LEAVE (its front face); since a belt
+			// holds at most one item, both show the same stack.
+			_recipePicker.Visible = false;
+			inputMats.Add(0); // 0 = any
+			outputMat = 0;    // any (the output slot accepts any stack)
+		}
 		else
 		{
 			_recipePicker.Visible = false;
@@ -574,11 +597,16 @@ public partial class MachineUI : CanvasLayer
 		_progressLabel.Visible = showProgress;
 
 		// Output slots: one per distinct product (a single product for both
-		// machine types).
+		// machine types). For a conveyor, outputMat stays 0 but we still want a
+		// visible output slot (the belt's item), so force one slot.
 		var outputMats = new List<int>();
 		if (outputMat > 0)
 		{
 			outputMats.Add(outputMat);
+		}
+		else if (_machine is ConveyorMachine)
+		{
+			outputMats.Add(0); // the conveyor's output slot (any item)
 		}
 
 		RebuildInputSlots(inputMats);
