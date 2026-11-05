@@ -74,6 +74,17 @@ public partial class MachineUI : CanvasLayer
 	private const float PanelInsetX = 14f;
 	private const float PanelInsetY = 12f;
 
+	// Hover tooltip for the machine's input/output slots (the inventory's own
+	// tooltip only knows about inventory slots, so the machine slots — on this
+	// layer — get their own). Shows the item name + count when hovering a
+	// populated slot, or the slot's bound material name when it is empty (so
+	// the player knows what the slot is for).
+	private Panel _tooltip;
+	private Label _tooltipName;
+	private Label _tooltipCount;
+	private int _tooltipSlotIndex = -1; // which slot is currently hovered (-1 = none)
+	private bool _tooltipIsOutput;      // whether the hovered slot is an output slot
+
 	// The slot controls + their bound materials, rebuilt whenever the recipe
 	// (and thus the slot count / mapping) changes.
 	private readonly List<Control> _inputSlots = new();
@@ -271,6 +282,54 @@ public partial class MachineUI : CanvasLayer
 		};
 		_closeButton.Pressed += Close;
 		_contentBox.AddChild(_closeButton);
+
+		BuildTooltip();
+	}
+
+	/// <summary>
+	/// Builds the machine-slot hover tooltip: an opaque panel with the item name
+	/// and count, following the mouse while a machine slot is hovered (mirrors
+	/// the inventory's slot tooltip). It lives on the root (top layer) so it
+	/// renders above the panel and the inventory beneath.
+	/// </summary>
+	private void BuildTooltip()
+	{
+		_tooltip = new Panel
+		{
+			Name = "MachineTooltip",
+			LayoutMode = 3, // Position
+			Visible = false,
+			MouseFilter = Control.MouseFilterEnum.Ignore, // never blocks clicks
+		};
+		var tipStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.06f, 0.07f, 0.1f, 0.95f),
+			BorderColor = new Color(0.5f, 0.7f, 0.9f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_tooltip.AddThemeStyleboxOverride("panel", tipStyle);
+
+		_tooltipName = new Label
+		{
+			Name = "TooltipName",
+			LayoutMode = 3, // Position
+			Position = new Vector2(8f, 4f),
+		};
+		_tooltipName.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		_tooltip.AddChild(_tooltipName);
+
+		_tooltipCount = new Label
+		{
+			Name = "TooltipCount",
+			LayoutMode = 3, // Position
+		};
+		_tooltipCount.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.8f));
+		_tooltip.AddChild(_tooltipCount);
+
+		_root.AddChild(_tooltip);
 	}
 
 	/// <summary>True while a machine panel is open (a machine is being interacted with).</summary>
@@ -396,6 +455,12 @@ public partial class MachineUI : CanvasLayer
 		ClearGrid(_inputGrid, _inputSlots);
 		ClearGrid(_outputGrid, _outputSlots);
 		InventorySlotGrid.ClearCursor();
+		// Hide the hover tooltip (it belongs to the open panel).
+		if (_tooltip != null)
+		{
+			_tooltip.Visible = false;
+		}
+		_tooltipSlotIndex = -1;
 		Input.SetMouseMode(Input.MouseModeEnum.Captured);
 	}
 
@@ -766,6 +831,9 @@ public partial class MachineUI : CanvasLayer
 		RefreshInputSlots();
 		RefreshOutputSlots();
 
+		// Hover tooltip for the machine's input/output slots.
+		UpdateSlotTooltip();
+
 		if (_machine is CrafterMachine crafter)
 		{
 			_progressFill.Size = new Vector2(
@@ -810,6 +878,166 @@ public partial class MachineUI : CanvasLayer
 					FindIcon(_outputSlots[i]), FindCount(_outputSlots[i]));
 			}
 		}
+	}
+
+	/// <summary>
+	/// Shows the machine-slot hover tooltip when the mouse is over one of the
+	/// machine's input/output slots, and hides it otherwise. Mirrors the
+	/// inventory's slot tooltip: the tooltip follows the mouse (offset so it
+	/// doesn't sit under the cursor) and shows the item name + count for a
+	/// populated slot, or the slot's bound material name (in grey) for an empty
+	/// slot, so the player knows what the slot is for.
+	///
+	/// The mouse position is in VIEWPORT space; the slots are positioned in the
+	/// content box's space (which is inside the panel, inside the full-rect
+	/// root, all at the viewport origin). So a slot's viewport-space rect is
+	/// panel.Position + slot.Position (the content box and grid are at the
+	/// panel's origin offset by the inset — accounted for below).
+	/// </summary>
+	private void UpdateSlotTooltip()
+	{
+		if (_tooltip == null)
+		{
+			return;
+		}
+		if (!IsOpen)
+		{
+			_tooltip.Visible = false;
+			_tooltipSlotIndex = -1;
+			return;
+		}
+
+		// Don't show the tooltip while a drag is in progress (a stack is on the
+		// cursor), matching the inventory tooltip's behavior.
+		if (!InventorySlotGrid.CursorStack.IsEmpty)
+		{
+			_tooltip.Visible = false;
+			_tooltipSlotIndex = -1;
+			return;
+		}
+
+		Vector2 mousePos = GetViewport().GetMousePosition();
+
+		// A slot's viewport-space rect: the slots are Controls in the tree, so
+		// GlobalPosition is their top-left in the layer (== viewport) space. This
+		// is robust to the content box's inset, the grid's VBox position, and the
+		// panel's per-frame repositioning — no manual offset math needed.
+		int hoveredIndex = -1;
+		bool hoveredOutput = false;
+		ItemStack hoveredStack = ItemStack.From(0);
+		int hoveredMat = 0;
+
+		// Check input slots first (they come first in the layout).
+		for (int i = 0; i < _inputSlots.Count; i++)
+		{
+			var slot = _inputSlots[i];
+			if (slot == null)
+			{
+				continue;
+			}
+			Rect2 rect = new Rect2(slot.GlobalPosition, slot.Size);
+			if (rect.HasPoint(mousePos))
+			{
+				hoveredIndex = i;
+				hoveredOutput = false;
+				hoveredStack = SafeSlotStack(_machine?.InputBuffer);
+				hoveredMat = i < _inputSlotMats.Count ? _inputSlotMats[i] : 0;
+				break;
+			}
+		}
+		// Then output slots.
+		if (hoveredIndex < 0)
+		{
+			for (int i = 0; i < _outputSlots.Count; i++)
+			{
+				var slot = _outputSlots[i];
+				if (slot == null)
+				{
+					continue;
+				}
+				Rect2 rect = new Rect2(slot.GlobalPosition, slot.Size);
+				if (rect.HasPoint(mousePos))
+				{
+					hoveredIndex = i;
+					hoveredOutput = true;
+					hoveredStack = SafeSlotStack(_machine?.OutputBuffer);
+					hoveredMat = i < _outputSlotMats.Count ? _outputSlotMats[i] : 0;
+					break;
+				}
+			}
+		}
+
+		if (hoveredIndex < 0)
+		{
+			_tooltip.Visible = false;
+			_tooltipSlotIndex = -1;
+			return;
+		}
+
+		// Determine the tooltip text. A populated slot shows the item it holds;
+		// an empty slot shows its bound material (what it is meant to hold).
+		string name;
+		string count = "";
+		if (!hoveredStack.IsEmpty)
+		{
+			name = ItemName(hoveredStack.MaterialId);
+			count = $"x{hoveredStack.Count}";
+		}
+		else if (hoveredMat > 0)
+		{
+			// Empty slot: show the bound material name in the name label, and a
+			// hint in the count label (input = "drop here", output = "product").
+			name = ItemName(hoveredMat);
+			count = hoveredOutput ? "output slot" : "input slot";
+		}
+		else
+		{
+			name = hoveredOutput ? "Output" : "Input";
+			count = hoveredOutput ? "output slot" : "input slot";
+		}
+
+		// Re-layout (and size) the tooltip when the hovered slot changes; when
+		// it's the same slot, just refresh the text (the count may have changed
+		// as items were added/removed, but the size depends only on the longest
+		// line, which is stable for a given item name).
+		if (_tooltipSlotIndex != hoveredIndex || hoveredOutput != _tooltipIsOutput)
+		{
+			_tooltipSlotIndex = hoveredIndex;
+			_tooltipIsOutput = hoveredOutput;
+			_tooltipName.Text = name;
+			_tooltipCount.Text = count;
+			// Size the tooltip to fit its text (the name label's rendered size).
+			Vector2 nameSize = _tooltipName.GetCombinedMinimumSize();
+			Vector2 countSize = _tooltipCount.GetCombinedMinimumSize();
+			float marginLeft = 8f, marginTop = 4f, gap = 2f;
+			_tooltipCount.Position = new Vector2(marginLeft, marginTop + nameSize.Y + gap);
+			_tooltip.Size = new Vector2(
+				Mathf.Max(nameSize.X, countSize.X) + marginLeft * 2,
+				marginTop + nameSize.Y + gap + countSize.Y + 4f);
+		}
+		else
+		{
+			_tooltipName.Text = name;
+			_tooltipCount.Text = count;
+		}
+
+		// Position: 16px to the right and 16px below the mouse, clamped on screen.
+		Vector2 tooltipPos = mousePos + new Vector2(16f, 16f);
+		Vector2 vpSize = GetViewport().GetVisibleRect().Size;
+		tooltipPos.X = Mathf.Min(tooltipPos.X, vpSize.X - _tooltip.Size.X - 4f);
+		tooltipPos.Y = Mathf.Min(tooltipPos.Y, vpSize.Y - _tooltip.Size.Y - 4f);
+		_tooltip.Position = tooltipPos;
+		_tooltip.Visible = true;
+	}
+
+	/// <summary>The first slot's stack of a buffer (empty when the buffer is null/empty).</summary>
+	private static ItemStack SafeSlotStack(FactorySim.Machines.MachineBuffer buffer)
+	{
+		if (buffer == null || buffer.Capacity == 0)
+		{
+			return ItemStack.From(0);
+		}
+		return buffer[0];
 	}
 
 	private static TextureRect FindIcon(Control slot)
