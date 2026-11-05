@@ -90,16 +90,21 @@ public partial class MachineUI : CanvasLayer
 	{
 		AddToGroup("machine_ui");
 
-		// Full-rect root: Stop while open (eats clicks so the 3D view is
-		// untouched), Ignore while hidden. It is the panel's parent and the
-		// visibility/focus flag for the machine UI.
+		// Full-rect root: PASS while open, Ignore while hidden. It only hosts the
+		// panel. It is deliberately NOT Stop: a Stop full-rect root on the higher
+		// layer (120) would sit over the entire screen and eat every click —
+		// including the dev pane's tabs/buttons and the inventory grid beneath it
+		// (the inventory's CanvasLayer is below this one). Pass lets every click
+		// OUTSIDE the panel fall through to the inventory, so the player can still
+		// use the dev pane / slots while the machine panel is open. The panel
+		// itself is Stop, so only the panel's own rect blocks clicks.
 		_root = new Control
 		{
 			Name = "MachineUIRoot",
 			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_root.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-		_root.MouseFilter = Control.MouseFilterEnum.Ignore;
 		_root.Visible = false;
 		AddChild(_root);
 
@@ -110,6 +115,11 @@ public partial class MachineUI : CanvasLayer
 		{
 			Name = "MachinePanel",
 			LayoutMode = 3, // Position
+			// Stop: the panel's own rect consumes clicks (its children — the
+			// recipe picker, slots, close button — get first dibs on clicks within
+			// the panel). This is what makes ONLY the panel block the screen,
+			// while the Pass root lets the rest of the inventory stay live.
+			MouseFilter = Control.MouseFilterEnum.Stop,
 		};
 		var style = new StyleBoxFlat
 		{
@@ -338,8 +348,13 @@ public partial class MachineUI : CanvasLayer
 			return;
 		}
 		_root.Visible = open;
+		// Pass while open (NOT Stop): the root is full-rect on the higher layer,
+		// so Stop would eat every click on screen (dev pane, inventory grid, ...)
+		// while the panel is open. Pass lets clicks outside the panel fall
+		// through to the inventory beneath it; the panel (Stop) handles its own
+		// rect. See the root's creation comment for the full rationale.
 		_root.MouseFilter = open
-			? Control.MouseFilterEnum.Stop
+			? Control.MouseFilterEnum.Pass
 			: Control.MouseFilterEnum.Ignore;
 		// SetOpen OWNS the mouse mode so EVERY close route (Tab, Escape, the
 		// close button, the target machine being freed) re-captures the mouse.

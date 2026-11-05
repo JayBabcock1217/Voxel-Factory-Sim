@@ -1,4 +1,4 @@
-[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://smelter01defx"]
+[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://c5q4g530rjvev"]
 
 [ext_resource type="Script" uid="uid://cf5kkq6h6vxmo" path="res://Scripts/Machines/MachineDefinition.cs" id="1_no5oj"]
 
