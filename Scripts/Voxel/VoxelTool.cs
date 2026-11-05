@@ -64,6 +64,15 @@ public partial class VoxelTool : Node3D
 	[Export] public Color HighlightColor { get; set; } = new(0.6f, 0.9f, 1.0f);
 
 	/// <summary>
+	/// Opacity (0..1) of the translucent filled box that marks the targeted
+	/// voxel (the "cube that shows where the player is pointing"). Higher = more
+	/// opaque (the highlighted block is more solid and harder to see through);
+	/// lower = fainter (the voxel beneath reads through more clearly). Adjustable
+	/// in the editor on the VoxelTool node.
+	/// </summary>
+	[Export(PropertyHint.Range, "0.01,1,0.01")] public float HighlightFillOpacity { get; set; } = 0.35f;
+
+	/// <summary>
 	/// Color of the power-radius indicator sphere shown when the player aims at
 	/// a power source (a transparent yellow by default).
 	/// </summary>
@@ -219,10 +228,11 @@ public partial class VoxelTool : Node3D
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 		};
 		// Translucent fill: semi-transparent so the voxel beneath still shows
-		// through, but bright enough to clearly mark the targeted block.
+		// through, but bright enough to clearly mark the targeted block. The
+		// alpha comes from HighlightFillOpacity (adjustable in the editor).
 		_highlightFillMaterial = new StandardMaterial3D
 		{
-			AlbedoColor = new Color(HighlightColor, 0.35f),
+			AlbedoColor = new Color(HighlightColor, HighlightFillOpacity),
 			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
