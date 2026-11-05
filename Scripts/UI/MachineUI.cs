@@ -805,30 +805,15 @@ public partial class MachineUI : CanvasLayer
 	/// viewport. Called every frame so it tracks resizes and the inventory's
 	/// rebuilds.
 	/// </summary>
-	private bool _diagAnchored;
-
 	private void AnchorToRightSlot()
 	{
 		_resolveInvUi();
 		if (_invUi == null || _panel == null)
 		{
-			// ONE-SHOT DIAGNOSTIC (early-return path).
-			if (!_diagAnchored)
-			{
-				_diagAnchored = true;
-				GD.Print($"[MachineUI.Anchor] EARLY-RETURN: invUi={(_invUi == null ? "null" : "ok")} panel={(_panel == null ? "null" : "ok")}");
-			}
 			return;
 		}
-		bool haveRect = _invUi.GetRightSlotRect(out Rect2 slotRect);
-		if (!haveRect)
+		if (!_invUi.GetRightSlotRect(out Rect2 slotRect))
 		{
-			// ONE-SHOT DIAGNOSTIC (no-rect path).
-			if (!_diagAnchored)
-			{
-				_diagAnchored = true;
-				GD.Print($"[MachineUI.Anchor] NO-RECT: GetRightSlotRect returned false (craft panel missing or inventory panel hidden)");
-			}
 			return;
 		}
 		// SIZE the panel to the craft pane's rect (so it fits the right slot
@@ -843,16 +828,6 @@ public partial class MachineUI : CanvasLayer
 			_contentBox.Size = new Vector2(
 				Math.Max(0f, _panel.Size.X - PanelInsetX * 2f),
 				Math.Max(0f, _panel.Size.Y - PanelInsetY * 2f));
-		}
-
-		// ONE-SHOT DIAGNOSTIC: print the anchor values once so we can confirm
-		// the rect is correct. Remove after confirming.
-		if (!_diagAnchored)
-		{
-			_diagAnchored = true;
-			float cbW = _contentBox != null ? _contentBox.Size.X : 0f;
-			float cbH = _contentBox != null ? _contentBox.Size.Y : 0f;
-			GD.Print($"[MachineUI.Anchor] slotRect={slotRect}  panelPos=({_panel.Position.X:0.##}, {_panel.Position.Y:0.##})  panelSize=({_panel.Size.X:0.##}, {_panel.Size.Y:0.##})  contentBoxSize=({cbW:0.##}, {cbH:0.##})");
 		}
 	}
 

@@ -106,13 +106,6 @@ public partial class VoxelTool : Node3D
 	private bool _targetIsMachine;
 
 	/// <summary>
-	/// One-shot guard for the machine-raycast diagnostic print (see
-	/// <c>_Process</c>): the diagnostic line is emitted exactly once per tool
-	/// lifetime so the console is not spammed every frame.
-	/// </summary>
-	private bool _diagMachineRaycast;
-
-	/// <summary>
 	/// The machine the player is currently aiming at (closest machine whose
 	/// voxel is within <see cref="MaxRaycastDistance"/>), or null. Machines are
 	/// targeted IN ADDITION to voxels: if both a voxel and a machine are in the
@@ -465,36 +458,31 @@ public partial class VoxelTool : Node3D
 		// (machEntryAxis) — that face's outward normal is what the placement
 		// offset is based on (see TryRaycastMachine).
 		bool machineHit = TryRaycastMachine(from, dir, out Vector3I machVoxel, out int machEntryAxis, out float machT);
-		Vector3 machNormal = machEntryAxis switch
+		// The entry axis tells us WHICH face was struck, but the normal's SIGN
+		// depends on the direction of travel: entering through the +X face means
+		// the ray moves in −X (dir.x < 0) and the outward normal is (+1,0,0);
+		// entering through the −X face means dir.x > 0 and the normal is (−1,0,0).
+		// The face the ray enters through is the one it is moving AWAY from, so
+		// the outward normal along the entry axis is −sign(dir[axis]).
+		Vector3 machNormal = Vector3.Zero;
+		if (machineHit && machEntryAxis >= 0 && machEntryAxis < 3)
 		{
-			0 => new Vector3(-1f, 0f, 0f),
-			1 => new Vector3(0f, -1f, 0f),
-			2 => new Vector3(0f, 0f, -1f),
-			_ => Vector3.Zero,
-		};
+			float s = dir[machEntryAxis] > 0f ? 1f : -1f;
+			machNormal[machEntryAxis] = -s;
+		}
 
-		// DIAGNOSTIC (temporary — removed in a later pass): print once per
-		// machine-target so we can confirm at runtime the raycast finds machines
-		// and that the entry-axis → face-normal mapping is correct. Fires the
-		// moment the target BECOMES a machine (state transition), not every
-		// frame, so it captures the actual aim-at-a-machine moment (the old
-		// one-shot fired at spawn, before any machine was in view).
 		bool isMachineTarget = machineHit && machT < voxelDist;
-		if (isMachineTarget && !_diagMachineRaycast)
-		{
-			_diagMachineRaycast = true;
-			GD.Print($"[RaycastDiag] AIMING AT MACHINE machVoxel={machVoxel} entryAxis={machEntryAxis} machNormal={machNormal} machT={machT} voxelDist={voxelDist} from={from} dir={dir}");
-		}
-		if (!isMachineTarget)
-		{
-			_diagMachineRaycast = false; // re-arm: print again on the NEXT machine aim
-		}
 
 		if (isMachineTarget)
 		{
 			// The machine is the nearest hit: it becomes THE target, so the
-			// highlight renders on the machine's voxel and the placement cell is
-			// the empty voxel on the far side of the machine face the ray struck.
+			// highlight renders on the machine's voxel and the placement cell
+			// (PreviewCell) is the EMPTY voxel on the far side of the machine
+			// face the ray struck — machVoxel + the entry face's outward
+			// normal (machNormal). This stops the placement preview from
+			// rendering inside the machine (it used to be placed at the machine
+			// voxel itself, because the old PreviewCell used the raw target
+			// normal without accounting for the entry face).
 			_hasTarget = true;
 			_targetVoxel = machVoxel;
 			_targetNormal = machNormal;
@@ -502,6 +490,8 @@ public partial class VoxelTool : Node3D
 		}
 		else if (voxelHit)
 		{
+			// A solid voxel is the target. The hit normal points away from the
+			// solid voxel, so the placement cell (PreviewCell) is voxel + normal.
 			_hasTarget = true;
 			_targetVoxel = hitVoxel;
 			_targetNormal = hitNormal;
@@ -1497,9 +1487,19 @@ public partial class VoxelTool : Node3D
 			// all three axis-aligned slabs is the entry t (and the farthest t is
 			// the exit t). t1 < 0 < t2 means the box is behind the ray; t1 > t2
 			// means the ray misses.
-			float tmin = 0f; // clamp to 0: a hit behind the camera doesn't count
+			// Two independent quantities:
+			//   entryT  — the true entry parameter (the largest of the three
+			//             slab near-boundaries). This can be NEGATIVE when the
+			//             ray origin is already inside the box (the player
+			//             stands close to / inside the machine voxel, which is
+			//             common). Tracked separately from a clamped value so a
+			//             negative entry still records the correct entry face.
+			//   entryA  — the AXIS whose near-boundary produced entryT: the
+			//             face the ray enters through, which the placement
+			//             normal is derived from.
+			float entryT = float.NegativeInfinity;
+			int entryA = -1;
 			float tmax = MaxRaycastDistance;
-			int entryA = -1; // the axis whose slab boundary produced the entry t
 			bool hit = true;
 			for (int axis = 0; axis < 3; axis++)
 			{
@@ -1524,29 +1524,35 @@ public partial class VoxelTool : Node3D
 				float b2 = (boxMax[axis] - from[axis]) / d;
 				float t1 = Mathf.Min(b1, b2);
 				float t2 = Mathf.Max(b1, b2);
-				// Record the axis that pushes tmin up to its current (largest)
-				// value — that is the face the ray enters through.
-				if (t1 > tmin)
+				// Record the axis whose near-boundary is the LARGEST — that is
+				// the face the ray enters through (the last boundary crossed on
+				// the way into the box). Tracked on entryT (NOT a clamped tmin)
+				// so it stays correct even when the entry is negative (origin
+				// inside the box).
+				if (t1 > entryT)
 				{
-					tmin = t1;
+					entryT = t1;
 					entryA = axis;
 				}
 				tmax = Mathf.Min(tmax, t2);
-				if (tmin > tmax)
+				if (entryT > tmax)
 				{
 					hit = false;
 					break;
 				}
 			}
-			if (!hit || tmin > MaxRaycastDistance)
+			if (!hit || entryT > MaxRaycastDistance)
 			{
 				continue;
 			}
 
-			// Keep only the NEAREST machine (smallest entry t).
-			if (tmin < hitT)
+			// A hit whose entry is behind the origin (entryT < 0) is "around"
+			// the player; clamp its reported distance to 0 so it still wins
+			// nearest-wins over a far voxel.
+			float clampedT = Mathf.Max(entryT, 0f);
+			if (clampedT < hitT)
 			{
-				hitT = tmin;
+				hitT = clampedT;
 				hitVoxel = m.VoxelPos;
 				entryAxis = entryA;
 			}
