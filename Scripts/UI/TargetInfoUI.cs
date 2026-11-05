@@ -111,6 +111,14 @@ public partial class TargetInfoUI : Node
 		/// <summary>True when the target is a machine (not a plain voxel).</summary>
 		public bool IsMachine;
 		/// <summary>
+		/// True when the target is a dropped item (a <see cref="VoxelDrop"/>),
+		/// not a voxel or a machine. When set, the panel shows the drop's item
+		/// name (in the primary line) + its detail rows (count) and hides the
+		/// mining rows — exactly like the machine case. MachineName/MachineDetails
+		/// are reused to carry the drop's item name + count.
+		/// </summary>
+		public bool IsDrop;
+		/// <summary>
 		/// A one-line machine-placement-rotation readout (e.g. "Rotation: Y 90°
 		/// (R: axis ←→: rotate ↑↓: set Esc: reset)"), shown only while the
 		/// player is holding a placeable machine item. Empty otherwise — the
@@ -285,9 +293,12 @@ public partial class TargetInfoUI : Node
 		_distanceLabel.Text = $"Distance: {info.Distance:0.0}m";
 
 		// MATERIAL TARGET: show the voxel's name + its mining rows (health, best
-		// tool, break time, category, unbreakable).
-		bool isMachine = info.IsMachine;
-		if (!isMachine)
+		// tool, break time, category, unbreakable). A machine OR a drop target
+		// shows the name + detail rows instead (the mining rows are hidden for
+		// both — a machine sits in an air voxel, and a drop is a small object
+		// that has no mining data).
+		bool isMachineOrDrop = info.IsMachine || info.IsDrop;
+		if (!isMachineOrDrop)
 		{
 			_nameLabel.Text = info.MaterialName;
 
@@ -321,21 +332,23 @@ public partial class TargetInfoUI : Node
 			_unbreakableLabel.Visible = false;
 		}
 		// The mining rows' visibility is set once below (they show for a voxel,
-		// hide for a machine) so the panel height reflects the active rows.
-		bool showMiningRows = !isMachine;
+		// hide for a machine/drop) so the panel height reflects the active rows.
+		bool showMiningRows = !isMachineOrDrop;
 		_healthLabel.Visible = showMiningRows;
 		_healthBarBg.Visible = showMiningRows;
 		_bestToolLabel.Visible = showMiningRows;
 		_breakTimeLabel.Visible = showMiningRows;
 		_categoryLabel.Visible = showMiningRows;
 
-		// MACHINE READOUT: when targeting a machine, its name replaces the bold
-		// primary name line and its detail rows (power, recipe, progress,
-		// buffers) fill the detail pool. This is the at-a-glance status the
-		// player sees BEFORE right-clicking to open the machine.
-		if (isMachine)
+		// MACHINE / DROP READOUT: when targeting a machine or a drop, its name
+		// replaces the bold primary name line and its detail rows (a machine's
+		// power/recipe/progress/buffers, or a drop's item count) fill the detail
+		// pool. This is the at-a-glance status the player sees BEFORE
+		// right-clicking to open the machine / walking up to collect the drop.
+		if (isMachineOrDrop)
 		{
-			_nameLabel.Text = string.IsNullOrEmpty(info.MachineName) ? "Machine" : info.MachineName;
+			string fallback = info.IsDrop ? "Item" : "Machine";
+			_nameLabel.Text = string.IsNullOrEmpty(info.MachineName) ? fallback : info.MachineName;
 			var details = info.MachineDetails ?? System.Array.Empty<string>();
 			int shown = System.Math.Min(details.Length, MaxMachineDetailLines);
 			for (int i = 0; i < MaxMachineDetailLines; i++)

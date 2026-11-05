@@ -117,6 +117,16 @@ public partial class VoxelTool : Node3D
 	/// </summary>
 	private Machine _targetMachine;
 
+	/// <summary>
+	/// The dropped item the player is currently aiming at (the nearest
+	/// <see cref="FactorySim.Items.VoxelDrop"/> whose small AABB the camera ray
+	/// strikes within <see cref="MaxRaycastDistance"/>), or null. Drops are
+	/// targeted in addition to voxels and machines — the nearest hit wins — so
+	/// the target-info HUD can show the drop's item name + count BEFORE the
+	/// player walks up to collect it (mirrors the machine readout).
+	/// </summary>
+	private FactorySim.Items.VoxelDrop _targetDrop;
+
 	// -- Machine placement state (preview ghost + R-key rotation) -----------
 	//
 	// The transparent preview ghost: a Machine node (IsPreview = true) shown at
@@ -480,7 +490,22 @@ public partial class VoxelTool : Node3D
 			machNormal[machEntryAxis] = -s;
 		}
 
-		bool isMachineTarget = machineHit && machT < voxelDist;
+		// DROPS: raycast the camera ray against every drop's small AABB. The
+		// nearest of {voxel, machine, drop} becomes the target — so aiming at a
+		// drop (in the air, in front of a far voxel) targets the drop, letting
+		// the HUD show its item + count before the player collects it.
+		bool dropHit = TryRaycastDrop(from, dir, out var targetDrop, out float dropT);
+
+		// Nearest-wins among the three: a drop in the air in front of a far
+		// voxel should win (you're looking at the drop, not the wall behind it).
+		float bestT = float.PositiveInfinity;
+		int bestKind = -1; // 0=voxel, 1=machine, 2=drop
+		if (voxelHit && voxelDist < bestT) { bestT = voxelDist; bestKind = 0; }
+		if (machineHit && machT < bestT)   { bestT = machT;   bestKind = 1; }
+		if (dropHit && dropT < bestT)      { bestT = dropT;   bestKind = 2; }
+
+		bool isMachineTarget = bestKind == 1;
+		_targetDrop = bestKind == 2 ? targetDrop : null;
 
 		if (isMachineTarget)
 		{
@@ -497,6 +522,21 @@ public partial class VoxelTool : Node3D
 			_targetNormal = machNormal;
 			_targetIsMachine = true;
 		}
+		else if (bestKind == 2)
+		{
+			// A drop is the target: aim the highlight at the voxel the drop
+			// occupies (so the highlight sits under the drop) and mark it as a
+			// drop target. _targetIsMachine stays false (a drop is not a
+			// machine); BuildTargetInfo checks _targetDrop to show the drop
+			// readout instead of the voxel's mining rows.
+			_hasTarget = true;
+			_targetVoxel = new Vector3I(
+			 Mathf.FloorToInt(targetDrop.GlobalPosition.X / _world.VoxelSize),
+			 Mathf.FloorToInt(targetDrop.GlobalPosition.Y / _world.VoxelSize),
+			 Mathf.FloorToInt(targetDrop.GlobalPosition.Z / _world.VoxelSize));
+			_targetNormal = Vector3.Zero;
+			_targetIsMachine = false;
+		}
 		else if (voxelHit)
 		{
 			// A solid voxel is the target. The hit normal points away from the
@@ -510,6 +550,7 @@ public partial class VoxelTool : Node3D
 		{
 			_hasTarget = false;
 			_targetIsMachine = false;
+			_targetDrop = null;
 			// No target: stop damaging. Per-voxel damage stays in _mineDamage
 			// so re-aiming at a partially-mined voxel resumes where it left off.
 			_highlight.Visible = false;
@@ -534,30 +575,59 @@ public partial class VoxelTool : Node3D
 			// GlobalTransform with an identity basis overrides the inherited
 			// rotation, keeping the wireframe axis-aligned with the world.
 			float vs = _world.VoxelSize;
-			_highlight.GlobalTransform = new Transform3D(
-				Basis.Identity,
-				new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * vs
-				+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
-			// Both the wireframe and the fill box are centered on the local
-			// origin (the voxel center), so scaling each MeshInstance about its
-			// origin expands the highlight symmetrically about the voxel. 1.05x
-			// keeps the fill hugging the block (slightly larger so it's clearly
-			// the targeted one) and the wireframe reads just outside it.
-			float hs = vs * 1.05f;
-			_highlightMeshInstance.Scale = new Vector3(hs, hs, hs);
-			_highlightFill.Scale = new Vector3(hs, hs, hs);
-
-			// Re-shape the highlight to the target's own voxel geometry (cached
-			// per voxel so the mesh is only rebuilt when the target changes).
-			// Guarded: a bad target (e.g. a mid-rebuild chunk) must never spam
-			// the console — on failure we keep the previous mesh.
-			try
+			if (_targetDrop != null)
 			{
-				EnsureHighlightMesh(_targetVoxel, _targetIsMachine);
+				// DROP TARGET: the highlight hugs the drop itself (a small box at
+				// the drop's position), not the full voxel it occupies. The mesh
+				// is rebuilt as a plain unit cube (via EnsureHighlightMesh with a
+				// machine-style flag) and scaled to the drop's size, positioned
+				// at the drop's center so it tracks the bobbing/spinning drop.
+				_highlight.GlobalTransform = new Transform3D(
+					Basis.Identity,
+					_targetDrop.GlobalPosition);
+				float ds = 0.35f; // ~ the drop mesh size (0.3) + a little margin
+				_highlightMeshInstance.Scale = new Vector3(ds, ds, ds);
+				_highlightFill.Scale = new Vector3(ds, ds, ds);
+				try
+				{
+					// Rebuild the mesh as a plain unit cube (machine style) so it
+					// reads as a small box around the drop, not the voxel's
+					// exposed-face wireframe.
+					EnsureHighlightMesh(_targetVoxel, true);
+				}
+				catch (System.Exception e)
+				{
+					GD.PushWarning($"[VoxelTool] Highlight rebuild failed for drop: {e.Message}");
+				}
 			}
-			catch (System.Exception e)
+			else
 			{
-				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {_targetVoxel}: {e.Message}");
+				_highlight.GlobalTransform = new Transform3D(
+					Basis.Identity,
+					new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * vs
+					+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
+				// Both the wireframe and the fill box are centered on the local
+				// origin (the voxel center), so scaling each MeshInstance about
+				// its origin expands the highlight symmetrically about the
+				// voxel. 1.05x keeps the fill hugging the block (slightly larger
+				// so it's clearly the targeted one) and the wireframe reads just
+				// outside it.
+				float hs = vs * 1.05f;
+				_highlightMeshInstance.Scale = new Vector3(hs, hs, hs);
+				_highlightFill.Scale = new Vector3(hs, hs, hs);
+
+				// Re-shape the highlight to the target's own voxel geometry
+				// (cached per voxel so the mesh is only rebuilt when the target
+				// changes). Guarded: a bad target (e.g. a mid-rebuild chunk) must
+				// never spam the console — on failure we keep the previous mesh.
+				try
+				{
+					EnsureHighlightMesh(_targetVoxel, _targetIsMachine);
+				}
+				catch (System.Exception e)
+				{
+					GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {_targetVoxel}: {e.Message}");
+				}
 			}
 		}
 
@@ -1288,6 +1358,21 @@ public partial class VoxelTool : Node3D
 			return info; // HasTarget stays false → panel hides
 		}
 
+		// DROP TARGET: the player is looking at a dropped item. Show the item's
+		// name + count (and the distance) so the player knows what it is BEFORE
+		// walking up to collect it — mirrors the machine readout. A drop is a
+		// small object in an air voxel, so the material readout below would see
+		// Air; the drop readout takes priority instead.
+		if (_targetDrop != null && !_targetDrop.Stack.IsEmpty)
+		{
+			info.HasTarget = true;
+			info.IsDrop = true;
+			info.MachineName = ItemName(_targetDrop.MaterialId); // reuse the name line
+			info.MachineDetails = BuildDropDetails(_targetDrop);
+			info.Distance = (_targetDrop.GlobalPosition - cameraPos).Length();
+			return info;
+		}
+
 		// MACHINE TARGET: a machine lives in an AIR voxel, so the material readout
 		// (below) would see Air and return early — hiding the panel entirely. When
 		// the target IS a machine, build the machine readout (name + live details:
@@ -1494,6 +1579,17 @@ public partial class VoxelTool : Node3D
 			return ItemRegistry.MaterialName(_world.MaterialConfig, materialId);
 		}
 		return $"Item {materialId}";
+	}
+
+	/// <summary>
+	/// Builds the detail rows for a dropped item (shown under the item name in
+	/// the target HUD, before the player collects it). A drop is just an item
+	/// stack, so the only detail is its count: "x N". (The item name itself is
+	/// shown in the primary name line via MachineName.)
+	/// </summary>
+	private string[] BuildDropDetails(FactorySim.Items.VoxelDrop drop)
+	{
+		return new string[] { $"x {drop.Count}" };
 	}
 
 	/// <summary>
@@ -1720,6 +1816,80 @@ public partial class VoxelTool : Node3D
 			}
 		}
 		return hitT != float.PositiveInfinity;
+	}
+
+	/// <summary>
+	/// Raycasts the camera ray against every dropped item's small AABB and
+	/// returns the NEAREST hit (within <see cref="MaxRaycastDistance"/>). A drop
+	/// is a small object (its mesh is a 0.3-unit box), so its hit box is a small
+	/// cube (~0.4 units, a bit larger than the mesh for a forgiving target)
+	/// centered on the drop's position. This is what makes a drop targetable:
+	/// the DDA voxel walk and the machine raycast both miss a drop (it's a small
+	/// object in an air voxel), so without this the HUD couldn't show the drop's
+	/// item + count while the player is looking at it. <paramref name="drop"/>
+	/// comes back as the hit drop; <paramref name="hitT"/> as the ray distance to
+	/// its entry point (clamped to ≥ 0 when the origin is inside the box).
+	/// Returns false when the ray misses every drop.
+	/// </summary>
+	private bool TryRaycastDrop(Vector3 from, Vector3 dir, out FactorySim.Items.VoxelDrop drop, out float hitT)
+	{
+		drop = null;
+		hitT = float.PositiveInfinity;
+
+		const float half = 0.2f; // half-extent of the drop's hit box (~0.4 total)
+		foreach (var node in GetTree().GetNodesInGroup("voxel_drops"))
+		{
+			if (!(node is FactorySim.Items.VoxelDrop d) || d.IsQueuedForDeletion())
+			{
+				continue;
+			}
+			Vector3 c = d.GlobalPosition;
+			Vector3 boxMin = c - new Vector3(half, half, half);
+			Vector3 boxMax = c + new Vector3(half, half, half);
+
+			// Slab-method ray-vs-AABB (same technique as the machine raycast):
+			// the closest t inside all three slabs is the entry t.
+			float entryT = float.NegativeInfinity;
+			float tmax = MaxRaycastDistance;
+			bool hit = true;
+			for (int axis = 0; axis < 3; axis++)
+			{
+				float dd = dir[axis];
+				if (Mathf.Abs(dd) < 1e-8f)
+				{
+					// Ray parallel to this slab: inside for its whole length only
+					// if the origin's coordinate is within the slab.
+					if (from[axis] < boxMin[axis] - 1e-8f || from[axis] > boxMax[axis] + 1e-8f)
+					{
+						hit = false;
+						break;
+					}
+					continue;
+				}
+				float b1 = (boxMin[axis] - from[axis]) / dd;
+				float b2 = (boxMax[axis] - from[axis]) / dd;
+				float t1 = Mathf.Min(b1, b2);
+				float t2 = Mathf.Max(b1, b2);
+				entryT = Mathf.Max(entryT, t1);
+				tmax = Mathf.Min(tmax, t2);
+				if (entryT > tmax)
+				{
+					hit = false;
+					break;
+				}
+			}
+			if (!hit || entryT > MaxRaycastDistance)
+			{
+				continue;
+			}
+			float clampedT = Mathf.Max(entryT, 0f);
+			if (clampedT < hitT)
+			{
+				hitT = clampedT;
+				drop = d;
+			}
+		}
+		return drop != null;
 	}
 
 	/// <summary>
