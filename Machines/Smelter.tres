@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="MachineDefinition" format=3 uid="uid://smelter01defx"]
+
+[ext_resource type="Script" uid="uid://cf5kkq6h6vxmo" path="res://Scripts/Machines/MachineDefinition.cs" id="1_no5oj"]
+
+[resource]
+script = ExtResource("1_no5oj")
+Type = 200
+Name = "Smelter"
+Description = "Smelts raw ore and stone into refined materials. Load an input, pick a recipe, and it produces the output over its smelt time."
+PowerConsumption = 3.0
+ProcessTime = 2.0
+OutputCount = 1
+BufferSize = 4
+Health = 150
+SmeltInputs = PackedInt32Array(13, 14, 3)
+SmeltOutputs = PackedInt32Array(20, 19, 21)
+metadata/_custom_type_script = "uid://cf5kkq6h6vxmo"

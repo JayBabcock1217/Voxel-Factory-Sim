@@ -2523,6 +2523,37 @@ public partial class InventoryUI : CanvasLayer
 			return;
 		}
 
+		// QUICK-MOVE INTO THE OPEN MACHINE FIRST: if the player has a machine
+		// panel open (right-clicked a machine), shift-clicking an inventory
+		// stack sends it straight into that machine's input buffer (its
+		// mini-inventory) — the Factorio-style "throw it into the machine"
+		// action. This is checked BEFORE the hotbar<->storage move so that while
+		// a machine is open, shift-click feeds the machine instead of shuffling
+		// the hotbar. Whatever the machine couldn't take (buffer full / wrong
+		// material) falls through to the normal hotbar<->storage move.
+		var machineUi = GetTree().GetFirstNodeInGroup("machine_ui") as MachineUI;
+		if (machineUi != null && machineUi.IsOpen)
+		{
+			int inserted = machineUi.TryInsertIntoOpenMachine(stack);
+			if (inserted > 0)
+			{
+				if (inserted >= stack.Count)
+				{
+					_inventory.Slots[slot] = ItemStack.From(0);
+				}
+				else
+				{
+					stack.Count -= inserted;
+				}
+				Raise();
+				RefreshSlot(slot);
+				RefreshHotbar();
+				return; // the whole stack went into the machine
+			}
+			// The machine couldn't take it (full or wrong material): fall
+			// through to the regular hotbar<->storage move below.
+		}
+
 		bool fromHotbar = slot < Inventory.HotbarSize;
 		// Destination region: the opposite of the source.
 		int destStart = fromHotbar ? Inventory.HotbarSize : 0;

@@ -235,6 +235,17 @@ public static class InventorySlotGrid
 		{
 			if (mouse.ButtonIndex == MouseButton.Left)
 			{
+				if (mouse.ShiftPressed)
+				{
+					// SHIFT+CLICK: quick-move the slot's whole stack out of this
+					// grid and into the player's inventory (merge then empty
+					// slots). For a machine slot this is the "take the product /
+					// pull the input back out" action; the remainder (if the
+					// inventory is full) stays in the slot. No drag/cursor
+					// involved.
+					ShiftClickSlot(store, icon, count);
+					return;
+				}
 				_pressSlot = slot;
 				LeftClickSlot(store, icon, count);
 			}
@@ -348,6 +359,45 @@ public static class InventorySlotGrid
 
 		RefreshSlot(store, icon, count);
 		RefreshCursor();
+	}
+
+	/// <summary>
+	/// Shift+click rule: take the slot's whole stack and quick-move it into the
+	/// player's inventory (merging into same-material stacks, then empty slots).
+	/// Used by machine slots (the machine UI) so the player can pull an item
+	/// straight out of the machine in one click, and by any shared-grid slot.
+	/// The remainder (when the inventory can't hold it all) is left in the slot.
+	/// </summary>
+	private static void ShiftClickSlot(ISlotStore store, TextureRect icon, Label count)
+	{
+		var slotStack = store.GetStack();
+		if (slotStack == null || slotStack.IsEmpty)
+		{
+			return;
+		}
+
+		// Resolve the player's inventory (the model in the "inventory" group).
+		var tree = Engine.GetMainLoop() as SceneTree;
+		if (tree == null)
+		{
+			return;
+		}
+		var inv = tree.GetFirstNodeInGroup("inventory") as Inventory;
+		if (inv == null)
+		{
+			return;
+		}
+
+		// Take the whole stack out of the slot, then collect as much as the
+		// inventory can hold; whatever doesn't fit goes back into the slot.
+		var stack = store.TakeFromSlot();
+		int collected = inv.CollectItem(stack);
+		if (collected < stack.Count)
+		{
+			store.SetStack(ItemStack.From(stack.MaterialId, stack.Count - collected));
+		}
+
+		RefreshSlot(store, icon, count);
 	}
 
 	/// <summary>

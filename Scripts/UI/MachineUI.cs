@@ -263,6 +263,37 @@ public partial class MachineUI : CanvasLayer
 		_contentBox.AddChild(_closeButton);
 	}
 
+	/// <summary>True while a machine panel is open (a machine is being interacted with).</summary>
+	public bool IsOpen => _root != null && _root.Visible && _machine != null;
+
+	/// <summary>
+	/// The machine the panel is currently open on, or null when closed. Exposed
+	/// so the inventory UI can shift-click items into the open machine's input
+	/// buffer (a quick-move that bypasses the cursor).
+	/// </summary>
+	public Machine OpenMachine => IsOpen ? _machine : null;
+
+	/// <summary>
+	/// Tries to insert <paramref name="stack"/> into the OPEN machine's input
+	/// buffer (the machine's mini-inventory), respecting the buffer's capacity
+	/// and stack limits. Returns the number of items actually inserted (0 when
+	/// nothing fit or no machine is open). Used by the inventory UI's shift-click
+	/// so a stack can be quick-moved straight into the machine in one click.
+	/// </summary>
+	public int TryInsertIntoOpenMachine(ItemStack stack)
+	{
+		if (!IsOpen || stack == null || stack.IsEmpty)
+		{
+			return 0;
+		}
+		var input = _machine?.InputBuffer;
+		if (input == null)
+		{
+			return 0;
+		}
+		return input.TryInsert(stack);
+	}
+
 	/// <summary>
 	/// Opens the UI for <paramref name="machine"/>, wiring it to the player's
 	/// <paramref name="inventory"/> for item transfer. Calling it with the SAME
