@@ -348,14 +348,14 @@ public partial class MachineUI : CanvasLayer
 			return;
 		}
 		_root.Visible = open;
-		// Pass while open (NOT Stop): the root is full-rect on the higher layer,
-		// so Stop would eat every click on screen (dev pane, inventory grid, ...)
-		// while the panel is open. Pass lets clicks outside the panel fall
-		// through to the inventory beneath it; the panel (Stop) handles its own
-		// rect. See the root's creation comment for the full rationale.
-		_root.MouseFilter = open
-			? Control.MouseFilterEnum.Pass
-			: Control.MouseFilterEnum.Ignore;
+		// IGNORE (not Stop, not Pass) while open: the root is full-rect on the
+		// higher layer (120). Ignore makes it completely transparent to the
+		// mouse — it is never hit-tested, so clicks fall straight through to the
+		// inventory layer beneath it (dev pane, slot grid, hotbar). Pass would
+		// still put the full-rect control in the top layer's hit path. The panel
+		// itself (a child, Stop) still handles clicks within its own rect, so the
+		// machine panel stays interactive while the rest of the screen is live.
+		_root.MouseFilter = Control.MouseFilterEnum.Ignore;
 		// SetOpen OWNS the mouse mode so EVERY close route (Tab, Escape, the
 		// close button, the target machine being freed) re-captures the mouse.
 		Input.SetMouseMode(open
