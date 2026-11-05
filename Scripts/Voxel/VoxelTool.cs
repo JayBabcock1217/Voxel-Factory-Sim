@@ -106,10 +106,13 @@ public partial class VoxelTool : Node3D
 	private bool _targetIsMachine;
 
 	/// <summary>
-	/// The machine the player is currently aiming at (closest machine whose
-	/// voxel is within <see cref="MaxRaycastDistance"/>), or null. Machines are
-	/// targeted IN ADDITION to voxels: if both a voxel and a machine are in the
-	/// line of sight, the NEARER one wins. Right-clicking opens that machine's
+	/// The machine the player is currently aiming at, or null. This is the
+	/// machine the placement preview is anchored to: when the AABB raycast
+	/// strikes a machine, it is the one whose face was hit (derived from the
+	/// SAME hit that drives the highlight + placement cell, so right-click is
+	/// always consistent with what the player sees). When the raycast misses,
+	/// it falls back to the closest machine center in the line of sight (within
+	/// <see cref="MaxRaycastDistance"/>). Right-clicking opens this machine's
 	/// UI (see <see cref="MachineUI"/>); the target-info HUD shows its name.
 	/// </summary>
 	private Machine _targetMachine;
@@ -458,6 +461,12 @@ public partial class VoxelTool : Node3D
 		// (machEntryAxis) — that face's outward normal is what the placement
 		// offset is based on (see TryRaycastMachine).
 		bool machineHit = TryRaycastMachine(from, dir, out Vector3I machVoxel, out int machEntryAxis, out float machT);
+		// The machine the AABB raycast struck (the preview/highlight anchor).
+		// This is the machine right-click should open: it is derived from the
+		// SAME hit that drives the placement preview, so the machine you open is
+		// always the one the preview is pointing at (not a separate "closest
+		// center" machine that could disagree with what you see).
+		Machine aabbMachine = machineHit ? MachineAtVoxel(machVoxel) : null;
 		// The entry axis tells us WHICH face was struck, but the normal's SIGN
 		// depends on the direction of travel: entering through the +X face means
 		// the ray moves in −X (dir.x < 0) and the outward normal is (+1,0,0);
@@ -552,11 +561,15 @@ public partial class VoxelTool : Node3D
 			}
 		}
 
-		// MACHINE TARGETING: find the closest machine in the line of sight
-		// (within MaxRaycastDistance). Machines are targeted in ADDITION to
-		// voxels — if both are in sight, the nearer wins (right-click then opens
-		// the machine's UI rather than placing).
-		_targetMachine = FindTargetMachine(from, dir);
+		// MACHINE TARGETING: the machine right-click opens is the one the
+		// placement preview is anchored to. When the AABB raycast struck a
+		// machine (aabbMachine), that is THE machine to open — it matches the
+		// highlight/preview exactly, so right-click is always consistent with
+		// what the player is seeing. When the AABB raycast missed (the preview
+		// is on a solid voxel, or nothing), fall back to the closest machine
+		// center in the line of sight so a machine you're roughly aiming at can
+		// still be opened (the original behavior).
+		_targetMachine = aabbMachine ?? FindTargetMachine(from, dir);
 
 		// POWER-RADIUS INDICATOR: while the player aims at a power source, show
 		// a transparent yellow sphere centered on it, sized to the live power
