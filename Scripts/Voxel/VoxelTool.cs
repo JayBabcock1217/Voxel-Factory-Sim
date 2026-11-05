@@ -1288,9 +1288,45 @@ public partial class VoxelTool : Node3D
 			return info; // HasTarget stays false → panel hides
 		}
 
+		// MACHINE TARGET: a machine lives in an AIR voxel, so the material readout
+		// (below) would see Air and return early — hiding the panel entirely. When
+		// the target IS a machine, build the machine readout (name + live details:
+		// power, recipe, progress, buffers) instead, so the player sees the
+		// machine's status BEFORE right-clicking to open it.
+		if (_targetIsMachine && _targetMachine != null && _targetMachine.Definition != null)
+		{
+			info.HasTarget = true;
+			info.IsMachine = true;
+			info.MachineName = BuildMachineName(_targetMachine);
+			info.MachineDetails = BuildMachineDetails(_targetMachine);
+			// Distance to the machine's center (still useful context).
+			Vector3 mCenter = new Vector3(_targetMachine.VoxelPos.X, _targetMachine.VoxelPos.Y, _targetMachine.VoxelPos.Z)
+				* _world.VoxelSize + new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
+			info.Distance = (mCenter - cameraPos).Length();
+
+			// Placement-rotation readout (only while holding a machine item).
+			FillRotationLine(ref info);
+			return info;
+		}
+
 		int material = _world.GetVoxel(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z);
 		if (material == VoxelMaterialIds.Air)
 		{
+			// Not a machine target but the voxel reads as air: a machine might
+			// still be in the line of sight (the fallback FindTargetMachine case).
+			// Show its readout so the player sees it before right-clicking.
+			if (_targetMachine != null && _targetMachine.Definition != null)
+			{
+				info.HasTarget = true;
+				info.IsMachine = true;
+				info.MachineName = BuildMachineName(_targetMachine);
+				info.MachineDetails = BuildMachineDetails(_targetMachine);
+				Vector3 mCenter2 = new Vector3(_targetMachine.VoxelPos.X, _targetMachine.VoxelPos.Y, _targetMachine.VoxelPos.Z)
+					* _world.VoxelSize + new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
+				info.Distance = (mCenter2 - cameraPos).Length();
+				FillRotationLine(ref info);
+				return info;
+			}
 			return info; // turned to air mid-frame; treat as no target
 		}
 
@@ -1323,19 +1359,34 @@ public partial class VoxelTool : Node3D
 		info.Category = CategoryDisplayName(ToolAffinity.CategoryOf(material));
 		info.BestTool = unbreakable ? "" : BestToolName(material);
 
-		// If a machine is the target (nearer than the voxel behind it), show a
-		// machine readout instead of the material rows. The voxel info is still
-		// computed (above) but the panel emphasizes the machine.
+		// A machine may also be in the line of sight (the voxel is nearer, but a
+		// machine sits behind it within the perpendicular threshold). Show a
+		// compact machine line so the player knows there's a machine there.
 		if (_targetMachine != null && _targetMachine.Definition != null)
 		{
 			info.IsMachine = true;
-			info.MachineLine = BuildMachineLine(_targetMachine, cameraPos);
+			info.MachineName = BuildMachineName(_targetMachine);
+			info.MachineDetails = BuildMachineDetails(_targetMachine);
 		}
 
-		// While the player holds a placeable MACHINE item, show the current
-		// placement-rotation state (axis + direction) and the keys that change
-		// it — the player needs this visible to know what they're about to
-		// place, especially for machines whose orientation matters (belts).
+		FillRotationLine(ref info);
+		return info;
+	}
+
+	/// <summary>The machine's display name (falls back to its type name).</summary>
+	private static string BuildMachineName(Machine m)
+	{
+		var def = m.Definition;
+		if (def != null && !string.IsNullOrEmpty(def.Name))
+		{
+			return def.Name;
+		}
+		return m.Type.ToString();
+	}
+
+	/// <summary>Fills the placement-rotation readout (only while holding a machine item).</summary>
+	private void FillRotationLine(ref TargetInfoUI.TargetInfo info)
+	{
 		var held = HeldItem;
 		if (!held.IsEmpty && !held.IsTool && held.IsMachine)
 		{
@@ -1345,39 +1396,137 @@ public partial class VoxelTool : Node3D
 				? "Rotation: 0°  (R: axis  ↑→↓←: direction  F1: reset)"
 				: $"Rotation: {axis} {deg}°  (R: axis  ↑→↓←: direction  F1: reset)";
 		}
-		return info;
 	}
 
 	/// <summary>
-	/// Builds the one-line machine readout for the target HUD: the machine's
-	/// display name plus a short status (e.g. "— needs power", "— 50%").
+	/// Builds the machine's DETAIL ROWS for the target HUD (shown under the
+	/// machine name, before the player right-clicks to open it). Each string is
+	/// one row. The rows depend on the machine type:
+	///   - power consumers: "Power: ✓" or "Power: ✗ needs power"
+	///   - power sources:   "Output: 64/s"
+	///   - smelters:        recipe (input → output), progress %, buffer contents
+	///   - crafters:        recipe name, progress %, buffer contents
+	///   - conveyors:       the item on the belt, if any
+	/// This is the at-a-glance status the player sees while looking at the
+	/// machine, so they know its state before committing to opening it.
 	/// </summary>
-	private string BuildMachineLine(Machine m, Vector3 cameraPos)
+	private string[] BuildMachineDetails(Machine m)
 	{
-		string name = string.IsNullOrEmpty(m.Definition.Name) ? m.Type.ToString() : m.Definition.Name;
-		string status = "";
+		var list = new System.Collections.Generic.List<string>();
 		var def = m.Definition;
+		if (def == null)
+		{
+			return System.Array.Empty<string>();
+		}
+
+		// POWER: consumers show whether they're powered; sources show their output.
 		if (def.PowerConsumption > 0f)
 		{
-			status = PowerNetwork.IsPowered(_world, m.VoxelPos) ? "" : " — needs power";
+			bool powered = PowerNetwork.IsPowered(_world, m.VoxelPos);
+			list.Add(powered ? "Power: ✓" : "Power: ✗ needs power");
 		}
 		else if (def.PowerOutput > 0f)
 		{
-			status = $" — outputs {def.PowerOutput:0.#}";
+			list.Add($"Output: {def.PowerOutput:0.#}/s");
 		}
-		if (m is FactorySim.Machines.CrafterMachine crafter)
+
+		// TYPE-SPECIFIC details.
+		if (m is FactorySim.Machines.SmelterMachine smelter)
 		{
-			if (crafter.Recipe != null)
+			var recipe = smelter.CurrentRecipe;
+			if (recipe.Input > 0 && recipe.Output > 0)
 			{
-				int pct = Mathf.RoundToInt(crafter.CraftProgress * 100f);
-				status += crafter.Recipe != null ? $" — {pct}%" : "";
+				list.Add($"Recipe: {ItemName(recipe.Input)} → {ItemName(recipe.Output)}");
+				int pct = Mathf.RoundToInt(smelter.SmeltProgress * 100f);
+				list.Add($"Progress: {pct}%");
+				list.Add($"Input: {BufferSummary(smelter.InputBuffer)}");
+				list.Add($"Output: {BufferSummary(smelter.OutputBuffer)}");
 			}
 			else
 			{
-				status += " — no recipe";
+				list.Add("No recipe selected");
 			}
 		}
-		return $"{name}{status}";
+		else if (m is FactorySim.Machines.CrafterMachine crafter)
+		{
+			if (crafter.Recipe != null)
+			{
+				// The recipe's product name (from the material config); show the
+				// output count when it's more than one.
+				string prod = ItemName(crafter.Recipe.ProductId);
+				list.Add($"Recipe: {prod}{(crafter.Recipe.OutputCount > 1 ? $" x{crafter.Recipe.OutputCount}" : "")}");
+				int pct = Mathf.RoundToInt(crafter.CraftProgress * 100f);
+				list.Add($"Progress: {pct}%");
+				list.Add($"Input: {BufferSummary(crafter.InputBuffer)}");
+				list.Add($"Output: {BufferSummary(crafter.OutputBuffer)}");
+			}
+			else
+			{
+				list.Add("No recipe selected");
+			}
+		}
+		else if (m is FactorySim.Machines.ConveyorMachine conveyor)
+		{
+			var slot = conveyor.Slot;
+			if (slot != null && !slot.IsEmpty)
+			{
+				list.Add($"Carrying: {ItemName(slot[0].MaterialId)} x{slot[0].Count}");
+			}
+			else
+			{
+				list.Add("Belt: empty");
+			}
+		}
+
+		return list.ToArray();
+	}
+
+	/// <summary>
+	/// The display name of a material id (via the world's material config), or
+	/// "Item N" when the config is missing / the id is unknown. Mirrors the
+	/// MachineUI's item-name lookup so the target HUD and the machine panel
+	/// show consistent names.
+	/// </summary>
+	private string ItemName(int materialId)
+	{
+		if (_world != null && _world.MaterialConfig != null)
+		{
+			return ItemRegistry.MaterialName(_world.MaterialConfig, materialId);
+		}
+		return $"Item {materialId}";
+	}
+
+	/// <summary>
+	/// A short one-line summary of a machine buffer's contents, e.g. "3 Coal Ore"
+	/// or "empty" or "2x (Coal Ore, Iron Plate)". Used by the machine detail rows.
+	/// </summary>
+	private string BufferSummary(FactorySim.Machines.MachineBuffer buffer)
+	{
+		if (buffer == null || buffer.IsEmpty)
+		{
+			return "empty";
+		}
+		// Collect the distinct materials + total counts.
+		var counts = new System.Collections.Generic.Dictionary<int, int>();
+		for (int i = 0; i < buffer.Capacity; i++)
+		{
+			var s = buffer[i];
+			if (!s.IsEmpty)
+			{
+				counts[s.MaterialId] = counts.TryGetValue(s.MaterialId, out int c) ? c + s.Count : s.Count;
+			}
+		}
+		if (counts.Count == 0)
+		{
+			return "empty";
+		}
+		// One material: "N Name". Multiple: "Name, Name" (keep it short).
+		var parts = new System.Collections.Generic.List<string>();
+		foreach (var kv in counts)
+		{
+			parts.Add($"{kv.Value} {ItemName(kv.Key)}");
+		}
+		return string.Join(", ", parts);
 	}
 
 	/// <summary>

@@ -20,7 +20,9 @@ namespace FactorySim.UI;
 /// When there is no target (the player is looking at empty sky beyond the
 /// raycast range) the whole panel is hidden.
 ///
-/// Shown fields (top to bottom):
+/// Shown fields, depending on the target:
+///
+/// When the target is a PLAIN VOXEL (top to bottom):
 ///   - Material name (bold, the primary line)
 ///   - Health, as a percentage of full health (with a small bar)
 ///   - The most efficient tool to break it (by affinity)
@@ -28,6 +30,19 @@ namespace FactorySim.UI;
 ///   - Material category (soft / stone / wood / metal / generic)
 ///   - Distance from the camera, in world units
 ///   - A flag line when the material is unbreakable
+///
+/// When the target is a MACHINE (top to bottom):
+///   - Machine name (bold, the primary line)
+///   - Live status detail rows: power (consumer ✓/✗, source output), the
+///     current recipe (input → output or product), progress %, and the
+///     input/output buffer contents. This is the at-a-glance status the
+///     player sees BEFORE right-clicking to open the machine.
+///   - Distance from the camera, in world units
+///
+/// The mining rows (health / best tool / break time / category) are hidden
+/// for a machine (it lives in an air voxel, so the material data would read
+/// as "Air") and the detail rows are hidden for a plain voxel — so the panel
+/// always shows the rows relevant to the target and resizes to fit.
 /// </summary>
 public partial class TargetInfoUI : Node
 {
@@ -54,8 +69,10 @@ public partial class TargetInfoUI : Node
 	private Label _categoryLabel;
 	private Label _distanceLabel;
 	private Label _unbreakableLabel;
-	private Label _machineLabel;
+	private Label[] _machineDetailLabels; // detail rows (power, recipe, progress, buffers)
 	private Label _rotationLabel;
+	/// <summary>Max number of machine detail rows the panel can show at once.</summary>
+	private const int MaxMachineDetailLines = 6;
 
 	/// <summary>
 	/// The snapshot of target-voxel information to display. The VoxelTool builds
@@ -78,12 +95,19 @@ public partial class TargetInfoUI : Node
 		/// <summary>True when the material cannot be broken (e.g. bedrock).</summary>
 		public bool Unbreakable;
 		/// <summary>
-		/// A one-line machine readout (e.g. "Crafter — 50% — needs power"), shown
-		/// in place of the material rows when the player is aiming at a machine
-		/// (machines are targeted in preference to the voxel behind them). Empty
-		/// when the target is a plain voxel.
+		/// The machine's display name, shown as the main (bold) name line when
+		/// the player is aiming at a machine. Empty when the target is a plain
+		/// voxel.
 		/// </summary>
-		public string MachineLine;
+		public string MachineName;
+		/// <summary>
+		/// The machine's detail rows (power status, current recipe, progress,
+		/// input/output buffer contents), each rendered as its own line under the
+		/// machine name. Empty/absent when the target is a plain voxel. This is
+		/// what the panel shows BEFORE the player right-clicks to open the
+		/// machine — a quick at-a-glance status of the machine being looked at.
+		/// </summary>
+		public string[] MachineDetails;
 		/// <summary>True when the target is a machine (not a plain voxel).</summary>
 		public bool IsMachine;
 		/// <summary>
@@ -199,9 +223,20 @@ public partial class TargetInfoUI : Node
 		_unbreakableLabel.Visible = false;
 		vbox.AddChild(_unbreakableLabel);
 
-		_machineLabel = MakeLabel("Machine: —", 13, new Color(0.6f, 0.9f, 1.0f));
-		_machineLabel.Visible = false;
-		vbox.AddChild(_machineLabel);
+		// Machine detail rows: a fixed pool of labels, shown/hidden + filled
+		// per-frame by Update(). The count varies by machine type (a power
+		// source has one line, a smelter has four or five), so a pool lets the
+		// panel grow/shrink without creating/destroying nodes each frame. When
+		// a machine is targeted, its name replaces the bold primary name line
+		// and these rows show its live status (power, recipe, progress, buffers).
+		_machineDetailLabels = new Label[MaxMachineDetailLines];
+		for (int i = 0; i < MaxMachineDetailLines; i++)
+		{
+			var lbl = MakeLabel("", 13, new Color(0.85f, 0.9f, 0.95f));
+			lbl.Visible = false;
+			vbox.AddChild(lbl);
+			_machineDetailLabels[i] = lbl;
+		}
 
 		// The placement-rotation readout: only visible while the player holds a
 		// machine item (the VoxelTool fills RotationLine then), showing the
@@ -247,35 +282,83 @@ public partial class TargetInfoUI : Node
 
 		_panel.Visible = true;
 
-		_nameLabel.Text = info.MaterialName;
-
-		int hp = Mathf.RoundToInt(info.HealthPercent);
-		_healthLabel.Text = $"Health: {hp}%";
-
-		// Health bar fill: width is a fraction of the track width, clamped 0..1.
-		// Fall back to the known content width if the track hasn't been laid out
-		// yet (the first frame the panel becomes visible).
-		float trackW = _healthBarBg.Size.X;
-		if (trackW <= 0f)
-		{
-			trackW = PanelWidth - 2f * PanelMarginX;
-		}
-		float frac = Mathf.Clamp(info.HealthPercent / 100f, 0f, 1f);
-		float barH = _healthBarBg.Size.Y > 0f ? _healthBarBg.Size.Y : 6f;
-		_healthBarFill.Size = new Vector2(trackW * frac, barH);
-		// Recolor the fill as health drops (green -> yellow -> red).
-		_healthBarFill.Color = HealthColor(info.HealthPercent);
-
-		_bestToolLabel.Text = info.Unbreakable ? "Best tool: — (unbreakable)" : $"Best tool: {info.BestTool}";
-		_breakTimeLabel.Text = info.Unbreakable ? "Break time: — (unbreakable)" : $"Break time: {info.BreakTime:0.##}s";
-		_categoryLabel.Text = $"Category: {info.Category}";
 		_distanceLabel.Text = $"Distance: {info.Distance:0.0}m";
-		_unbreakableLabel.Visible = info.Unbreakable;
-		_machineLabel.Visible = info.IsMachine;
-		if (info.IsMachine)
+
+		// MATERIAL TARGET: show the voxel's name + its mining rows (health, best
+		// tool, break time, category, unbreakable).
+		bool isMachine = info.IsMachine;
+		if (!isMachine)
 		{
-			_machineLabel.Text = info.MachineLine;
+			_nameLabel.Text = info.MaterialName;
+
+			int hp = Mathf.RoundToInt(info.HealthPercent);
+			_healthLabel.Text = $"Health: {hp}%";
+
+			// Health bar fill: width is a fraction of the track width, clamped 0..1.
+			// Fall back to the known content width if the track hasn't been laid
+			// out yet (the first frame the panel becomes visible).
+			float trackW = _healthBarBg.Size.X;
+			if (trackW <= 0f)
+			{
+				trackW = PanelWidth - 2f * PanelMarginX;
+			}
+			float frac = Mathf.Clamp(info.HealthPercent / 100f, 0f, 1f);
+			float barH = _healthBarBg.Size.Y > 0f ? _healthBarBg.Size.Y : 6f;
+			_healthBarFill.Size = new Vector2(trackW * frac, barH);
+			// Recolor the fill as health drops (green -> yellow -> red).
+			_healthBarFill.Color = HealthColor(info.HealthPercent);
+
+			_bestToolLabel.Text = info.Unbreakable ? "Best tool: — (unbreakable)" : $"Best tool: {info.BestTool}";
+			_breakTimeLabel.Text = info.Unbreakable ? "Break time: — (unbreakable)" : $"Break time: {info.BreakTime:0.##}s";
+			_categoryLabel.Text = $"Category: {info.Category}";
+			_unbreakableLabel.Visible = info.Unbreakable;
 		}
+		else
+		{
+			// Hide the mining rows: a machine lives in an AIR voxel, so the
+			// material data would read as "Air" / 100% health — misleading. The
+			// machine's own status (name + detail rows) is what the player needs.
+			_unbreakableLabel.Visible = false;
+		}
+		// The mining rows' visibility is set once below (they show for a voxel,
+		// hide for a machine) so the panel height reflects the active rows.
+		bool showMiningRows = !isMachine;
+		_healthLabel.Visible = showMiningRows;
+		_healthBarBg.Visible = showMiningRows;
+		_bestToolLabel.Visible = showMiningRows;
+		_breakTimeLabel.Visible = showMiningRows;
+		_categoryLabel.Visible = showMiningRows;
+
+		// MACHINE READOUT: when targeting a machine, its name replaces the bold
+		// primary name line and its detail rows (power, recipe, progress,
+		// buffers) fill the detail pool. This is the at-a-glance status the
+		// player sees BEFORE right-clicking to open the machine.
+		if (isMachine)
+		{
+			_nameLabel.Text = string.IsNullOrEmpty(info.MachineName) ? "Machine" : info.MachineName;
+			var details = info.MachineDetails ?? System.Array.Empty<string>();
+			int shown = System.Math.Min(details.Length, MaxMachineDetailLines);
+			for (int i = 0; i < MaxMachineDetailLines; i++)
+			{
+				if (i < shown && !string.IsNullOrEmpty(details[i]))
+				{
+					_machineDetailLabels[i].Text = details[i];
+					_machineDetailLabels[i].Visible = true;
+				}
+				else
+				{
+					_machineDetailLabels[i].Visible = false;
+				}
+			}
+		}
+		else
+		{
+			for (int i = 0; i < MaxMachineDetailLines; i++)
+			{
+				_machineDetailLabels[i].Visible = false;
+			}
+		}
+
 		_rotationLabel.Visible = !string.IsNullOrEmpty(info.RotationLine);
 		if (!string.IsNullOrEmpty(info.RotationLine))
 		{
