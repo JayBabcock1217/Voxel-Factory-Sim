@@ -20,7 +20,9 @@ namespace FactorySim.Machines;
 ///             enters the belt and how items chain along a run of conveyors.
 ///   2. PUSH:  if its slot has an item, move it into the machine on its FRONT
 ///             face (the neighbor at <c>+flow</c>) — a processor's input, or the
-///             next conveyor's slot.
+///             next conveyor's slot. When no machine (or a full one) is on the
+///             front face, the item is ejected as a world DROP in front of the
+///             belt instead of stalling (see <see cref="TryPush"/>).
 ///
 /// Because items only ever flow front-to-back (never sideways or backward),
 /// there is no ping-pong: a ring of conveyors carries items around the loop in
@@ -199,8 +201,10 @@ public partial class ConveyorMachine : Machine
 	/// If the slot has an item, push it into the machine on the conveyor's FRONT
 	/// face (<c>VoxelPos + FlowAxis</c>). That is the only direction items leave
 	/// the belt — a processor's input or the next conveyor's slot. When no
-	/// machine (or a full one) is on the front face, the item stays in the slot
-	/// (the belt stalls), which is what prevents ping-pong.
+	/// machine (or a full one) is on the front face, the item is ejected as a
+	/// world DROP in the voxel in front of the belt (one voxel ahead along the
+	/// flow axis, lifted slightly above the floor so it falls onto the ground),
+	/// rather than stalling in the slot.
 	/// </summary>
 	private void TryPush()
 	{
@@ -225,9 +229,13 @@ public partial class ConveyorMachine : Machine
 			}
 		}
 
-		// Nothing on the front face could take the item: keep it in the slot
-		// (the belt stalls here until the front clears).
-		Slot.TryInsert(item);
+		// Nothing on the front face could take the item: eject it as a world
+		// drop in the voxel directly in front of the belt. The drop spawns at
+		// the center of that voxel, lifted 0.5 voxel above its floor, so it
+		// falls onto the ground in front of the belt like a real ejected item.
+		Vector3 dropPos = new Vector3(frontPos.X, frontPos.Y, frontPos.Z) * World.VoxelSize
+			+ new Vector3(0.5f, 1.0f, 0.5f) * World.VoxelSize;
+		DropSpawner.SpawnDrop(this, dropPos, item.MaterialId, item.Count);
 	}
 
 	/// <summary>

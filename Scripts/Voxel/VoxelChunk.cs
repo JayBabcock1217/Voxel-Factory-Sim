@@ -2153,12 +2153,7 @@ public partial class VoxelChunk : Node3D
 					// chunk doesn't re-run the delta (it's already converged).
 					_hasPatch = false;
 				}
-				else
-				{
-					// Unrelated chunk: one line, no histogram.
-					LightDebug.LogConvergence(this, false, _debugEditWorldPos,
-						dbgDeltaRan, dbgDeltaChanged, 0, 0, 0, 0, 0, 0);
-				}
+				// Unrelated chunks (no pending patch) are not logged.
 			}
 		}
 		_sectionLightDirty = false;

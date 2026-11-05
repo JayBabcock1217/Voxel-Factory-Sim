@@ -77,6 +77,40 @@ public partial class Machine : StaticBody3D
 	private Node _meshSceneRoot;
 	private CollisionShape3D _collision;
 
+	/// <summary>
+	/// The small emissive arrow shown on a REAL (placed) machine that points
+	/// along the machine's LOCAL +Z axis — its "front". Because the machine's
+	/// Basis is the placement rotation, this child's local +Z IS the world-space
+	/// front, so one shared visual works for every machine type with no
+	/// per-type logic. Present only on real machines (never on preview ghosts),
+	/// so this field is non-null only when the indicator is shown.
+	/// </summary>
+	private MeshInstance3D _directionArrow;
+
+	/// <summary>
+	/// The single shared, bright, unshaded emissive material for every direction
+	/// arrow. Saturated cyan-green so it reads clearly against any machine mesh
+	/// and in any lighting. Created once (lazily) and reused by all arrows —
+	/// one material for the whole scene, like <see cref="PreviewMaterial"/>.
+	/// </summary>
+	private static StandardMaterial3D _directionArrowMaterial;
+
+	private static StandardMaterial3D DirectionArrowMaterial
+	{
+		get
+		{
+			_directionArrowMaterial ??= new StandardMaterial3D
+			{
+				AlbedoColor = new Color(0.2f, 1.0f, 0.65f),
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded, // reads in any light
+				EmissionEnabled = true,
+				Emission = new Color(0.2f, 1.0f, 0.65f),
+				EmissionEnergyMultiplier = 1.0f,
+			};
+			return _directionArrowMaterial;
+		}
+	}
+
 	/// <summary>The shared transparent material applied to a preview ghost's meshes.</summary>
 	private static StandardMaterial3D _previewMaterial;
 
@@ -84,20 +118,23 @@ public partial class Machine : StaticBody3D
 	{
 		get
 		{
-			// A single shared, semi-transparent, unshaded material for every
-			// preview ghost. It is created once (lazily) and reused — a preview
-			// is just a visual cue, not a real machine, so it does not need its
-			// own lighting.
+			// A single shared, VERY faint, unshaded material for every preview
+			// ghost. It is created once (lazily) and reused — a preview is just
+			// a visual cue, not a real machine, so it does not need its own
+			// lighting. The opacity is deliberately LOW (the ghost should read as
+			// a faint silhouette, with the bright green direction arrow as the
+			// main cue); the albedo and emission alphas were cut from ~0.45/0.35
+			// to ~0.15/0.10 so the ghost mesh no longer washes out the world.
 			_previewMaterial ??= new StandardMaterial3D
 			{
-				AlbedoColor = new Color(0.55f, 0.85f, 1.0f, 0.45f),
+				AlbedoColor = new Color(0.55f, 0.85f, 1.0f, 0.15f),
 				Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 				DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always,
 				CullMode = BaseMaterial3D.CullModeEnum.Disabled, // double-sided
 				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 				EmissionEnabled = true,
-				Emission = new Color(0.4f, 0.7f, 1.0f, 0.35f),
-				EmissionEnergyMultiplier = 0.6f,
+				Emission = new Color(0.4f, 0.7f, 1.0f, 0.10f),
+				EmissionEnergyMultiplier = 0.4f,
 			};
 			return _previewMaterial;
 		}
@@ -146,6 +183,13 @@ public partial class Machine : StaticBody3D
 		if (!IsPreview)
 		{
 			BuildCollision(def);
+			// Only real machines show the direction arrow: a ghost is just a
+			// visual cue the player is actively rotating, so an arrow on it
+			// would be redundant clutter. Real machines get the arrow (re)built
+			// here at Initialize — there is no ghost→real conversion path (the
+			// spawner always builds the machine as a real machine first), so
+			// Initialize is the single place the indicator is (re)created.
+			BuildDirectionIndicator();
 		}
 
 		// Let the concrete machine start its behavior (the base does nothing).
@@ -272,12 +316,93 @@ public partial class Machine : StaticBody3D
 			_collision.QueueFree();
 			_collision = null;
 		}
+
+		// A ghost SHOULD show the direction arrow: it is the visual cue that
+		// tells the player which way the machine faces while they rotate the
+		// ghost (R key). Build it now if the spawner's Initialize didn't already
+		// (Initialize only builds it for real machines, and the spawner builds
+		// the ghost as a real machine before flipping IsPreview — but if the
+		// arrow is missing, build it so the preview always shows the direction).
+		if (_directionArrow == null)
+		{
+			BuildDirectionIndicator();
+		}
 	}
 
 	private static Mesh MakePlaceholderMesh()
 	{
 		var box = new BoxMesh { Size = new Vector3(0.8f, 0.8f, 0.8f) };
 		return box;
+	}
+
+	/// <summary>
+	/// Builds (or re-builds) the machine's direction indicator: one small
+	/// prism (a wedge whose triangle cross-section reads as an arrowhead)
+	/// parented to the machine, stretched along the machine's LOCAL +Z axis —
+	/// the machine's "front" (the same convention
+	/// <c>ConveyorMachine.ComputeFlowAxis</c> uses). Because the machine's
+	/// Basis is already the placement rotation, the child's local +Z is the
+	/// world-space front — no extra rotation is applied and no per-type logic
+	/// is needed, so one shared visual works for smelters, crafters, power
+	/// sources, and conveyors alike.
+	///
+	/// A <see cref="PrismMesh"/> is the fallback: the built-in <c>ArrowMesh</c>
+	/// is NOT in this GodotSharp 4.8 binding. A PrismMesh needs no custom
+	/// geometry, no texture, and no extra nodes. The indicator is deliberately
+	/// SUPER CHEAP: one primitive mesh, one shared unshaded emissive material
+	/// (reads in any light), no shadows, set up once at placement — no custom
+	/// geometry, no light, no per-frame updates.
+	///
+	/// Preview ghosts DO get the indicator — it is the cue that shows which way
+	/// the machine faces while the player rotates the ghost (R key). Real and
+	/// preview machines both build it the same way.
+	/// </summary>
+	private void BuildDirectionIndicator()
+	{
+		// Re-init safety: free any stale arrow before building a new one.
+		if (_directionArrow != null)
+		{
+			_directionArrow.QueueFree();
+			_directionArrow = null;
+		}
+
+		// Scale everything to the world's voxel size so the marker is the same
+		// relative size on the machine at any voxel scale (guard a missing
+		// world: Initialize always sets one, but stay safe).
+		float voxelSize = World != null ? World.VoxelSize : 1.0f;
+
+		// This binding's PrismMesh is a wedge (a triangle cross-section, its
+		// cross-section lying in the XZ plane), NOT a cone — and it has no
+		// radius properties. That is still exactly right: its triangular
+		// cross-section is a clear arrowhead shape, and with Size.Z it
+		// stretches ALONG the machine's front axis (+Z), so no rotation is
+		// needed at all. Sized in voxel units (scaled to the voxel size
+		// below): short and narrow in X/Y (a cue, not the body), longer along
+		// Z so it reads as an arrow pointing where the machine faces.
+		var arrow = new PrismMesh
+		{
+			Size = new Vector3(0.24f, 0.12f, 0.4f),
+		};
+
+		_directionArrow = new MeshInstance3D
+		{
+			Name = "DirectionArrow",
+			Mesh = arrow,
+			MaterialOverride = DirectionArrowMaterial,
+			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off, // no shadow cost
+		};
+
+		// Position it near the FRONT face (local +Z) and slightly above center
+		// so it sits just in front of the machine body — visible, pointing at
+		// the machine's front, without occluding the mesh. The prism is
+		// centered on its origin, so placing the origin ~0.4 voxels forward of
+		// center puts its tip ~0.6 voxels forward (a little past the front face
+		// on purpose — that is what makes the direction read unambiguously).
+		_directionArrow.Position = new Vector3(0f, 0.25f, 0.4f) * voxelSize;
+		// Scale to the voxel size (the mesh itself is authored in ~1-voxel units).
+		_directionArrow.Scale = new Vector3(voxelSize, voxelSize, voxelSize);
+
+		AddChild(_directionArrow);
 	}
 
 	/// <summary>

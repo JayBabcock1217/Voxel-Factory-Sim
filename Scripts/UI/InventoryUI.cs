@@ -41,7 +41,7 @@ public partial class InventoryUI : CanvasLayer
 	// Horizontal layout for the three main sections: [dev pane | slot grid |
 	// craft pane]. The container positions and sizes them automatically so they
 	// never overlap, regardless of the inventory's row/column counts.
-	private HBoxContainer _hbox;
+	private Control _hbox;
 	private readonly Control[] _slotControls = new Control[Inventory.TotalSlots];
 	private readonly TextureRect[] _slotIcons = new TextureRect[Inventory.TotalSlots];
 	private readonly Label[] _slotCounts = new Label[Inventory.TotalSlots];
@@ -259,6 +259,48 @@ public partial class InventoryUI : CanvasLayer
 		=> _inventory != null && _inventory.IsOpen;
 
 	/// <summary>
+	/// The crafting pane panel (the rightmost section of the inventory). Exposed
+	/// so <see cref="MachineUI"/> can hide/show it when the machine panel takes
+	/// its place. The craft pane is a plain positioned control (not a container
+	/// child), so it can be freely repositioned.
+	/// </summary>
+	public Control GetCraftPane() => _craftPanel;
+
+	/// <summary>
+	/// The viewport-space (screen-pixel) rect of the crafting pane (the right
+	/// slot). Returns <c>false</c> when the craft pane doesn't exist yet
+	/// (inventory not built) or the inventory's top-level panel is hidden. The
+	/// <see cref="MachineUI"/> uses this to position its panel exactly over the
+	/// crafting pane. Uses GlobalPosition/GlobalSize (unambiguous screen pixels
+	/// for a CanvasLayer subtree) rather than a manual transform, so it is robust
+	/// to the inventory's own CanvasLayer offset.
+	/// </summary>
+	public bool GetRightSlotRect(out Rect2 rect)
+	{
+		rect = default;
+		if (_craftPanel == null || !IsInstanceValid(_craftPanel))
+		{
+			return false;
+		}
+		// Gate on the inventory's TOP-LEVEL panel being visible (the thing
+		// SetOpenVisuals flips), NOT the craft pane — the MachineUI hides the
+		// craft pane while it is open, so gating on the craft pane's own
+		// visibility would always fail.
+		if (_panel == null || !_panel.Visible)
+		{
+			return false;
+		}
+		Vector2 top = _craftPanel.GlobalPosition;
+		Vector2 bottom = _craftPanel.GlobalPosition + _craftPanel.Size;
+		if (bottom.X - top.X < 1f || bottom.Y - top.Y < 1f)
+		{
+			return false;
+		}
+		rect = new Rect2(top, bottom - top);
+		return true;
+	}
+
+	/// <summary>
 	/// The index (0..HotbarSize-1) of the currently selected hotbar slot. This
 	/// is the slot whose item is "active" in the player's hand — the tool
 	/// system reads it to decide which tool breaks blocks, and the place
@@ -307,7 +349,16 @@ public partial class InventoryUI : CanvasLayer
 		SelectHotbarSlot(index);
 	}
 
-	public override void _UnhandledKeyInput(InputEvent @event)
+	// The TAB toggle is handled in _Input, NOT _UnhandledKeyInput. _Input runs
+	// BEFORE GUI focus handling, so it always sees the key even when a control
+	// (e.g. the dev pane's TabContainer, after the player clicks one of its tab
+	// buttons) would otherwise consume TAB for its own tab navigation. This is
+	// what made the inventory un-closeable after clicking a dev tab: the
+	// focused TabContainer ate the key before it ever reached the old
+	// _UnhandledKeyInput handler. We also SetInputAsHandled() so the key is not
+	// forwarded on to the focused tab (which would flip the tab as a side
+	// effect of closing the inventory).
+	public override void _Input(InputEvent @event)
 	{
 		if (!(@event is InputEventKey key && key.Pressed && !key.Echo))
 		{
@@ -316,9 +367,10 @@ public partial class InventoryUI : CanvasLayer
 
 		if (key.Keycode == Key.Tab || Input.IsActionJustPressed("inventory_toggle"))
 		{
-			// TAB always toggles, regardless of mouse mode.
+			// TAB always toggles, regardless of mouse mode or which control has
+			// focus. Consume the event so it does not also move tab focus.
 			ToggleOpen();
-			return;
+			GetViewport().SetInputAsHandled();
 		}
 
 		// Note: hotbar selection (number keys 1-9,0 and the mouse wheel) is
@@ -476,13 +528,18 @@ public partial class InventoryUI : CanvasLayer
 		title.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
 		_panel.AddChild(title);
 
-		// The horizontal container that lays out the three sections. It is
-		// explicitly positioned to fill the panel's content area (inset by
-		// `pad` on every side, leaving room for the title at the top), with
-		// `gap` separation between the sections.
+		// The SECTIONS container: a plain (non-layout) Control that fills the
+		// panel's content area (inset by `pad`, below the title). The three
+		// sections (dev pane, slot grid, craft pane) are its children, but they
+		// are POSITIONED MANUALLY (LayoutMode 3) — NOT by an HBoxContainer.
+		// This is deliberate: a container owns its children's positions, which
+		// makes it impossible to move the craft pane (e.g. when the machine UI
+		// swaps the machine panel in for it). With manual positioning we can
+		// move the craft pane anywhere freely. The `gap` value is applied as
+		// the x-offset between sections below.
 		float hboxY = 36f; // below the title (title is at y 8..28)
 		float hboxH = panelH - hboxY - pad;
-		_hbox = new HBoxContainer
+		_hbox = new Control
 		{
 			Name = "Sections",
 			LayoutMode = 3, // Position
@@ -490,21 +547,48 @@ public partial class InventoryUI : CanvasLayer
 			Size = new Vector2(panelW - pad * 2f, hboxH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_hbox.AddThemeConstantOverride("separation", (int)gap);
 		_panel.AddChild(_hbox);
 
-		// Create the dev pane Panel NOW and add it to the HBox FIRST, so it ends
-		// up leftmost (index 0). Its inner content (title, hint, item list) is
-		// filled in later by BuildDevPanel — this split lets us control the
-		// HBox child order without a MoveChild call (which crashes the mono
-		// bridge in Godot 4.8).
-		float devPaneH = gridH + 12f;
+		// Section x-offsets (manual, with `gap` between them):
+		//   dev pane: x=0 .. devW
+		//   grid:     x=devW+gap .. devW+gap+gridW
+		//   craft:    x=devW+gap+gridW+gap .. right edge
+		float devX = 0f;
+		float gridX = devW + gap;
+		float craftX = devW + gap + gridW + gap;
+		float devCraftPaneH = gridH + 12f; // dev/craft pane height (a touch taller than the grid)
+
+		// The craft pane (rightmost section). A PLAIN positioned control (not a
+		// container child) so the machine UI can move it. Its inner content is
+		// filled in later by BuildCrafting.
+		_craftPanel = new Panel
+		{
+			Name = "CraftPanel",
+			LayoutMode = 3, // Position
+			Position = new Vector2(craftX, 0f),
+			Size = new Vector2(craftW, devCraftPaneH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		var craftStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
+			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+		};
+		_craftPanel.AddThemeStyleboxOverride("panel", craftStyle);
+		_hbox.AddChild(_craftPanel); // added first (renders behind, leftmost z)
+
+		// The dev pane (leftmost section). Created NOW and filled later by
+		// BuildDevPanel; positioned manually at x=devX.
 		_devPanel = new Panel
 		{
 			Name = "DevPanel",
-			LayoutMode = 2,
-			CustomMinimumSize = new Vector2(devW, devPaneH),
-			Size = new Vector2(devW, devPaneH),
+			LayoutMode = 3, // Position
+			Position = new Vector2(devX, 0f),
+			Size = new Vector2(devW, devCraftPaneH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		var devStyle = new StyleBoxFlat
@@ -517,19 +601,19 @@ public partial class InventoryUI : CanvasLayer
 			BorderWidthBottom = 1,
 		};
 		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
-		_hbox.AddChild(_devPanel); // index 0 = leftmost
+		_hbox.AddChild(_devPanel);
 
 		// Slot grid section: a Control that holds the slot cells at their local
-		// (row, col) offsets. It is a child of the HBoxContainer (index 1), so
-		// the container positions it between the dev and craft panes.
+		// (row, col) offsets. Positioned manually between the dev and craft panes.
 		var gridSection = new Control
 		{
 			Name = "GridSection",
-			LayoutMode = 2,
-			CustomMinimumSize = new Vector2(gridW, gridH),
+			LayoutMode = 3, // Position
+			Position = new Vector2(gridX, 0f),
+			Size = new Vector2(gridW, gridH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_hbox.AddChild(gridSection); // index 1 = middle
+		_hbox.AddChild(gridSection);
 
 		// Slot grid: rows 0..5 = storage (12 cols each, slots 10-81),
 		// row 6 = hotbar (10 cols, slots 0-9). Both rows are centered within
@@ -616,6 +700,14 @@ public partial class InventoryUI : CanvasLayer
 		_cursorCount.AddThemeConstantOverride("outline_size", 3);
 		_cursor.AddChild(_cursorCount);
 		_root.AddChild(_cursor);
+
+		// Wire this inventory's cursor visual into the SHARED slot grid so the
+		// drag cursor shows when dragging between the inventory grid and the
+		// machine slots (the MachineUI reuses InventorySlotGrid, which owns the
+		// shared cursor stack). The inventory's own RefreshCursor still runs;
+		// both keep the same visual in sync (the shared grid's cursor stack is
+		// the source of truth for machine-slot drags).
+		InventorySlotGrid.SetCursorVisual(_cursor, _cursorIcon, _cursorCount);
 
 		// Hover tooltip: a small panel that follows the mouse when over a
 		// populated slot, showing the material name and count.
@@ -804,35 +896,16 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private void BuildCrafting()
 	{
+		// The craft pane (_craftPanel) is created and positioned in BuildUi (it
+		// must exist before the machine UI can reference it). Here we only fill
+		// in its inner content.
+		if (_craftPanel == null)
+		{
+			return;
+		}
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		const float craftW = 320f;   // wider crafting pane
-		// The craft pane's height matches the grid section (the HBox aligns all
-		// three sections to the same height). We size it explicitly so the inner
-		// layout math is exact.
 		float paneH = gridH + 12f;   // a little taller than the grid to look balanced
-
-		// The craft pane is a child of the HBoxContainer (added AFTER the grid
-		// section in BuildUi), so the container positions it to the right of the
-		// grid automatically — no absolute x needed.
-		_craftPanel = new Panel
-		{
-			Name = "CraftPanel",
-			LayoutMode = 2,
-			CustomMinimumSize = new Vector2(craftW, paneH),
-			Size = new Vector2(craftW, paneH),
-			MouseFilter = Control.MouseFilterEnum.Ignore,
-		};
-		var craftStyle = new StyleBoxFlat
-		{
-			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
-			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-		};
-		_craftPanel.AddThemeStyleboxOverride("panel", craftStyle);
-		_hbox.AddChild(_craftPanel);
 
 		// Inner layout of the craft pane (all relative to the pane's top-left):
 		//   title (y 6..26) / tab strip (y 30..54) / scrollable list / queue bar.

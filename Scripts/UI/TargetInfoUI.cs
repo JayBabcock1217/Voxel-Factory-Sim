@@ -55,6 +55,7 @@ public partial class TargetInfoUI : Node
 	private Label _distanceLabel;
 	private Label _unbreakableLabel;
 	private Label _machineLabel;
+	private Label _rotationLabel;
 
 	/// <summary>
 	/// The snapshot of target-voxel information to display. The VoxelTool builds
@@ -85,6 +86,14 @@ public partial class TargetInfoUI : Node
 		public string MachineLine;
 		/// <summary>True when the target is a machine (not a plain voxel).</summary>
 		public bool IsMachine;
+		/// <summary>
+		/// A one-line machine-placement-rotation readout (e.g. "Rotation: Y 90°
+		/// (R: axis ←→: rotate ↑↓: set Esc: reset)"), shown only while the
+		/// player is holding a placeable machine item. Empty otherwise — the
+		/// VoxelTool fills it in so the player always sees the current
+		/// orientation and the keys that change it.
+		/// </summary>
+		public string RotationLine;
 	}
 
 	public override void _Ready()
@@ -194,6 +203,13 @@ public partial class TargetInfoUI : Node
 		_machineLabel.Visible = false;
 		vbox.AddChild(_machineLabel);
 
+		// The placement-rotation readout: only visible while the player holds a
+		// machine item (the VoxelTool fills RotationLine then), showing the
+		// current orientation + the keys that change it.
+		_rotationLabel = MakeLabel("", 12, new Color(0.55f, 0.95f, 0.7f));
+		_rotationLabel.Visible = false;
+		vbox.AddChild(_rotationLabel);
+
 		_panel.Visible = false; // hidden until the tool reports a target
 		_layer.AddChild(_panel);
 		AddChild(_layer);
@@ -259,6 +275,11 @@ public partial class TargetInfoUI : Node
 		if (info.IsMachine)
 		{
 			_machineLabel.Text = info.MachineLine;
+		}
+		_rotationLabel.Visible = !string.IsNullOrEmpty(info.RotationLine);
+		if (!string.IsNullOrEmpty(info.RotationLine))
+		{
+			_rotationLabel.Text = info.RotationLine;
 		}
 
 		// Resize the panel background to fit its rows: the VBox's combined

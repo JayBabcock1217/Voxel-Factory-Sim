@@ -97,6 +97,22 @@ public partial class VoxelTool : Node3D
 	private Vector3 _targetNormal;
 
 	/// <summary>
+	/// True when the current target voxel is a MACHINE cell (an AIR voxel that a
+	/// placed machine occupies), as opposed to a solid voxel. The target
+	/// highlight renders a plain fill box + cube outline for a machine cell
+	/// (see <see cref="EnsureHighlightMesh"/>) instead of the material's own
+	/// exposed-face wireframe, which would be empty for air.
+	/// </summary>
+	private bool _targetIsMachine;
+
+	/// <summary>
+	/// One-shot guard for the machine-raycast diagnostic print (see
+	/// <c>_Process</c>): the diagnostic line is emitted exactly once per tool
+	/// lifetime so the console is not spammed every frame.
+	/// </summary>
+	private bool _diagMachineRaycast;
+
+	/// <summary>
 	/// The machine the player is currently aiming at (closest machine whose
 	/// voxel is within <see cref="MaxRaycastDistance"/>), or null. Machines are
 	/// targeted IN ADDITION to voxels: if both a voxel and a machine are in the
@@ -116,6 +132,19 @@ public partial class VoxelTool : Node3D
 	private Vector3I _previewCell;
 	private int _previewItemId;
 	private FactorySim.Machines.MachineRotation _previewRotation;
+
+	// The placement-preview ROTATION AXIS LINE: a short, bright, unshaded line
+	// that runs from the center of the preview ghost out along the active
+	// rotation axis (X/Y/Z, cycled by R). It is colored with the axis color
+	// (X=red, Y=green, Z=blue) so the player always sees WHICH axis the arrow
+	// keys will rotate about. It is a sibling of the ghost (added to the same
+	// "Machines" root) so it shares the ghost's lifetime: hidden with it, freed
+	// with it.
+	private MeshInstance3D _axisLine;
+	private BoxMesh _axisLineMesh;
+	private StandardMaterial3D _axisLineMat;
+	private int _axisLineAxis = -1; // the axis the line currently points along (-1 = not built)
+	private float _axisLineLen;    // half-length in world units (VoxelSize-scaled)
 
 	/// <summary>
 	/// The player's CURRENT machine placement orientation (the R-key state).
@@ -423,12 +452,74 @@ public partial class VoxelTool : Node3D
 		Vector3 from = _camera.GlobalPosition;
 		Vector3 dir = -_camera.GlobalTransform.Basis.Z; // cameras look down -Z
 
-		if (_world.RaycastVoxels(from, dir, MaxRaycastDistance, out Vector3I hitVoxel, out Vector3 hitNormal))
+		// TARGETING: raycast the voxel grid AND the placed machines, and let the
+		// NEARER hit win. Machines live in AIR voxels (the spawner refuses to put
+		// a machine into a solid voxel), so the pure DDA voxel walk never "hits"
+		// one — without the extra machine raycast the target highlight would miss
+		// machines entirely, and the "targeted cell" readout / placement preview
+		// would be computed from the voxel BEHIND the machine instead of the
+		// machine's face (so the player couldn't build off a machine's side).
+		bool voxelHit = _world.RaycastVoxels(from, dir, MaxRaycastDistance, out Vector3I hitVoxel, out Vector3 hitNormal);
+		float voxelDist = voxelHit ? VoxelHitDistance(from, hitVoxel, hitNormal) : float.PositiveInfinity;
+		// The machine raycast also reports WHICH FACE the ray entered through
+		// (machEntryAxis) — that face's outward normal is what the placement
+		// offset is based on (see TryRaycastMachine).
+		bool machineHit = TryRaycastMachine(from, dir, out Vector3I machVoxel, out int machEntryAxis, out float machT);
+		Vector3 machNormal = machEntryAxis switch
+		{
+			0 => new Vector3(-1f, 0f, 0f),
+			1 => new Vector3(0f, -1f, 0f),
+			2 => new Vector3(0f, 0f, -1f),
+			_ => Vector3.Zero,
+		};
+
+		// DIAGNOSTIC (temporary — removed in a later pass): print once per
+		// machine-target so we can confirm at runtime the raycast finds machines
+		// and that the entry-axis → face-normal mapping is correct. Fires the
+		// moment the target BECOMES a machine (state transition), not every
+		// frame, so it captures the actual aim-at-a-machine moment (the old
+		// one-shot fired at spawn, before any machine was in view).
+		bool isMachineTarget = machineHit && machT < voxelDist;
+		if (isMachineTarget && !_diagMachineRaycast)
+		{
+			_diagMachineRaycast = true;
+			GD.Print($"[RaycastDiag] AIMING AT MACHINE machVoxel={machVoxel} entryAxis={machEntryAxis} machNormal={machNormal} machT={machT} voxelDist={voxelDist} from={from} dir={dir}");
+		}
+		if (!isMachineTarget)
+		{
+			_diagMachineRaycast = false; // re-arm: print again on the NEXT machine aim
+		}
+
+		if (isMachineTarget)
+		{
+			// The machine is the nearest hit: it becomes THE target, so the
+			// highlight renders on the machine's voxel and the placement cell is
+			// the empty voxel on the far side of the machine face the ray struck.
+			_hasTarget = true;
+			_targetVoxel = machVoxel;
+			_targetNormal = machNormal;
+			_targetIsMachine = true;
+		}
+		else if (voxelHit)
 		{
 			_hasTarget = true;
 			_targetVoxel = hitVoxel;
 			_targetNormal = hitNormal;
+			_targetIsMachine = false;
+		}
+		else
+		{
+			_hasTarget = false;
+			_targetIsMachine = false;
+			// No target: stop damaging. Per-voxel damage stays in _mineDamage
+			// so re-aiming at a partially-mined voxel resumes where it left off.
+			_highlight.Visible = false;
+			_highlightMeshInstance.Visible = false;
+			_highlightFill.Visible = false;
+		}
 
+		if (_hasTarget)
+		{
 			// The highlight is a Node3D whose pivot sits at the targeted voxel's
 			// CENTER; its child mesh holds the voxel's own edge geometry in local
 			// space (0..voxelSize per axis, after the world->local translation in
@@ -446,7 +537,7 @@ public partial class VoxelTool : Node3D
 			float vs = _world.VoxelSize;
 			_highlight.GlobalTransform = new Transform3D(
 				Basis.Identity,
-				new Vector3(hitVoxel.X, hitVoxel.Y, hitVoxel.Z) * vs
+				new Vector3(_targetVoxel.X, _targetVoxel.Y, _targetVoxel.Z) * vs
 				+ new Vector3(0.5f, 0.5f, 0.5f) * vs);
 			// Both the wireframe and the fill box are centered on the local
 			// origin (the voxel center), so scaling each MeshInstance about its
@@ -463,21 +554,12 @@ public partial class VoxelTool : Node3D
 			// the console — on failure we keep the previous mesh.
 			try
 			{
-				EnsureHighlightMesh(hitVoxel);
+				EnsureHighlightMesh(_targetVoxel, _targetIsMachine);
 			}
 			catch (System.Exception e)
 			{
-				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {hitVoxel}: {e.Message}");
+				GD.PushWarning($"[VoxelTool] Highlight rebuild failed for voxel {_targetVoxel}: {e.Message}");
 			}
-		}
-		else
-		{
-			_hasTarget = false;
-			// No target: stop damaging. Per-voxel damage stays in _mineDamage
-			// so re-aiming at a partially-mined voxel resumes where it left off.
-			_highlight.Visible = false;
-			_highlightMeshInstance.Visible = false;
-			_highlightFill.Visible = false;
 		}
 
 		// MACHINE TARGETING: find the closest machine in the line of sight
@@ -577,20 +659,50 @@ public partial class VoxelTool : Node3D
 			}
 			else
 			{
-				// R key: cycle the machine placement rotation through the 12
-				// supported orientations (4×90° about each axis, wrapping). This
-				// is only meaningful while holding a machine item, but it is
-				// harmless to allow it always (it just changes the persistent
-				// _currentRotation, which is applied to the next machine placed
-				// and shown in the preview). Using the physical keycode so it
-				// works regardless of keyboard layout / IME.
-				if (@event is InputEventKey rkey
-					&& rkey.Pressed && !rkey.Echo
-					&& (rkey.PhysicalKeycode == Key.R || rkey.Keycode == Key.R))
+				// MACHINE ROTATION CONTROLS (only meaningful while holding a
+				// machine item, but harmless to allow always — they change the
+				// persistent _currentRotation / _rotationAxis, applied to the
+				// next machine and shown in the preview + HUD):
+				//
+				//   R / Q   : cycle the active rotation AXIS (X → Y → Z → X).
+				//   ↑ / → / ↓ / ← : set the ABSOLUTE direction about the active
+				//                   axis — Up = 0°, Right = 90°, Down = 180°,
+				//                   Left = 270°. (The four arrows are the four
+				//                   directions, so every press is unambiguous and
+				//                   the ghost never "doesn't change".)
+				//   F1      : reset to Identity (0° about any axis).
+				//
+				// Physical keycodes so it works regardless of layout / IME.
+				// The arrow keys are not used for anything else (WASD is
+				// movement), so there is no collision.
+				if (@event is InputEventKey k && k.Pressed && !k.Echo)
 				{
-					CycleMachineRotation();
+					Key key = k.PhysicalKeycode != Key.None ? k.PhysicalKeycode : k.Keycode;
+					switch (key)
+					{
+						case Key.R:
+						case Key.Q:
+							CycleRotationAxis();
+							break;
+						case Key.Up:
+							SetMachineRotation(0);   // 0°
+							break;
+						case Key.Right:
+							SetMachineRotation(1);   // 90°
+							break;
+						case Key.Down:
+							SetMachineRotation(2);   // 180°
+							break;
+						case Key.Left:
+							SetMachineRotation(3);   // 270°
+							break;
+						case Key.F1:
+							ResetMachineRotation();
+							break;
+					}
 				}
-				else if (@event is InputEventKey ckey
+
+				if (@event is InputEventKey ckey
 					&& ckey.Pressed && !ckey.Echo
 					&& (ckey.PhysicalKeycode == Key.C || ckey.Keycode == Key.C))
 				{
@@ -612,17 +724,68 @@ public partial class VoxelTool : Node3D
 	}
 
 	/// <summary>
-	/// Cycles the player's persistent machine placement rotation to the next of
-	/// the 12 supported orientations (4×90° about X/Y/Z, wrapping). The new
-	/// value is stored in <see cref="_currentRotation"/> and, if a preview ghost
-	/// is currently shown, the ghost is rebuilt to reflect it immediately.
+	/// The active rotation AXIS for the ←/→/↑/↓ controls (X → Y → Z, cycled by
+	/// R). This is PERSISTENT like <see cref="_currentRotation"/>: it survives
+	/// re-selecting a machine and opening the inventory.
 	/// </summary>
-	private void CycleMachineRotation()
+	private int _rotationAxis = 0;
+
+	/// <summary>
+	/// Cycles the active rotation axis (X → Y → Z → X) and refreshes the
+	/// preview so the HUD line updates immediately.
+	/// </summary>
+	private void CycleRotationAxis()
 	{
-		_currentRotation = _currentRotation.Next();
-		// If a preview is up, reflect the new rotation now (the next _Process
-		// frame would also catch it, but doing it here makes the R press feel
-		// instant).
+		_rotationAxis = (_rotationAxis + 1) % 3;
+		RefreshRotationPreview();
+	}
+
+	/// <summary>
+	/// Sets the placement rotation to an ABSOLUTE direction about the active
+	/// axis: <paramref name="quadrant"/> 0 = 0° (Identity), 1 = 90°, 2 = 180°,
+	/// 3 = 270°. The four arrow keys map one-to-one onto these (↑=0, →=90,
+	/// ↓=180, ←=270), so every press produces exactly one unambiguous state.
+	/// </summary>
+	private void SetMachineRotation(int quadrant)
+	{
+		_currentRotation = RotationFor(_rotationAxis, quadrant);
+		RefreshRotationPreview();
+	}
+
+	/// <summary>Resets the placement rotation to Identity (0° about any axis).</summary>
+	private void ResetMachineRotation()
+	{
+		_currentRotation = MachineRotation.Identity;
+		RefreshRotationPreview();
+	}
+
+	/// <summary>
+	/// The direction (quadrant) of the current rotation, in steps of 90°:
+	/// Identity = 0, 90° = 1, 180° = 2, 270° = 3.
+	/// </summary>
+	private static int QuadrantsOf(MachineRotation r) => (int)r % 4;
+
+	/// <summary>
+	/// Builds the <see cref="MachineRotation"/> for a given axis (0=X, 1=Y, 2=Z)
+	/// and direction in 90° quadrants (0 = Identity, 1 = 90°, 2 = 180°, 3 = 270°).
+	/// </summary>
+	private static MachineRotation RotationFor(int axis, int quadrants)
+	{
+		int q = ((quadrants % 4) + 4) % 4;
+		switch (axis)
+		{
+			case 0: return q switch { 0 => MachineRotation.Identity, 1 => MachineRotation.X90, 2 => MachineRotation.X180, _ => MachineRotation.X270 };
+			case 1: return q switch { 0 => MachineRotation.Identity, 1 => MachineRotation.Y90, 2 => MachineRotation.Y180, _ => MachineRotation.Y270 };
+			default: return q switch { 0 => MachineRotation.Identity, 1 => MachineRotation.Z90, 2 => MachineRotation.Z180, _ => MachineRotation.Z270 };
+		}
+	}
+
+	/// <summary>
+	/// Rebuilds the placement preview immediately after a rotation change so the
+	/// R/arrow press feels instant (the next _Process frame would also catch it).
+	/// </summary>
+	private void RefreshRotationPreview()
+	{
 		if (_preview != null)
 		{
 			UpdatePreview();
@@ -798,8 +961,8 @@ public partial class VoxelTool : Node3D
 	/// <summary>
 	/// Shows / updates / hides the transparent machine placement preview. Called
 	/// every frame from <c>_Process</c> (cheap: it early-returns when nothing
-	/// changed) and from <see cref="CycleMachineRotation"/> for an instant R-key
-	/// response.
+	/// changed) and from the rotation controls (<see cref="RefreshRotationPreview"/>)
+	/// for an instant R / arrow-key response.
 	///
 	/// The preview is shown only when ALL of: the held item is a placeable
 	/// machine (not a tool, not empty, not a plain material), there is a target,
@@ -827,6 +990,7 @@ public partial class VoxelTool : Node3D
 		Vector3I cell = PreviewCell;
 		int itemId = held.MaterialId;
 		var rotation = _currentRotation;
+		int axis = _rotationAxis;
 
 		// The cell must be placeable (in bounds + not occupied) for the ghost to
 		// be meaningful; if it isn't, hide the ghost (the placement would fail
@@ -837,10 +1001,25 @@ public partial class VoxelTool : Node3D
 			return;
 		}
 
+		// AXIS LINE FIRST: if only the rotation axis changed (R key) while the
+		// ghost stayed in the same cell, re-orient/retint the line in place
+		// WITHOUT touching the ghost. Doing this before the early-return (and
+		// not folding the axis into the ghost's change-detect) matters: an
+		// axis-only change must NOT rebuild the ghost, and the line must be
+		// updated on the same frame the axis changes — if we waited for the
+		// early-return to fall through, a same-cell axis change would never
+		// reach the line update (the ghost itself only changes on arrow keys /
+		// cell moves, which is when the line gets updated as a side effect).
+		if (_preview != null && _preview.Visible)
+		{
+			UpdateAxisLine(ghostCenterOf(_preview), axis);
+		}
+
 		// Nothing changed since the last frame AND the ghost is currently shown:
-		// it is already in the right place with the right rotation. (If the ghost
-		// was hidden this frame — e.g. the player briefly lost the target — we
-		// still need to re-show it, so require Visible too.)
+		// it is already in the right place with the right rotation AND the axis
+		// line already points the right way (it was just updated above). (If the
+		// ghost was hidden this frame — e.g. the player briefly lost the target
+		// — we still need to re-show it, so require Visible too.)
 		if (_preview != null && _preview.Visible
 			&& _previewCell == cell && _previewItemId == itemId && _previewRotation == rotation)
 		{
@@ -867,18 +1046,116 @@ public partial class VoxelTool : Node3D
 		_previewCell = cell;
 		_previewItemId = itemId;
 		_previewRotation = rotation;
+
+		// The ghost was just (re)spawned: make sure the line is up at the new
+		// center with the current axis.
+		UpdateAxisLine(ghostCenterOf(ghost), axis);
 	}
 
-	/// <summary>Hides the preview ghost without destroying it (keeps it for reuse).</summary>
+	/// <summary>
+	/// The world-space CENTER of a preview ghost's voxel (voxel corner + half a
+	/// voxel along each axis, scaled by VoxelSize) — where the rotation-axis
+	/// line is anchored.
+	/// </summary>
+	private Vector3 ghostCenterOf(Machine m)
+	{
+		Vector3I v = m.VoxelPos;
+		return new Vector3(v.X, v.Y, v.Z) * _world.VoxelSize
+			+ new Vector3(0.5f, 0.5f, 0.5f) * _world.VoxelSize;
+	}
+
+	/// <summary>
+	/// Shows / re-orients / retints the placement-preview ROTATION AXIS LINE: a
+	/// short bright line from the preview center out along the active rotation
+	/// axis (X=red, Y=green, Z=blue), in both directions along that axis. The
+	/// line is a sibling of the ghost (same "Machines" root) so it shares its
+	/// lifetime. Cheap: it early-returns when the axis, length, and position
+	/// are all unchanged.
+	/// </summary>
+	private void UpdateAxisLine(Vector3 center, int axis)
+	{
+		float len = _world.VoxelSize * 0.75f; // a bit longer than half a voxel on each side
+
+		if (_axisLine == null)
+		{
+			_axisLineMesh = new BoxMesh();
+			_axisLineMat = new StandardMaterial3D
+			{
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+				AlbedoColor = new Color(1f, 0f, 0f, 0.9f),
+				EmissionEnabled = true,
+				Emission = new Color(1f, 0f, 0f, 1f),
+				EmissionEnergyMultiplier = 0.6f,
+				DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.Always, // draw through the faint ghost
+			};
+			_axisLine = new MeshInstance3D
+			{
+				Name = "PreviewAxisLine",
+				Mesh = _axisLineMesh,
+				MaterialOverride = _axisLineMat,
+				CastShadow = GeometryInstance3D.ShadowCastingSetting.Off, // no shadow cost
+			};
+			// Parent it to the "Machines" root so it shares the ghosts' parent
+			// (and the world's transforms, if the root is ever re-parented).
+			// A ghost being spawned means the root exists; fall back to the
+			// scene root only as a safety net.
+			var root = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
+			if (root != null)
+			{
+				root.AddChild(_axisLine);
+			}
+			else
+			{
+				GetTree()?.Root.AddChild(_axisLine);
+			}
+			_axisLineAxis = -1;
+		}
+
+		bool shapeChanged = _axisLineAxis != axis || Mathf.Abs(_axisLineLen - len) > 1e-5f;
+		if (shapeChanged)
+		{
+			// Orient the box along the active axis: its long dimension is the
+			// axis, the other two are thin.
+			Vector3 size = axis switch
+			{
+				0 => new Vector3(len, 0.06f, 0.06f),   // X
+				1 => new Vector3(0.06f, len, 0.06f),   // Y
+				_ => new Vector3(0.06f, 0.06f, len),   // Z
+			};
+			_axisLineMesh.Size = size;
+
+			// Axis color: X=red, Y=green, Z=blue.
+			Color c = axis switch
+			{
+				0 => new Color(1f, 0.25f, 0.25f, 0.9f),
+				1 => new Color(0.3f, 1f, 0.35f, 0.9f),
+				_ => new Color(0.35f, 0.55f, 1f, 0.9f),
+			};
+			_axisLineMat.AlbedoColor = c;
+			_axisLineMat.Emission = new Color(c.R, c.G, c.B, 1f);
+
+			_axisLineAxis = axis;
+			_axisLineLen = len;
+		}
+
+		_axisLine.Position = center;
+	}
+
+	/// <summary>Hides the preview ghost (and its rotation-axis line) without destroying them.</summary>
 	private void HidePreview()
 	{
 		if (_preview != null)
 		{
 			_preview.Visible = false;
 		}
+		if (_axisLine != null)
+		{
+			_axisLine.Visible = false;
+		}
 	}
 
-	/// <summary>Destroys the preview ghost node (frees it from the tree).</summary>
+	/// <summary>Destroys the preview ghost (queued free) and its rotation-axis line.</summary>
 	private void DestroyPreview()
 	{
 		if (_preview != null)
@@ -886,9 +1163,40 @@ public partial class VoxelTool : Node3D
 			_preview.QueueFree();
 			_preview = null;
 		}
+		// Free the axis line IMMEDIATELY (not queued): the line is re-created
+		// every time the ghost is rebuilt (arrow key / cell move), and a queued
+		// free would leave the old line alive in the tree for another frame —
+		// long enough for it to overwrite the freshly built one in the render
+		// pass, which made the line "disappear until you move to a new voxel".
+		FreeAxisLine();
 		_previewCell = default;
 		_previewItemId = 0;
 		_previewRotation = default;
+	}
+
+	/// <summary>
+	/// Immediately frees the rotation-axis line (node + mesh + material) and
+	/// resets its state. Safe to call when the line is not up.
+	/// </summary>
+	private void FreeAxisLine()
+	{
+		if (_axisLine != null)
+		{
+			_axisLine.Free();
+			_axisLine = null;
+		}
+		if (_axisLineMesh != null)
+		{
+			_axisLineMesh.Dispose();
+			_axisLineMesh = null;
+		}
+		if (_axisLineMat != null)
+		{
+			_axisLineMat.Dispose();
+			_axisLineMat = null;
+		}
+		_axisLineAxis = -1;
+		_axisLineLen = 0f;
 	}
 
 
@@ -1020,6 +1328,20 @@ public partial class VoxelTool : Node3D
 			info.IsMachine = true;
 			info.MachineLine = BuildMachineLine(_targetMachine, cameraPos);
 		}
+
+		// While the player holds a placeable MACHINE item, show the current
+		// placement-rotation state (axis + direction) and the keys that change
+		// it — the player needs this visible to know what they're about to
+		// place, especially for machines whose orientation matters (belts).
+		var held = HeldItem;
+		if (!held.IsEmpty && !held.IsTool && held.IsMachine)
+		{
+			string axis = _rotationAxis switch { 0 => "X", 1 => "Y", _ => "Z" };
+			int deg = QuadrantsOf(_currentRotation) * 90;
+			info.RotationLine = _currentRotation == MachineRotation.Identity
+				? "Rotation: 0°  (R: axis  ↑→↓←: direction  F1: reset)"
+				: $"Rotation: {axis} {deg}°  (R: axis  ↑→↓←: direction  F1: reset)";
+		}
 		return info;
 	}
 
@@ -1102,6 +1424,150 @@ public partial class VoxelTool : Node3D
 			}
 		}
 		return best;
+	}
+
+	/// <summary>
+	/// Returns the placed (non-preview) <see cref="Machine"/> whose <see
+	/// cref="Machine.VoxelPos"/> equals <paramref name="v"/>, or null when no
+	/// machine occupies that voxel. Iterates the shared "Machines" root node
+	/// exactly like <see cref="FindTargetMachine"/> / the spawner's occupancy
+	/// check do. Machines live in AIR voxels, so a targeted machine cell reads
+	/// as air from the world — this lookup is how the target highlight (and any
+	/// other air-voxel query) can tell that the cell is really a machine.
+	/// </summary>
+	private Machine MachineAtVoxel(Vector3I v)
+	{
+		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			return null;
+		}
+		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+		{
+			if (machinesRoot.GetChild(i) is Machine m && !m.IsPreview && m.VoxelPos == v)
+			{
+				return m;
+			}
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Raycasts the camera ray against every placed machine's FULL voxel AABB
+	/// and returns the NEAREST one hit (within <see cref="MaxRaycastDistance"/>).
+	/// Machines live in AIR voxels (the spawner refuses to place one into a solid
+	/// voxel), so the pure DDA voxel walk never hits them — this test is what
+	/// makes a machine targetable. <paramref name="hitVoxel"/> comes back as the
+	/// machine's voxel; <paramref name="entryAxis"/> comes back as the INDEX of
+	/// the face (0=X, 1=Y, 2=Z) the ray ENTERED through — the axis whose slab
+	/// boundary produced the entry t. The caller turns that axis into the face's
+	/// outward normal (−axis, pointing back toward the camera), and the placement
+	/// offset is then hitVoxel + normal = the empty voxel on the far side of that
+	/// face. Deriving the face from the slab (not from the entry point) keeps the
+	/// normal exact even when the ray enters through a top/bottom face or a
+	/// corner, where an entry-point test would be ambiguous. <paramref
+	/// name="hitT"/> is the distance along the ray to the entry point. Returns
+	/// false when the ray misses every machine.
+	/// </summary>
+	private bool TryRaycastMachine(Vector3 from, Vector3 dir, out Vector3I hitVoxel, out int entryAxis, out float hitT)
+	{
+		hitVoxel = default;
+		entryAxis = -1;
+		hitT = float.PositiveInfinity;
+
+		var machinesRoot = GetTree().Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			return false;
+		}
+
+		float vs = _world.VoxelSize;
+		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+		{
+			if (!(machinesRoot.GetChild(i) is Machine m) || m.IsPreview)
+			{
+				continue;
+			}
+			// The machine's FULL voxel AABB in world space: min = VoxelPos * vs,
+			// max = (VoxelPos + 1) * vs.
+			Vector3 boxMin = new Vector3(m.VoxelPos.X, m.VoxelPos.Y, m.VoxelPos.Z) * vs;
+			Vector3 boxMax = boxMin + new Vector3(vs, vs, vs);
+
+			// Slab-method ray-vs-AABB: the closest t at which the ray is inside
+			// all three axis-aligned slabs is the entry t (and the farthest t is
+			// the exit t). t1 < 0 < t2 means the box is behind the ray; t1 > t2
+			// means the ray misses.
+			float tmin = 0f; // clamp to 0: a hit behind the camera doesn't count
+			float tmax = MaxRaycastDistance;
+			int entryA = -1; // the axis whose slab boundary produced the entry t
+			bool hit = true;
+			for (int axis = 0; axis < 3; axis++)
+			{
+				float d = dir[axis];
+				if (Mathf.Abs(d) < 1e-8f)
+				{
+					// The ray is PARALLEL to this slab: dividing by ~0 would
+					// produce ±infinity and corrupt tmin/tmax. The ray is inside
+					// this slab for its whole length, so it constrains t at all —
+					// but it only reaches the box at all when the origin's
+					// coordinate is already within the slab (inclusive with a
+					// tiny epsilon). Otherwise the ray runs alongside the box
+					// and misses it.
+					if (from[axis] < boxMin[axis] - 1e-8f || from[axis] > boxMax[axis] + 1e-8f)
+					{
+						hit = false;
+						break;
+					}
+					continue;
+				}
+				float b1 = (boxMin[axis] - from[axis]) / d;
+				float b2 = (boxMax[axis] - from[axis]) / d;
+				float t1 = Mathf.Min(b1, b2);
+				float t2 = Mathf.Max(b1, b2);
+				// Record the axis that pushes tmin up to its current (largest)
+				// value — that is the face the ray enters through.
+				if (t1 > tmin)
+				{
+					tmin = t1;
+					entryA = axis;
+				}
+				tmax = Mathf.Min(tmax, t2);
+				if (tmin > tmax)
+				{
+					hit = false;
+					break;
+				}
+			}
+			if (!hit || tmin > MaxRaycastDistance)
+			{
+				continue;
+			}
+
+			// Keep only the NEAREST machine (smallest entry t).
+			if (tmin < hitT)
+			{
+				hitT = tmin;
+				hitVoxel = m.VoxelPos;
+				entryAxis = entryA;
+			}
+		}
+		return hitT != float.PositiveInfinity;
+	}
+
+	/// <summary>
+	/// The distance from <paramref name="from"/> to the STRUCK FACE of the voxel
+	/// a voxel raycast hit: the face on the <paramref name="normal"/> side, i.e.
+	/// the voxel's world-space center minus half a voxel along the normal. This
+	/// is the ray-distance of the voxel hit, used to compare voxel vs. machine
+	/// hits nearest-wins.
+	/// </summary>
+	private float VoxelHitDistance(Vector3 from, Vector3I voxel, Vector3 normal)
+	{
+		float vs = _world.VoxelSize;
+		Vector3 facePoint = new Vector3(voxel.X, voxel.Y, voxel.Z) * vs
+			+ new Vector3(0.5f, 0.5f, 0.5f) * vs
+			- normal * (vs * 0.5f);
+		return (facePoint - from).Length();
 	}
 
 	/// <summary>
@@ -1199,8 +1665,14 @@ public partial class VoxelTool : Node3D
 	/// voxel, fewer faces where a neighbour is solid). The shared palette supplies
 	/// a valid material slot; <see cref="_highlightMaterial"/> (set via
 	/// MaterialOverride) is what actually renders the glow.
+	///
+	/// When <paramref name="isMachine"/> is true the target voxel is AIR with a
+	/// machine inside it (machines live in air voxels), so there is no material
+	/// to mesh: the highlight falls back to a PLAIN unit-cube outline (all 12
+	/// edges) built from a single solid placeholder voxel, plus the translucent
+	/// fill box — an unmistakable marker on the machine cell.
 	/// </summary>
-	private void EnsureHighlightMesh(Vector3I voxel)
+	private void EnsureHighlightMesh(Vector3I voxel, bool isMachine)
 	{
 		if (_meshedTarget == voxel && _highlightWireframe != null)
 		{
@@ -1208,9 +1680,10 @@ public partial class VoxelTool : Node3D
 		}
 
 		int material = _world.GetVoxel(voxel.X, voxel.Y, voxel.Z);
-		if (material <= 0)
+		if (material <= 0 && !isMachine)
 		{
 			// Target turned to air: show nothing (the next frame hides it too).
+			// (A machine target IS an air voxel, so isMachine suppresses the bail.)
 			_highlightMeshInstance.Visible = false;
 			_highlightFill.Visible = false;
 			return;
@@ -1220,6 +1693,55 @@ public partial class VoxelTool : Node3D
 		// for a solid target — even when the wireframe has few or no exposed
 		// faces — so the highlight is unmistakable.
 		_highlightFill.Visible = true;
+
+		if (isMachine)
+		{
+			// Machine cell (air voxel): there is no material surface to mesh, so
+			// build a plain unit-cube outline instead — a 1×1×1 chunk whose
+			// single voxel is a solid PLACEHOLDER material (the color doesn't
+			// matter; the highlight material overrides it) with a self-contained
+			// solid query that is true ONLY for that exact cell. Every one of the
+			// six faces is exposed (all neighbors read as air), so BuildVisual
+			// emits all 12 cube edges — a clean full-cube outline around the
+			// machine cell. This reuses the existing BuildVisual + BuildEdgeMesh
+			// path (which the caller's try/catch guards) and ends in the same
+			// wireframe-assignment / visibility code as the solid-voxel path.
+			material = VoxelMaterialIds.Stone; // any valid solid id; color is overridden
+			var cubeData = new ChunkData(1, 1, 1);
+			cubeData.Set(0, 0, 0, (byte)material);
+
+			System.Func<int, int, int, bool> cubeSolidQuery = (lx, y, lz) =>
+				lx == 0 && lz == 0 && y == 0; // solid ONLY at the target cell, air for every neighbor
+
+			float cubeVs = _world.VoxelSize;
+			_highlightPivotWorld = new Vector3(voxel.X, voxel.Y, voxel.Z) * cubeVs
+				+ new Vector3(0.5f, 0.5f, 0.5f) * cubeVs;
+			System.Func<Vector2I, ChunkData> cubeNoNeighbors = _ => null;
+			var cubeFaces = MeshBuilder.BuildVisual(
+				cubeData, voxel.X, voxel.Y, 1f, _world.Palette, cubeSolidQuery,
+				neighborChunkQuery: cubeNoNeighbors);
+			var cubeWire = BuildEdgeMesh(cubeFaces, _highlightPivotWorld);
+			_meshedTarget = voxel;
+			if (cubeWire != null)
+			{
+				// Keep the "wireframe is non-null" invariant the cache check at
+				// the top of this method relies on (the non-machine path does
+				// the same).
+				_highlightWireframe = cubeWire;
+				_highlightMeshInstance.Mesh = cubeWire;
+				_highlightMeshInstance.MaterialOverride = _highlightMaterial;
+				_highlightMeshInstance.Visible = true;
+			}
+			else
+			{
+				// No exposed faces (shouldn't happen for a fully-exposed cube):
+				// hide the wireframe, but the fill box still marks the cell.
+				_highlightWireframe = null;
+				_highlightMeshInstance.Visible = false;
+			}
+			_highlight.Visible = true;
+			return;
+		}
 
 		var data = new ChunkData(1, 1, 1);
 		data.Set(0, 0, 0, (byte)material);

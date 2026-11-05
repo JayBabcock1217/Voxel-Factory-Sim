@@ -164,10 +164,10 @@ public static class LightDebug
 		{
 			return;
 		}
+		// Unrelated chunk rebuilds are not logged (they produced noise — the
+		// edited chunk is the only one worth a convergence histogram).
 		if (!isEditedChunk)
 		{
-			// Unrelated chunk rebuild — one line, no histogram.
-			GD.Print($"[LightDebug]   convergence (unrelated) chunk {chunk.Coord}");
 			return;
 		}
 		GD.Print($"[LightDebug] === CONVERGENCE (EDITED) chunk {chunk.Coord} (edit @ {worldPos}) ===");

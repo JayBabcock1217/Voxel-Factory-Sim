@@ -44,6 +44,15 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	public const int TerrainRenderLayer = 2;
 
+	/// <summary>
+	/// A static handle to the live voxel world, set in <see cref="_Ready"/> and
+	/// cleared in <see cref="_ExitTree"/>. Lets STATIC systems (the
+	/// <see cref="FactorySim.UI.InventorySlotGrid"/> icon helper, which has no
+	/// node context) resolve the world's palette for item icons without a group
+	/// lookup. Null when no world is active.
+	/// </summary>
+	public static VoxelWorld Current { get; private set; }
+
 	[ExportGroup("Chunks")]
 	/// <summary>Chunk width/depth in voxels (XZ).</summary>
 	[Export(PropertyHint.Range, "8,64,8")]
@@ -925,6 +934,15 @@ public partial class VoxelWorld : Node3D
 	/// <summary>Maximum LOD region meshes to build concurrently on the thread pool.</summary>
 	private const int MaxConcurrentLodBuilds = 4;
 
+	public override void _ExitTree()
+	{
+		// Clear the static handle so a stale world never outlives the scene.
+		if (ReferenceEquals(Current, this))
+		{
+			Current = null;
+		}
+	}
+
 	public override void _Ready()
 	{
 		// Safety net for stale scene data: a `= null` export override loads as 0/false,
@@ -934,6 +952,10 @@ public partial class VoxelWorld : Node3D
 
 		// VoxelTool (and any other systems) can locate us via this group.
 		AddToGroup("voxel_world");
+
+		// Static handle for systems that can't easily resolve a node (e.g. the
+		// static InventorySlotGrid icon helper). Cleared in _ExitTree.
+		Current = this;
 
 		// The DebugLight export drives the static LightDebug.Enabled flag (the
 		// diagnostic reads the static, the world reads the export). Syncing here

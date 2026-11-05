@@ -47,9 +47,22 @@ public partial class WorldSave : Node
 	[Export]
 	public bool EnableSaveShortcut { get; set; } = true;
 
-	/// <summary>Key that triggers a manual save when <see cref="EnableSaveShortcut"/> is on.</summary>
+	/// <summary>
+	/// When true, every save (manual or on-quit) prints a <c>[WorldSave] World
+	/// saved to slot ...</c> line to the console. Off by default — the line is
+	/// purely diagnostic and was spamming the console on every save. The save
+	/// itself always happens regardless of this flag.
+	/// </summary>
 	[Export]
-	public Key SaveKey { get; set; } = Key.S;
+	public bool LogSaves { get; set; } = false;
+
+	/// <summary>
+	/// Key that triggers a manual save when <see cref="EnableSaveShortcut"/> is on.
+	/// Default is F5 — deliberately NOT a movement key. (It used to default to S,
+	/// which is also <c>move_back</c>, so every step backward saved the world.)
+	/// </summary>
+	[Export]
+	public Key SaveKey { get; set; } = Key.F5;
 
 	/// <summary>The most recent snapshot written to / read from disk (or null).</summary>
 	public WorldSaveFile.Data Snapshot { get; private set; }
@@ -370,10 +383,15 @@ public partial class WorldSave : Node
 		WorldSaveFile.Write(path, data);
 		Snapshot = data;
 		UpsertIndexEntry(slotId, slotName, data.Seed);
-		GD.Print($"[WorldSave] World saved to slot '{slotId}' ({path}) " +
-			$"({data.Edits.Count} edits, {data.Health.Count} health, " +
-			$" {data.Inventory.Count} slots, {data.Drops.Count} drops, " +
-			$"{data.Machines.Count} machines).");
+		// The per-save line is diagnostic-only and gated on LogSaves (it was
+		// spamming the console on every save). The save itself always runs.
+		if (LogSaves)
+		{
+			GD.Print($"[WorldSave] World saved to slot '{slotId}' ({path}) " +
+				$"({data.Edits.Count} edits, {data.Health.Count} health, " +
+				$" {data.Inventory.Count} slots, {data.Drops.Count} drops, " +
+				$"{data.Machines.Count} machines).");
+		}
 		return slotId;
 	}
 
