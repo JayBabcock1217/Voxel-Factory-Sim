@@ -123,6 +123,15 @@ public partial class SmelterMachine : Machine
 			return;
 		}
 
+		// TRANSFER OUTPUT: push one product from the output buffer into the
+		// first adjacent conveyor that can take it (any of the six sides). This
+		// is the smelter's active hand-off — it does not depend on a conveyor
+		// being oriented with the smelter on its back face, so the product flows
+		// to a neighboring conveyor regardless of which face it sits on. (A
+		// conveyor can also pull the smelter's output from its back face; the two
+		// paths coexist, whichever runs first wins the item.)
+		PushOutput();
+
 		if (_smelting)
 		{
 			// Advance the in-progress smelt.
@@ -182,6 +191,63 @@ public partial class SmelterMachine : Machine
 				return; // pulled one unit this tick
 			}
 		}
+	}
+
+	/// <summary>
+	/// Actively pushes one product from the output buffer into the FIRST adjacent
+	/// machine that can take it (any of the six sides), symmetric to
+	/// <see cref="GatherInput"/>. This is the smelter's hand-off: it does not
+	/// depend on a conveyor being oriented with the smelter on its back face, so
+	/// the product flows to a neighboring conveyor/machine regardless of which
+	/// face it sits on. Pushes one unit per tick to keep the flow one-by-one.
+	/// </summary>
+	private void PushOutput()
+	{
+		var item = Output.TryExtract(0, 1); // 0 = any
+		if (item.IsEmpty)
+		{
+			return;
+		}
+		foreach (var neighborPos in NeighborPositions())
+		{
+			var neighbor = NeighborMachine(neighborPos);
+			if (neighbor == null || neighbor == this)
+			{
+				continue;
+			}
+			// Try the neighbor's input buffer first (the "input" the player sees),
+			// then fall back to its output buffer (e.g. a belt's slot, or the
+			// other end of a chain).
+			var input = neighbor.InputBuffer;
+			if (input != null)
+			{
+				int inserted = input.TryInsert(item);
+				if (inserted > 0)
+				{
+					if (inserted < item.Count)
+					{
+						// Neighbor took part: keep the remainder in our output.
+						Output.TryInsert(ItemStack.From(item.MaterialId, item.Count - inserted));
+					}
+					return;
+				}
+			}
+			var output = neighbor.OutputBuffer;
+			if (output != null && output != input)
+			{
+				int inserted = output.TryInsert(item);
+				if (inserted > 0)
+				{
+					if (inserted < item.Count)
+					{
+						Output.TryInsert(ItemStack.From(item.MaterialId, item.Count - inserted));
+					}
+					return;
+				}
+			}
+		}
+		// No neighbor could take it: put it back in our output buffer.
+		Output.TryInsert(item);
 	}
 
 	/// <summary>

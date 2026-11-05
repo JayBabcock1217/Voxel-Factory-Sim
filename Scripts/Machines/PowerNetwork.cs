@@ -95,6 +95,14 @@ public static class PowerNetwork
 		float production = 0f;
 		float consumption = 0f;
 
+		// Guard against the world node being freed (scene teardown, world swap):
+		// a machine's _PhysicsProcess can run one more frame after the VoxelWorld
+		// is out of the tree, and GetTree() on a freed node throws. IsInsideTree
+		// is the reliable check (it is false once the node leaves the tree).
+		if (!world.IsInsideTree())
+		{
+			return 0f;
+		}
 		var machinesRoot = world.GetTree().Root.GetNodeOrNull<Node3D>("Machines");
 		if (machinesRoot == null)
 		{
@@ -137,8 +145,9 @@ public static class PowerNetwork
 	/// </summary>
 	public static Machine MachineAt(VoxelWorld world, Vector3I voxelPos)
 	{
-		if (world == null)
+		if (world == null || !world.IsInsideTree())
 		{
+			// The world is gone (freed / out of the tree) — GetTree() would throw.
 			return null;
 		}
 		var machinesRoot = world.GetTree().Root.GetNodeOrNull<Node3D>("Machines");
