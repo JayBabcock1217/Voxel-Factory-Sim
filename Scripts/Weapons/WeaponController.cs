@@ -102,11 +102,13 @@ public partial class WeaponController : Node3D
 		// The InventoryUI finds this controller by group to read/write the
 		// per-weapon ammo store (the ammo slot below the hotbar).
 		AddToGroup("weapon_controller");
-		// Default the config to a fresh instance (with the built-in stats) if
-		// the inspector didn't assign one, so the controller always has a valid
+		// Default the config to the built-in resource (Res/WeaponBehavior_Default.tres)
+		// if the inspector didn't assign one, so the controller always has a valid
 		// config to read from. To customize, assign a WeaponBehavior resource to
 		// the Config export in the inspector and edit its Stats array there.
-		_config = Config ?? new WeaponBehavior();
+		_config = Config
+			?? GD.Load<WeaponBehavior>("res://Res/WeaponBehavior_Default.tres")
+			?? new WeaponBehavior();
 		_world = GetNodeOrNull<VoxelWorld>(VoxelWorldPath)
 			?? (GetTree().GetFirstNodeInGroup("voxel_world") as VoxelWorld);
 		_camera = GetNodeOrNull<Camera3D>(CameraPath);

@@ -177,9 +177,17 @@ public partial class WeaponBehavior : Resource
 	// change minimally: WeaponBehavior.X(w)  ->  config.X(w)).
 	// ------------------------------------------------------------------
 
+	/// <summary>
+	/// The base value of the <see cref="WeaponType"/> enum (Smg = 300). The
+	/// <see cref="Stats"/> array is indexed by <c>(int)weapon - WeaponBase</c>
+	/// so that Smg → 0, Shotgun → 1, RocketLauncher → 2, Flamethrower → 3,
+	/// matching the array's 0-based indexing.
+	/// </summary>
+	private const int WeaponBase = 300;
+
 	private WeaponStats Get(WeaponType weapon)
 	{
-		int idx = (int)weapon;
+		int idx = (int)weapon - WeaponBase;
 		if (Stats != null && idx >= 0 && idx < Stats.Length && Stats[idx] != null)
 		{
 			return Stats[idx];
