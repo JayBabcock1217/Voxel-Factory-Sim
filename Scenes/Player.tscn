@@ -3,7 +3,6 @@
 [ext_resource type="Script" uid="uid://c24bd5dbxt2nc" path="res://Scripts/Player.cs" id="1_player"]
 [ext_resource type="Script" uid="uid://dlym8abq0owo0" path="res://Scripts/Voxel/VoxelTool.cs" id="2_voxeltool"]
 [ext_resource type="Script" uid="uid://gi1q6wjm8d4m" path="res://Scripts/Weapons/WeaponController.cs" id="3_weaponcontroller"]
-[ext_resource type="Script" uid="uid://ccxlbk5xt6fdk" path="res://Scripts/Weapons/WeaponBehavior.cs" id="4_dewec"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_body"]
 radius = 0.3
@@ -17,11 +16,6 @@ roughness = 0.6
 material = SubResource("StandardMaterial3D_body")
 radius = 0.3
 height = 1.8
-
-[sub_resource type="Resource" id="Resource_frkhe"]
-script = ExtResource("4_dewec")
-Stats = Array[Object]([])
-metadata/_custom_type_script = "uid://ccxlbk5xt6fdk"
 
 [sub_resource type="SphereShape3D" id="SphereShape_pickup"]
 radius = 1.2
@@ -45,7 +39,6 @@ PowerRadiusOpacity = 0.05
 
 [node name="WeaponController" type="Node3D" parent="." unique_id=2114456890]
 script = ExtResource("3_weaponcontroller")
-Config = SubResource("Resource_frkhe")
 
 [node name="PickupArea" type="Area3D" parent="." unique_id=1817004961]
 collision_layer = 0

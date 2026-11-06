@@ -56,11 +56,12 @@ public partial class WeaponController : Node3D
 	/// <summary>
 	/// The weapon stats config (per-weapon fire rate, damage, pellets, spread,
 	/// blast radius, projectile speed/gravity/lifetime, ammo compatibility,
-	/// fire mode, ...). EDITABLE IN THE INSPECTOR: assign a custom
-	/// <see cref="WeaponBehavior"/> resource here to tune any weapon without
-	/// recompiling. Defaults to a fresh instance with the built-in values.
+	/// fire mode, ...). EDITABLE IN THE INSPECTOR: the field is pre-populated
+	/// with a fresh <see cref="WeaponBehavior"/> (built-in defaults) so you can
+	/// expand its Stats array and tweak any value right in the inspector — no
+	/// need to click "New" first. Assign a custom resource to override.
 	/// </summary>
-	[Export] public WeaponBehavior Config { get; set; }
+	[Export] public WeaponBehavior Config { get; set; } = new();
 
 	private Camera3D _camera;
 	private VoxelWorld _world;
@@ -102,13 +103,10 @@ public partial class WeaponController : Node3D
 		// The InventoryUI finds this controller by group to read/write the
 		// per-weapon ammo store (the ammo slot below the hotbar).
 		AddToGroup("weapon_controller");
-		// Default the config to the built-in resource (Res/WeaponBehavior_Default.tres)
-		// if the inspector didn't assign one, so the controller always has a valid
-		// config to read from. To customize, assign a WeaponBehavior resource to
-		// the Config export in the inspector and edit its Stats array there.
-		_config = Config
-			?? GD.Load<WeaponBehavior>("res://Res/WeaponBehavior_Default.tres")
-			?? new WeaponBehavior();
+		// The Config field is pre-populated with a fresh WeaponBehavior (built-in
+		// defaults) by the field initializer, so it is always non-null. If the
+		// inspector assigned a custom resource, that is used instead.
+		_config = Config;
 		_world = GetNodeOrNull<VoxelWorld>(VoxelWorldPath)
 			?? (GetTree().GetFirstNodeInGroup("voxel_world") as VoxelWorld);
 		_camera = GetNodeOrNull<Camera3D>(CameraPath);
@@ -166,12 +164,12 @@ public partial class WeaponController : Node3D
 	}
 
 	/// <summary>
-	/// The active weapon stats config (never null — defaults to a fresh
-	/// instance with the built-in stats when the inspector export is null).
+	/// The active weapon stats config (never null — the Config field is
+	/// pre-populated with a fresh WeaponBehavior by its field initializer).
 	/// Exposed so the <see cref="ProjectileSpawner"/> / <see cref="Projectile"/>
 	/// and the <see cref="InventoryUI"/> can read the same editable values.
 	/// </summary>
-	public WeaponBehavior ActiveConfig => _config ??= Config ?? new WeaponBehavior();
+	public WeaponBehavior ActiveConfig => _config ?? Config;
 
 	// ------------------------------------------------------------------
 	// Per-frame: refresh the held mesh + animation, and fire the weapon.
