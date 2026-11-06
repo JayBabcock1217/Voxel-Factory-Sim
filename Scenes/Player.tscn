@@ -33,6 +33,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
 
 [node name="VoxelTool" type="Node3D" parent="." unique_id=1351639177]
 script = ExtResource("2_voxeltool")
+HighlightFillOpacity = 0.05
+PowerRadiusOpacity = 0.05
 
 [node name="PickupArea" type="Area3D" parent="." unique_id=1817004961]
 collision_layer = 0
