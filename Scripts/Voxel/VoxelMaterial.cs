@@ -88,8 +88,38 @@ public static class VoxelMaterialIds
 	/// <summary>True when <paramref name="id"/> is in the machine item id range (a broad test; a machine also needs a registered definition).</summary>
 	public static bool IsMachineId(int id) => id >= MachineFirst && id <= MachineLast;
 
+	// ------------------------------------------------------------------
+	// Weapon items (not placeable voxels; they live in the inventory and are
+	// selected from the hotbar to shoot). Like tools and machines, these ids
+	// are NOT solid materials — the world never stamps them and the
+	// mesh/palette builders never see them. They exist so a weapon is a
+	// first-class inventory item (see ItemStack.WeaponType / ItemRegistry).
+	//
+	// The range starts at 300 (above the machine block, 200-299) and is
+	// deliberately wide (up to 399) so many future weapon types can be added
+	// without touching the range. The WeaponType enum's underlying values are
+	// the weapon item ids (the same convention as ToolType / MachineType).
+	// ------------------------------------------------------------------
+	public const int WeaponFirst = 300;
+	public const int WeaponLast = 399;
+
+	/// <summary>True when <paramref name="id"/> is a weapon item id (a broad range test; a weapon also needs a registered type).</summary>
+	public static bool IsWeaponId(int id) => id >= WeaponFirst && id <= WeaponLast;
+
+	// ------------------------------------------------------------------
+	// Ammo items (stackable consumables loaded into a weapon's ammo slot).
+	// These are NOT placeable voxels and NOT tools/machines — they are
+	// first-class inventory items (see ItemStack.AmmoType) whose only purpose
+	// is to be loaded into a compatible weapon. The range starts at 400.
+	// ------------------------------------------------------------------
+	public const int AmmoFirst = 400;
+	public const int AmmoLast = 499;
+
+	/// <summary>True when <paramref name="id"/> is an ammo item id.</summary>
+	public static bool IsAmmoId(int id) => id >= AmmoFirst && id <= AmmoLast;
+
 	/// <summary>True when <paramref name="id"/> is a placeable material (a solid voxel you can hold and place).</summary>
-	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id) && !IsMachineId(id);
+	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id) && !IsMachineId(id) && !IsWeaponId(id) && !IsAmmoId(id);
 }
 
 /// <summary>

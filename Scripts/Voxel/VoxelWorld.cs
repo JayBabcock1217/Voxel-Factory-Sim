@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using FactorySim.Items;
+using FactorySim.Weapons;
 
 namespace FactorySim.Voxel;
 
@@ -2839,6 +2840,14 @@ public partial class VoxelWorld : Node3D
 		// clear (a no-op).
 		ClearAllMachinesImmediate();
 		ClearAllDropsImmediate();
+
+		// Ensure the player's weapon controller exists (the held-item mesh, the
+		// use animations, the ammo store, and the firing logic). Created as a
+		// child of the player; idempotent, so a re-spawn is a no-op. On a fresh
+		// world / save switch the loaded ammo is cleared (ammo must not persist
+		// across saves, like machines and drops).
+		var controller = WeaponSpawner.EnsureController(player);
+		controller?.ClearAllAmmo();
 
 		var save = GetSaveService();
 		if (save == null)

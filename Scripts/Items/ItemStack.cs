@@ -42,6 +42,26 @@ public class ItemStack
 	public MachineType? MachineType { get; set; }
 
 	/// <summary>
+	/// The weapon kind this stack represents, when <see cref="MaterialId"/> is a
+	/// weapon id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsWeaponId"/>).
+	/// <see langword="null"/> for everything else. A weapon is a single,
+	/// non-stacking item (Count is 1) that, when selected in the hotbar, becomes
+	/// the active weapon the player can fire with the primary mouse button. Its
+	/// loaded ammo lives in the weapon's own ammo slot (see the ammo feature),
+	/// not on this stack.
+	/// </summary>
+	public WeaponType? WeaponType { get; set; }
+
+	/// <summary>
+	/// The ammo kind this stack represents, when <see cref="MaterialId"/> is an
+	/// ammo id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsAmmoId"/>).
+	/// <see langword="null"/> for everything else. Ammo is a STACKABLE consumable
+	/// (Count up to <see cref="StackLimit"/>) whose only use is being loaded into
+	/// a compatible weapon's ammo slot and consumed as the weapon fires.
+	/// </summary>
+	public AmmoType? AmmoType { get; set; }
+
+	/// <summary>
 	/// The BLOCK LIGHT LEVEL this item emits when placed as a voxel (0-15).
 	/// 0 = not a light source (the default for every ordinary material). A
 	/// non-zero value marks the item as a light source: when it is placed, the
@@ -63,6 +83,12 @@ public class ItemStack
 	/// <summary>True when this stack is a machine item (carries a non-null <see cref="MachineType"/>).</summary>
 	public bool IsMachine => MachineType.HasValue;
 
+	/// <summary>True when this stack is a weapon item (carries a non-null <see cref="WeaponType"/>).</summary>
+	public bool IsWeapon => WeaponType.HasValue;
+
+	/// <summary>True when this stack is an ammo item (carries a non-null <see cref="AmmoType"/>).</summary>
+	public bool IsAmmo => AmmoType.HasValue;
+
 	/// <summary>Creates a stack of <paramref name="count"/> of a material.</summary>
 	public static ItemStack From(int materialId, int count = 1)
 		=> new() { MaterialId = materialId, Count = count };
@@ -83,5 +109,23 @@ public class ItemStack
 			MaterialId = (int)type,
 			Count = 1,
 			MachineType = type,
+		};
+
+	/// <summary>Creates a single weapon item of the given <paramref name="type"/> (non-stacking, no ammo loaded).</summary>
+	public static ItemStack FromWeapon(WeaponType type)
+		=> new()
+		{
+			MaterialId = (int)type,
+			Count = 1,
+			WeaponType = type,
+		};
+
+	/// <summary>Creates a stack of <paramref name="count"/> of the given <paramref name="type"/> of ammo.</summary>
+	public static ItemStack FromAmmo(AmmoType type, int count)
+		=> new()
+		{
+			MaterialId = (int)type,
+			Count = count,
+			AmmoType = type,
 		};
 }

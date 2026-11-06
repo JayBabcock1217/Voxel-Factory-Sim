@@ -21,6 +21,14 @@ public readonly struct ItemEntry
 	public bool IsMachine { get; }
 	/// <summary>The machine kind, when this entry is a machine item (null otherwise).</summary>
 	public MachineType? MachineKind { get; }
+	/// <summary>True when this entry is a weapon item (carries a <see cref="WeaponType"/>).</summary>
+	public bool IsWeapon { get; }
+	/// <summary>The weapon kind, when this entry is a weapon item (null otherwise).</summary>
+	public WeaponType? WeaponKind { get; }
+	/// <summary>True when this entry is an ammo item (carries an <see cref="AmmoType"/>).</summary>
+	public bool IsAmmo { get; }
+	/// <summary>The ammo kind, when this entry is an ammo item (null otherwise).</summary>
+	public AmmoType? AmmoKind { get; }
 	/// <summary>
 	/// The block light level (0-15) this item emits when placed as a voxel
 	/// (0 = not a light source, the default). Set on the <see cref="ItemStack"/>
@@ -32,7 +40,9 @@ public readonly struct ItemEntry
 	public Color IconColor { get; }
 
 	public ItemEntry(int materialId, bool isTool, ToolType? toolType, string name, Color iconColor,
-		bool isMachine = false, MachineType? machineKind = null, byte lightLevel = 0)
+		bool isMachine = false, MachineType? machineKind = null, byte lightLevel = 0,
+		bool isWeapon = false, WeaponType? weaponKind = null,
+		bool isAmmo = false, AmmoType? ammoKind = null)
 	{
 		MaterialId = materialId;
 		IsTool = isTool;
@@ -42,15 +52,29 @@ public readonly struct ItemEntry
 		IsMachine = isMachine;
 		MachineKind = machineKind;
 		LightLevel = lightLevel;
+		IsWeapon = isWeapon;
+		WeaponKind = weaponKind;
+		IsAmmo = isAmmo;
+		AmmoKind = ammoKind;
 	}
 
 	public override bool Equals(object obj) => obj is ItemEntry other && Equals(other);
 
 	public bool Equals(ItemEntry other) =>
 		MaterialId == other.MaterialId && IsTool == other.IsTool && ToolType == other.ToolType
-		&& IsMachine == other.IsMachine && MachineKind == other.MachineKind;
+		&& IsMachine == other.IsMachine && MachineKind == other.MachineKind
+		&& IsWeapon == other.IsWeapon && WeaponKind == other.WeaponKind
+		&& IsAmmo == other.IsAmmo && AmmoKind == other.AmmoKind;
 
-	public override int GetHashCode() => HashCode.Combine(MaterialId, IsTool, ToolType, IsMachine, MachineKind);
+	public override int GetHashCode()
+	{
+		var h = new HashCode();
+		h.Add(MaterialId); h.Add(IsTool); h.Add(ToolType);
+		h.Add(IsMachine); h.Add(MachineKind);
+		h.Add(IsWeapon); h.Add(WeaponKind);
+		h.Add(IsAmmo); h.Add(AmmoKind);
+		return h.ToHashCode();
+	}
 
 	public static bool operator ==(ItemEntry left, ItemEntry right) => left.Equals(right);
 
@@ -216,6 +240,8 @@ public static class ItemRegistry
 		list.AddRange(AllMaterials(config));
 		list.AddRange(AllTools);
 		list.AddRange(AllMachines(machineConfig));
+		list.AddRange(AllWeapons);
+		list.AddRange(AllAmmo);
 		list.AddRange(AllLightSources);
 		return list;
 	}
@@ -274,6 +300,110 @@ public static class ItemRegistry
 	public static Color MachineColor(MachineType type)
 	{
 		foreach (var (t, _, color) in _machines)
+		{
+			if (t == type)
+			{
+				return color;
+			}
+		}
+		return new Color(0.6f, 0.6f, 0.6f);
+	}
+
+	// ------------------------------------------------------------------
+	// Weapon + ammo display metadata (name + icon color). Like the tool and
+	// machine tables, this is a STATIC table: weapons and ammo have no
+	// per-instance definitions, so the dev panel and hotbar icon read these
+	// names/colors directly.
+	// ------------------------------------------------------------------
+	private static readonly (WeaponType Type, string Name, Color Color)[] _weapons =
+	{
+		(WeaponType.Smg,            "SMG",             new Color(0.55f, 0.60f, 0.70f)),
+		(WeaponType.Shotgun,        "Shotgun",         new Color(0.70f, 0.55f, 0.35f)),
+		(WeaponType.RocketLauncher, "Rocket Launcher", new Color(0.75f, 0.40f, 0.30f)),
+		(WeaponType.Flamethrower,   "Flamethrower",    new Color(0.90f, 0.55f, 0.20f)),
+	};
+
+	/// <summary>Every weapon entry (one per <see cref="WeaponType"/>).</summary>
+	public static IReadOnlyList<ItemEntry> AllWeapons
+	{
+		get
+		{
+			var list = new List<ItemEntry>(_weapons.Length);
+			foreach (var (type, name, color) in _weapons)
+			{
+				list.Add(new ItemEntry((int)type, false, null, name, color,
+					isWeapon: true, weaponKind: type));
+			}
+			return list;
+		}
+	}
+
+	/// <summary>The display name for a weapon type (falls back to the enum name).</summary>
+	public static string WeaponName(WeaponType type)
+	{
+		foreach (var (t, name, _) in _weapons)
+		{
+			if (t == type)
+			{
+				return name;
+			}
+		}
+		return type.ToString();
+	}
+
+	/// <summary>The icon color for a weapon type (a neutral grey fallback).</summary>
+	public static Color WeaponColor(WeaponType type)
+	{
+		foreach (var (t, _, color) in _weapons)
+		{
+			if (t == type)
+			{
+				return color;
+			}
+		}
+		return new Color(0.6f, 0.6f, 0.6f);
+	}
+
+	private static readonly (AmmoType Type, string Name, Color Color)[] _ammo =
+	{
+		(AmmoType.Bullet,       "Bullets",  new Color(0.85f, 0.75f, 0.35f)),
+		(AmmoType.ShotgunShell, "Shells",   new Color(0.80f, 0.55f, 0.30f)),
+		(AmmoType.Rocket,       "Rockets",  new Color(0.90f, 0.45f, 0.25f)),
+		(AmmoType.Fuel,         "Fuel",     new Color(0.95f, 0.60f, 0.20f)),
+	};
+
+	/// <summary>Every ammo entry (one per <see cref="AmmoType"/>).</summary>
+	public static IReadOnlyList<ItemEntry> AllAmmo
+	{
+		get
+		{
+			var list = new List<ItemEntry>(_ammo.Length);
+			foreach (var (type, name, color) in _ammo)
+			{
+				list.Add(new ItemEntry((int)type, false, null, name, color,
+					isAmmo: true, ammoKind: type));
+			}
+			return list;
+		}
+	}
+
+	/// <summary>The display name for an ammo type (falls back to the enum name).</summary>
+	public static string AmmoName(AmmoType type)
+	{
+		foreach (var (t, name, _) in _ammo)
+		{
+			if (t == type)
+			{
+				return name;
+			}
+		}
+		return type.ToString();
+	}
+
+	/// <summary>The icon color for an ammo type (a neutral grey fallback).</summary>
+	public static Color AmmoColor(AmmoType type)
+	{
+		foreach (var (t, _, color) in _ammo)
 		{
 			if (t == type)
 			{

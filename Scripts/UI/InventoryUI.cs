@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using FactorySim;
 using FactorySim.Items;
 using FactorySim.Voxel;
+using FactorySim.Weapons;
 
 namespace FactorySim.UI;
 
@@ -128,6 +129,19 @@ public partial class InventoryUI : CanvasLayer
 	private static readonly Color HotbarBgSelected = new Color(0.22f, 0.55f, 0.28f, 0.85f);
 	private int _selectedHotbarSlot;
 
+	// The weapon ammo slot: a single slot that sits DIRECTLY BELOW the selected
+	// hotbar slot (it tracks the selection). It is visible only when the selected
+	// hotbar item is a WEAPON; it shows the ammo currently loaded in that weapon
+	// and lets the player load/unload compatible ammo (drag/shift-click from the
+	// inventory). Backed by the WeaponController's per-weapon ammo store.
+	private Panel _ammoPanel;
+	private Control _ammoSlot;
+	private TextureRect _ammoIcon;
+	private Label _ammoCount;
+	private Label _ammoLabel;
+	private ColorRect _ammoSlotBg;
+	private static readonly Color AmmoSlotBg = new Color(0.1f, 0.14f, 0.2f, 0.75f);
+
 	private int _dragSlot = -1;
 	private bool _dirty;
 
@@ -158,6 +172,18 @@ public partial class InventoryUI : CanvasLayer
 		// crafting "possible count", so one dirty flag drives both.
 		_inventory.InventoryChanged += () => _dirty = true;
 		_inventory.Toggled += SetOpenVisuals;
+
+		// The weapon controller's ammo store: refresh the ammo slot whenever any
+		// weapon's loaded ammo changes (load/unload/consume). The controller is
+		// created as a child of the player at spawn time, which is AFTER this
+		// Init (CallDeferred in _Ready), so it may not exist yet — wire it lazily
+		// in RefreshAmmoSlot via GetWeaponController, and also try here (it is
+		// created before the player spawns, so by the time the player interacts
+		// it will exist; the lazy path is the reliable one).
+		if (GetWeaponController() is { } wc)
+		{
+			wc.AmmoChanged += OnAmmoChanged;
+		}
 
 		BuildUi();
 		RefreshHotbar();
@@ -757,6 +783,104 @@ public partial class InventoryUI : CanvasLayer
 		_root.AddChild(_tooltip);
 
 		BuildHotbar();
+		BuildAmmoSlot();
+	}
+
+	/// <summary>
+	/// Builds the weapon AMMO SLOT: a single slot that sits directly BELOW the
+	/// selected hotbar slot and tracks it as the selection moves. It is shown
+	/// only when the selected hotbar item is a weapon (see
+	/// <see cref="RefreshHotbar"/>), and shows the ammo loaded in that weapon.
+	/// The player loads ammo by moving a compatible stack into it (drag or
+	/// shift-click); incompatible ammo is rejected (bounced back). The slot's
+	/// contents are the WeaponController's per-weapon ammo store, not a real
+	/// inventory slot.
+	/// </summary>
+	private void BuildAmmoSlot()
+	{
+		float size = 44f;
+		// Positioned relative to the selected hotbar slot each frame in
+		// RefreshHotbar (it tracks the selection). Start hidden.
+		_ammoSlot = new Control
+		{
+			Name = "AmmoSlot",
+			LayoutMode = 3, // Position
+			Size = new Vector2(size, size),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			Visible = false,
+		};
+		_ammoSlotBg = new ColorRect
+		{
+			Color = AmmoSlotBg,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_ammoSlotBg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		_ammoSlot.AddChild(_ammoSlotBg);
+
+		_ammoIcon = new TextureRect
+		{
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			LayoutMode = 3, // Position
+			ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+			StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+		};
+		_ammoIcon.Position = new Vector2(6f, 6f);
+		_ammoIcon.Size = new Vector2(size - 12f, size - 12f);
+		_ammoSlot.AddChild(_ammoIcon);
+
+		_ammoCount = new Label
+		{
+			Text = "",
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			HorizontalAlignment = HorizontalAlignment.Right,
+			VerticalAlignment = VerticalAlignment.Bottom,
+		};
+		_ammoCount.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
+		_ammoCount.AddThemeColorOverride("font_color", Colors.White);
+		_ammoCount.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
+		_ammoCount.AddThemeConstantOverride("outline_size", 3);
+		_ammoSlot.AddChild(_ammoCount);
+
+		// A small label to the left of the slot naming the ammo kind (e.g.
+		// "Bullets"). Centered vertically with the slot.
+		_ammoLabel = new Label
+		{
+			Name = "AmmoLabel",
+			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			VerticalAlignment = VerticalAlignment.Center,
+			Visible = false,
+		};
+		_ammoLabel.AddThemeColorOverride("font_color", new Color(0.85f, 0.85f, 0.9f));
+		_ammoLabel.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
+		_ammoLabel.AddThemeConstantOverride("outline_size", 3);
+		_ammoLabel.AddThemeFontSizeOverride("font_size", 13);
+
+		// A thin panel backing the slot + label so the whole thing reads as one
+		// unit (the slot is the interactive part; the panel is just a backdrop).
+		_ammoPanel = new Panel
+		{
+			Name = "AmmoPanel",
+			LayoutMode = 3, // Position
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+			Visible = false,
+		};
+		var ammoStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0f, 0f, 0f, 0.5f),
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+			ContentMarginLeft = 4f,
+			ContentMarginTop = 4f,
+			ContentMarginRight = 4f,
+			ContentMarginBottom = 4f,
+		};
+		_ammoPanel.AddThemeStyleboxOverride("panel", ammoStyle);
+		_ammoPanel.AddChild(_ammoLabel);
+		_ammoPanel.AddChild(_ammoSlot);
+		_root.AddChild(_ammoPanel);
 	}
 
 	/// <summary>
@@ -1432,6 +1556,8 @@ public partial class InventoryUI : CanvasLayer
 		// placeable materials.
 		string label = item.IsTool ? $"{item.Name} (tool)"
 			: item.IsMachine ? $"{item.Name} (machine)"
+			: item.IsWeapon ? $"{item.Name} (weapon)"
+			: item.IsAmmo ? $"{item.Name} (ammo)"
 			: item.Name;
 		var labelCtl = new Label
 		{
@@ -1466,6 +1592,35 @@ public partial class InventoryUI : CanvasLayer
 	{
 		if (_inventory == null)
 		{
+			return;
+		}
+
+		if (item.IsWeapon)
+		{
+			// A weapon is a single, non-stacking item that must keep its type tag
+			// (WeaponType). Place into the first empty slot so the tag survives
+			// (CollectItem would rebuild the stack and drop it). Weapons start
+			// with no ammo loaded.
+			var weapon = FactorySim.Items.ItemStack.FromWeapon(item.WeaponKind.Value);
+			for (int i = 0; i < Inventory.TotalSlots; i++)
+			{
+				if (_inventory.Slots[i].IsEmpty)
+				{
+					_inventory.Slots[i] = weapon;
+					_inventory.RaiseChangedPublic();
+					return;
+				}
+			}
+			return;
+		}
+
+		if (item.IsAmmo)
+		{
+			// Ammo is a STACKABLE consumable. Grant a full stack so it is usable;
+			// the player then manually loads it into a compatible weapon's ammo
+			// slot (see the ammo feature).
+			var ammo = FactorySim.Items.ItemStack.FromAmmo(item.AmmoKind.Value, FactorySim.Items.ItemStack.StackLimit);
+			_inventory.CollectItem(ammo);
 			return;
 		}
 
@@ -1725,6 +1880,26 @@ public partial class InventoryUI : CanvasLayer
 			return new Color(0.6f, 0.6f, 0.6f);
 		}
 
+		// Weapons aren't palette materials either; give them their own icon color.
+		if (FactorySim.Voxel.VoxelMaterialIds.IsWeaponId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.WeaponType>(materialId.ToString(), out var weapon))
+			{
+				return FactorySim.Items.ItemRegistry.WeaponColor(weapon);
+			}
+			return new Color(0.6f, 0.6f, 0.6f);
+		}
+
+		// Ammo isn't a palette material; give it its own icon color.
+		if (FactorySim.Voxel.VoxelMaterialIds.IsAmmoId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.AmmoType>(materialId.ToString(), out var ammo))
+			{
+				return FactorySim.Items.ItemRegistry.AmmoColor(ammo);
+			}
+			return new Color(0.6f, 0.6f, 0.6f);
+		}
+
 		if (_world != null && _world.Palette != null)
 		{
 			return _world.Palette.GetAlbedoColor(materialId);
@@ -1785,6 +1960,20 @@ public partial class InventoryUI : CanvasLayer
 			if (Enum.TryParse<FactorySim.Machines.MachineType>(materialId.ToString(), out var machine))
 			{
 				return FactorySim.Items.ItemRegistry.MachineName(machine);
+			}
+		}
+		if (FactorySim.Voxel.VoxelMaterialIds.IsWeaponId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.WeaponType>(materialId.ToString(), out var weapon))
+			{
+				return FactorySim.Items.ItemRegistry.WeaponName(weapon);
+			}
+		}
+		if (FactorySim.Voxel.VoxelMaterialIds.IsAmmoId(materialId))
+		{
+			if (Enum.TryParse<FactorySim.Items.AmmoType>(materialId.ToString(), out var ammo))
+			{
+				return FactorySim.Items.ItemRegistry.AmmoName(ammo);
 			}
 		}
 		if (_world != null && _world.MaterialConfig != null)
@@ -1864,6 +2053,11 @@ public partial class InventoryUI : CanvasLayer
 			var held = SelectedHotbarItem;
 			_hotbarTooltip.Text = held.IsEmpty ? "" : LookUpMaterialName(held.MaterialId);
 		}
+
+		// The ammo slot tracks the selection: shown below the selected slot only
+		// when it holds a weapon, hidden otherwise (and repositioned as the
+		// selection moves).
+		RefreshAmmoSlot();
 	}
 
 	// ------------------------------------------------------------------
@@ -2380,6 +2574,17 @@ public partial class InventoryUI : CanvasLayer
 
 		if (@event is InputEventMouseButton mouse && mouse.Pressed)
 		{
+			// AMMO SLOT FIRST: while a weapon is selected in the hotbar, the ammo
+			// slot (below it) is visible and interactive. A click on it loads or
+			// unloads the weapon's ammo (see HandleAmmoSlotClick). This is checked
+			// before the regular inventory slot hit-test because the ammo slot is
+			// not one of the 82 inventory slots.
+			if (_ammoSlot != null && _ammoSlot.Visible && AmmoSlotAt(mouse.Position))
+			{
+				HandleAmmoSlotClick(mouse);
+				return;
+			}
+
 			int slot = SlotAt(mouse.Position);
 			if (slot < 0)
 			{
@@ -2602,6 +2807,226 @@ public partial class InventoryUI : CanvasLayer
 		}
 
 		// No room in the destination region: do nothing (the stack stays).
+	}
+
+	// ------------------------------------------------------------------
+	// Weapon ammo slot (the slot below the selected hotbar weapon)
+	// ------------------------------------------------------------------
+
+	/// <summary>The <see cref="WeaponController"/> that owns the per-weapon ammo store (resolved lazily).</summary>
+	private WeaponController _weaponController;
+
+	/// <summary>
+	/// True when a root-space position falls on the (visible) ammo slot. The
+	/// slot is positioned in root space (it is a child of the panel, which is a
+	/// child of the root), so compare directly.
+	/// </summary>
+	private bool AmmoSlotAt(Vector2 position)
+	{
+		if (_ammoSlot == null || !IsInstanceValid(_ammoSlot) || !_ammoSlot.Visible)
+		{
+			return false;
+		}
+		// The slot's GlobalPosition is its top-left in root space (the panel and
+		// slot are both children of the full-rect root, so no offset math is
+		// needed).
+		var rect = new Rect2(_ammoSlot.GlobalPosition, _ammoSlot.Size);
+		return rect.HasPoint(position);
+	}
+
+	/// <summary>
+	/// The weapon currently selected in the hotbar (its <see cref="WeaponType"/>),
+	/// or null when the selected item is not a weapon.
+	/// </summary>
+	private WeaponType? SelectedWeapon()
+	{
+		if (_inventory == null)
+		{
+			return null;
+		}
+		int slot = Mathf.Clamp(_selectedHotbarSlot, 0, Inventory.HotbarSize - 1);
+		var held = _inventory.Slots[slot];
+		return held.IsWeapon ? held.WeaponType : null;
+	}
+
+	/// <summary>
+	/// Handles a click on the ammo slot (only called when a weapon is selected):
+	/// - Left-click with an EMPTY cursor: if the slot has ammo, take it out
+	///   (unload it onto the cursor). If empty, pick up nothing.
+	/// - Left-click with a compatible ammo stack on the cursor: load it into the
+	///   weapon (replacing any existing ammo, which returns to the cursor).
+	/// - Left-click with a DIFFERENT (incompatible) ammo on the cursor: rejected
+	///   (the stack stays on the cursor; the slot is unchanged).
+	/// - Right-click with a compatible ammo on the cursor: place 1 round.
+	/// - Right-click with the slot loaded and an empty cursor: take 1 round.
+	/// </summary>
+	private void HandleAmmoSlotClick(InputEventMouseButton mouse)
+	{
+		var weapon = SelectedWeapon();
+		if (weapon is not { } w)
+		{
+			return;
+		}
+		WeaponController ctrl = GetWeaponController();
+		if (ctrl == null)
+		{
+			return;
+		}
+
+		ItemStack loaded = ctrl.GetLoadedAmmo(w);
+		AmmoType compatible = WeaponBehavior.AmmoForWeapon(w);
+
+		if (mouse.ButtonIndex == MouseButton.Left)
+		{
+			if (_cursorStack.IsEmpty)
+			{
+				// Empty cursor: unload the loaded ammo onto the cursor.
+				if (!loaded.IsEmpty)
+				{
+					_cursorStack = ctrl.UnloadAmmo(w);
+					RefreshCursor();
+				}
+			}
+			else if (_cursorStack.IsAmmo && _cursorStack.AmmoType == compatible)
+			{
+				// Compatible ammo on the cursor: load it. The previously loaded
+				// ammo (if any) bounces back onto the cursor.
+				var existing = ctrl.GetLoadedAmmo(w);
+				bool ok = ctrl.LoadAmmo(w, _cursorStack);
+				if (ok)
+				{
+					_cursorStack = existing.IsEmpty ? ItemStack.From(0) : existing;
+					RefreshCursor();
+				}
+			}
+			// Incompatible ammo on the cursor: rejected (no change).
+		}
+		else if (mouse.ButtonIndex == MouseButton.Right)
+		{
+			if (_cursorStack.IsEmpty)
+			{
+				// Empty cursor: take 1 round out of the loaded ammo.
+				if (loaded.Count > 0)
+				{
+					var remaining = ctrl.GetLoadedAmmo(w);
+					if (remaining.Count > 1)
+					{
+						remaining.Count -= 1;
+						ctrl.LoadAmmo(w, remaining);
+					}
+					else
+					{
+						ctrl.UnloadAmmo(w);
+					}
+					_cursorStack = ItemStack.FromAmmo(compatible, 1);
+					RefreshCursor();
+				}
+			}
+			else if (_cursorStack.IsAmmo && _cursorStack.AmmoType == compatible && loaded.Count < ItemStack.StackLimit)
+			{
+				// 1 round from the cursor into the loaded ammo.
+				var cur = ctrl.GetLoadedAmmo(w);
+				int newCount = cur.IsEmpty ? 1 : cur.Count + 1;
+				ctrl.LoadAmmo(w, ItemStack.FromAmmo(compatible, newCount));
+				_cursorStack = ItemStack.FromAmmo(compatible, _cursorStack.Count - 1);
+				RefreshCursor();
+			}
+		}
+		// The controller already fired AmmoChanged, which refreshes the ammo
+		// slot (see OnAmmoChanged). No extra raise needed.
+	}
+
+	private WeaponController GetWeaponController()
+	{
+		if (_weaponController == null || !IsInstanceValid(_weaponController))
+		{
+			_weaponController = GetTree().GetFirstNodeInGroup("weapon_controller") as WeaponController;
+			if (_weaponController != null && _ammoSubscribed == false)
+			{
+				_weaponController.AmmoChanged += OnAmmoChanged;
+				_ammoSubscribed = true;
+			}
+		}
+		return _weaponController;
+	}
+	private bool _ammoSubscribed;
+
+	/// <summary>
+	/// Called when the weapon controller's ammo changes (load/unload/consume).
+	/// Refreshes the ammo slot's icon + count.
+	/// </summary>
+	private void OnAmmoChanged() => RefreshAmmoSlot();
+
+	/// <summary>
+	/// Refreshes the ammo slot: shown (and positioned below the selected hotbar
+	/// slot) when the selected item is a weapon; hidden otherwise. Updates the
+	/// icon, count, and the ammo-kind label.
+	/// </summary>
+	private void RefreshAmmoSlot()
+	{
+		if (_ammoSlot == null || _ammoPanel == null)
+		{
+			return;
+		}
+		var weapon = SelectedWeapon();
+		if (weapon is not { } w)
+		{
+			_ammoPanel.Visible = false;
+			_ammoSlot.Visible = false;
+			return;
+		}
+
+		// Position the panel so the SLOT sits directly below the selected
+		// hotbar slot. The hotbar slot's root-space rect is known (the hotbar
+		// panel is a child of the root; the slot is a child of the hotbar).
+		float size = 44f;
+		Vector2 slotTopLeft = HotbarSlotRootRect(_selectedHotbarSlot).Position;
+		// The slot's top-left (the interactive part) goes just below the hotbar
+		// slot, aligned to its left edge.
+		Vector2 slotPos = new Vector2(slotTopLeft.X, slotTopLeft.Y + size + 4f);
+		// The panel wraps the label (to the left) + the slot. Compute the panel
+		// rect so the slot lands at slotPos.
+		float labelW = 70f;
+		Vector2 panelPos = new Vector2(slotPos.X - labelW - 4f, slotPos.Y - 4f);
+		Vector2 panelSize = new Vector2(labelW + 4f + size + 4f, size + 8f);
+		_ammoPanel.Position = panelPos;
+		_ammoPanel.Size = panelSize;
+		// The slot's position within the panel (the panel's content offset is 4).
+		_ammoSlot.Position = new Vector2(labelW + 4f, 4f);
+		_ammoLabel.Position = new Vector2(4f, 0f);
+		_ammoLabel.Size = new Vector2(labelW, size + 8f);
+		_ammoLabel.Text = ItemRegistry.AmmoName(WeaponBehavior.AmmoForWeapon(w));
+		_ammoLabel.Visible = true;
+
+		// Show the loaded ammo (icon + count) or an empty slot.
+		WeaponController ctrl = GetWeaponController();
+		ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(w) : ItemStack.From(0);
+		if (loaded.IsEmpty)
+		{
+			_ammoIcon.Texture = null;
+			_ammoCount.Text = "";
+		}
+		else
+		{
+			SetIcon(_ammoIcon, loaded.MaterialId);
+			_ammoCount.Text = loaded.Count.ToString();
+		}
+
+		_ammoPanel.Visible = true;
+		_ammoSlot.Visible = true;
+	}
+
+	/// <summary>The root-space rect of hotbar slot <paramref name="index"/>.</summary>
+	private Rect2 HotbarSlotRootRect(int index)
+	{
+		// The hotbar panel is a child of the root; the slot is a child of the
+		// hotbar panel. Accumulate the offsets.
+		if (_hotbar == null || _hotbarSlots[index] == null)
+		{
+			return new Rect2(Vector2.Zero, Vector2.Zero);
+		}
+		var pos = _hotbar.GlobalPosition + _hotbarSlots[index].Position;
+		return new Rect2(pos, _hotbarSlots[index].Size);
 	}
 
 	/// <summary>
