@@ -220,6 +220,16 @@ public partial class InventoryUI : CanvasLayer
 			RefreshHotbar();
 		}
 
+		// The ammo slot (in the inventory pane) + the HUD ammo count must track
+		// the selected hotbar item and the open state. Refresh them while the
+		// inventory is open so they are always in sync (a safety net on top of
+		// the explicit RefreshAmmoSlot calls in SetOpenVisuals / RefreshHotbar /
+		// OnAmmoChanged). Cheap: it only sets a couple of visibility/text props.
+		if (IsOpen())
+		{
+			RefreshAmmoSlot();
+		}
+
 		if (_cursor != null && _cursorStack.IsEmpty == false)
 		{
 			// Center the cursor icon under the mouse (viewport coords == layer
@@ -893,14 +903,19 @@ public partial class InventoryUI : CanvasLayer
 		_ammoLabel.AddThemeConstantOverride("outline_size", 3);
 		_ammoLabel.AddThemeFontSizeOverride("font_size", 14);
 
-		// Position below the hotbar row, centered on the grid width.
+		// Position below the hotbar row, centered on the grid width. The label
+		// sits immediately to the LEFT of the slot, and the (label + gap + slot)
+		// group is centered as a unit so it reads as one labeled row.
 		float gridW = _ammoSlotGridW;
 		float hotbarRowY = Inventory.StorageRows * (SlotSize + SlotGap);
 		float ammoRowY = hotbarRowY + SlotSize + SlotGap + 8f;
 		float labelW = 150f;
-		_ammoSlot.Position = new Vector2((gridW - size) / 2f + labelW / 2f, ammoRowY);
-		_ammoLabel.Position = new Vector2((gridW - size) / 2f - labelW, ammoRowY + 2f);
+		float groupGap = 8f;
+		float groupW = labelW + groupGap + size;
+		float groupX = (gridW - groupW) / 2f;
+		_ammoLabel.Position = new Vector2(groupX, ammoRowY + 2f);
 		_ammoLabel.Size = new Vector2(labelW, size);
+		_ammoSlot.Position = new Vector2(groupX + labelW + groupGap, ammoRowY);
 		gridSection.AddChild(_ammoLabel);
 		gridSection.AddChild(_ammoSlot);
 
@@ -3061,9 +3076,12 @@ public partial class InventoryUI : CanvasLayer
 		}
 		var weapon = SelectedWeapon();
 
-		// HUD ammo count: visible whenever a weapon is selected (even with the
-		// inventory closed), positioned just below the selected hotbar slot.
-		if (weapon is { } w)
+		// HUD ammo count: visible when a weapon is selected AND the inventory is
+		// CLOSED (i.e. while the HUD hotbar is showing). It sits just below the
+		// selected hotbar slot. While the inventory is OPEN the HUD hotbar is
+		// hidden and the in-pane ammo slot takes over, so the HUD count hides too
+		// (it would otherwise float over the panel at the hidden hotbar's spot).
+		if (weapon is { } w && !IsOpen())
 		{
 			WeaponController ctrl = GetWeaponController();
 			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(w) : ItemStack.From(0);

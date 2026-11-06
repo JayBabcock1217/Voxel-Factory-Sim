@@ -60,8 +60,10 @@ public partial class WeaponController : Node3D
 
 	// The held-item mesh (rebuilt when the selected hotbar item changes).
 	private MeshInstance3D _heldMesh;
-	private ItemStack _lastHeldItem = ItemStack.From(0);
-	private int _lastHeldWeaponId = -1;
+	// The last held item's identity key (its MaterialId, 0 when empty). The mesh
+	// is rebuilt only when this key changes, so a plain count change (firing)
+	// does not rebuild the mesh every frame.
+	private int _lastHeldItemId = -1;
 
 	// The per-weapon ammo store: weapon MaterialId -> loaded ammo stack.
 	private readonly Dictionary<int, ItemStack> _ammoByWeapon = new();
@@ -372,18 +374,15 @@ public partial class WeaponController : Node3D
 	private void UpdateHeldMesh()
 	{
 		var held = HeldItem;
-		int key = held.IsEmpty ? 0 : (held.IsWeapon ? (int)held.WeaponType.Value
-			: held.IsTool ? (int)held.ToolType.Value
-			: held.IsMachine ? (int)held.MachineType.Value
-			: held.IsAmmo ? (int)held.AmmoType.Value
-			: held.MaterialId);
-
-		// Rebuild the mesh only when the held item's KIND changes (not every
-		// frame, and not on a plain count change).
-		if (key != _lastHeldWeaponId)
+		// The item's MaterialId is globally unique across every item kind
+		// (materials 1..299, tools 100-103, machines 200-299, weapons 300-399,
+		// ammo 400-499; 0 = empty), so it is a perfect identity key. Rebuild the
+		// mesh only when the selected item's identity changes — not on a plain
+		// count change (e.g. firing a weapon decrements its ammo, not the item).
+		int key = held.MaterialId;
+		if (key != _lastHeldItemId)
 		{
-			_lastHeldWeaponId = key;
-			_lastHeldItem = held;
+			_lastHeldItemId = key;
 			BuildHeldMesh(held);
 		}
 		PositionHeldItem();
@@ -395,7 +394,7 @@ public partial class WeaponController : Node3D
 		{
 			return;
 		}
-		// Free any existing children (the previous mesh).
+		// Free any existing children (the previous mesh's parts).
 		foreach (var child in _heldMesh.GetChildren())
 		{
 			child.QueueFree();
@@ -408,77 +407,76 @@ public partial class WeaponController : Node3D
 		}
 		_heldMesh.Visible = true;
 
-		var (mesh, material) = BuildItemMesh(held);
-		if (mesh == null)
+		// Each item is built from one or more POSITIONED parts (e.g. a gun is a
+		// body + barrel + stock, each its own primitive with a local transform).
+		// One MeshInstance3D per part; the controller node stays a bare pivot
+		// positioned in front of the camera. A MeshInstance3D with no
+		// CollisionShape is a pure visual: it registers no physics geometry and
+		// is never hit by the voxel DDA raycast, so the held item sitting in
+		// front of the camera never blocks the player's aim.
+		var parts = BuildItemMesh(held);
+		if (parts.Count == 0)
 		{
 			_heldMesh.Visible = false;
 			return;
 		}
-		// A child MeshInstance holds the shape; the controller node stays a bare
-		// pivot positioned in front of the camera.
-		var mi = new MeshInstance3D
+		for (int i = 0; i < parts.Count; i++)
 		{
-			Name = "ItemShape",
-			Mesh = mesh,
-			MaterialOverride = material,
-			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-		};
-		// A MeshInstance3D with no CollisionShape is a pure visual: it registers
-		// no physics geometry and is never hit by the voxel DDA raycast, so the
-		// held item sitting in front of the camera never blocks the player's aim.
-		_heldMesh.AddChild(mi);
+			var (mesh, xform) = parts[i];
+			var mi = new MeshInstance3D
+			{
+				Name = $"ItemShape_{i}",
+				Mesh = mesh,
+				Transform = xform,
+				CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+			};
+			_heldMesh.AddChild(mi);
+		}
 	}
 
 	/// <summary>
-	/// Builds a simple programmatic mesh for the held item. Weapons get a
-	/// gun-like shape (a body box + a barrel), tools a handle + head, and
-	/// materials a small cube of the material's color. The shape is deliberately
-	/// simple (primitive meshes, no imported assets) and reads as "something is
-	/// in my hand" from a first-person view.
+	/// Builds a simple programmatic, MULTI-PART mesh for the held item. Each
+	/// item gets a DISTINCTIVE set of positioned primitives (a gun = body +
+	/// barrel + stock; a shovel = handle + blade; etc.) so that switching the
+	/// selected hotbar item visibly changes the held mesh — not just its color.
+	/// Shapes are deliberately simple (primitive meshes, no imported assets) and
+	/// read as "something is in my hand" from a first-person view. Each returned
+	/// part is a (mesh, local transform) pair; the mesh has its material baked
+	/// in, and the transform places that part relative to the held-item pivot.
 	/// </summary>
-	private static (Mesh Mesh, Material Material) BuildItemMesh(ItemStack held)
+	private static List<(Mesh Mesh, Transform3D Transform)> BuildItemMesh(ItemStack held)
 	{
-		// A multi-mesh (a body + a detail) is overkill for a held view; a single
-		// representative primitive per kind is cheap and readable.
+		var parts = new List<(Mesh, Transform3D)>();
+
 		if (held.IsWeapon)
 		{
-			// A gun: an elongated box (the body) reading as a weapon in the hand.
-			var body = new BoxMesh
-			{
-				Size = new Vector3(0.08f, 0.12f, 0.5f),
-				Material = WeaponMaterial(held.WeaponType.Value),
-			};
-			return (body, null);
+			AddWeaponMesh(parts, held.WeaponType.Value);
+			return parts;
 		}
 		if (held.IsTool)
 		{
-			// A tool: a handle (a thin box) reading as a tool.
-			var handle = new BoxMesh
-			{
-				Size = new Vector3(0.05f, 0.05f, 0.55f),
-				Material = ToolMaterial(held.ToolType.Value),
-			};
-			return (handle, null);
+			AddToolMesh(parts, held.ToolType.Value);
+			return parts;
 		}
 		if (held.IsAmmo)
 		{
 			// Ammo: a small box reading as a stack of cartridges.
-			var box = new BoxMesh
+			parts.Add((new BoxMesh
 			{
 				Size = new Vector3(0.12f, 0.1f, 0.2f),
 				Material = AmmoMaterial(held.AmmoType.Value),
-			};
-			return (box, null);
+			}, Transform3D.Identity));
+			return parts;
 		}
 		if (held.IsMachine)
 		{
 			// A machine item: a small cube in the machine's color.
-			var machineCube = new BoxMesh
+			parts.Add((new BoxMesh
 			{
 				Size = new Vector3(0.25f, 0.25f, 0.25f),
 				Material = MachineMaterial(held.MachineType.Value),
-			};
-			return (machineCube, null);
+			}, Transform3D.Identity));
+			return parts;
 		}
 		// A placeable material: a small cube tinted with the material's color.
 		var mat = new StandardMaterial3D
@@ -486,8 +484,125 @@ public partial class WeaponController : Node3D
 			AlbedoColor = new Color(0.7f, 0.7f, 0.7f),
 			Roughness = 0.7f,
 		};
-		var materialCube = new BoxMesh { Size = new Vector3(0.22f, 0.22f, 0.22f), Material = mat };
-		return (materialCube, null);
+		parts.Add((new BoxMesh { Size = new Vector3(0.22f, 0.22f, 0.22f), Material = mat }, Transform3D.Identity));
+		return parts;
+	}
+
+	/// <summary>Builds a Transform3D from a degrees euler rotation + translation.</summary>
+	private static Transform3D Xform(Vector3 pos, Vector3 rotDeg)
+		=> new Transform3D(Basis.FromEuler(rotDeg * 0.017453292f), pos);
+
+	/// <summary>Add a positioned BoxMesh part to <paramref name="parts"/>.</summary>
+	private static void AddBox(List<(Mesh, Transform3D)> parts, Vector3 size, Material m, Vector3 pos, Vector3 rotDeg = default)
+	{
+		parts.Add((new BoxMesh { Size = size, Material = m }, Xform(pos, rotDeg)));
+	}
+
+	/// <summary>Add a positioned CylinderMesh part (axis along Y by default) to <paramref name="parts"/>.</summary>
+	private static void AddCyl(List<(Mesh, Transform3D)> parts, float radius, float height, Material m, Vector3 pos, Vector3 rotDeg = default)
+	{
+		parts.Add((new CylinderMesh { TopRadius = radius, BottomRadius = radius, Height = height, Material = m }, Xform(pos, rotDeg)));
+	}
+
+	/// <summary>
+	/// Builds the per-weapon multi-part shape. Each weapon is a small assembly of
+	/// boxes/cylinders with a silhouette that is recognizable at a glance: the
+	/// SMG is compact with a magazine, the shotgun is long with a pump, the
+	/// rocket launcher is a fat tube with a fin, and the flamethrower has a
+	/// round fuel tank on a hose to a nozzle.
+	/// </summary>
+	private static void AddWeaponMesh(List<(Mesh, Transform3D)> parts, WeaponType weapon)
+	{
+		// Orientation: the held-item pivot sits in front of the camera (local
+		// -Z). The weapon points FORWARD, i.e. toward -Z (away from the player,
+		// into the scene). So the barrel / muzzle extends toward NEGATIVE Z and
+		// the stock / grip (near the hand) sit toward POSITIVE Z (closer to the
+		// camera). All Z offsets below follow that convention.
+		var m = WeaponMaterial(weapon);
+		switch (weapon)
+		{
+			case WeaponType.Smg:
+			{
+				// Compact body, short barrel, a grip, and a stubby magazine.
+				AddBox(parts, new Vector3(0.07f, 0.09f, 0.30f), m, new Vector3(0f, 0f, -0.05f)); // body
+				AddBox(parts, new Vector3(0.04f, 0.04f, 0.20f), m, new Vector3(0f, 0.02f, -0.26f)); // barrel
+				AddBox(parts, new Vector3(0.04f, 0.10f, 0.05f), m, new Vector3(0f, -0.08f, 0.12f)); // grip
+				AddBox(parts, new Vector3(0.035f, 0.12f, 0.05f), m, new Vector3(0f, -0.09f, 0.02f)); // magazine
+				break;
+			}
+			case WeaponType.Shotgun:
+			{
+				// A long barrel + a pump foregrip + a body + a long stock.
+				AddBox(parts, new Vector3(0.06f, 0.07f, 0.55f), m, new Vector3(0f, 0.02f, -0.15f)); // barrel
+				AddBox(parts, new Vector3(0.08f, 0.06f, 0.14f), m, new Vector3(0f, 0f, -0.28f)); // pump
+				AddBox(parts, new Vector3(0.07f, 0.09f, 0.22f), m, new Vector3(0f, -0.01f, 0.08f)); // body
+				AddBox(parts, new Vector3(0.05f, 0.07f, 0.22f), m, new Vector3(0f, -0.02f, 0.26f)); // stock
+				break;
+			}
+			case WeaponType.RocketLauncher:
+			{
+				// A fat tube (cylinder, axis along Z), a body, a sight, and a fin.
+				AddCyl(parts, 0.07f, 0.5f, m, new Vector3(0f, 0.02f, -0.08f), new Vector3(90f, 0f, 0f)); // tube
+				AddBox(parts, new Vector3(0.08f, 0.09f, 0.24f), m, new Vector3(0f, -0.02f, 0.12f)); // body
+				AddBox(parts, new Vector3(0.03f, 0.05f, 0.04f), m, new Vector3(0f, 0.10f, 0.02f)); // sight
+				AddBox(parts, new Vector3(0.02f, 0.10f, 0.06f), m, new Vector3(0f, 0.04f, -0.34f)); // rear fin
+				break;
+			}
+			case WeaponType.Flamethrower:
+			{
+				// A round fuel tank (cylinder, axis along Y), a body, a hose, a nozzle.
+				AddCyl(parts, 0.09f, 0.18f, m, new Vector3(-0.06f, -0.04f, 0.05f)); // fuel tank
+				AddBox(parts, new Vector3(0.07f, 0.08f, 0.30f), m, new Vector3(0f, 0f, -0.05f)); // body
+				AddCyl(parts, 0.025f, 0.16f, m, new Vector3(0.02f, -0.02f, -0.24f), new Vector3(90f, 0f, 0f)); // hose
+				AddCyl(parts, 0.04f, 0.10f, m, new Vector3(0f, 0f, -0.30f), new Vector3(90f, 0f, 0f)); // nozzle
+				break;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Builds the per-tool multi-part shape. Each tool is a handle plus a
+	/// distinctive head: the shovel has a flat blade, the pickaxe a cross head,
+	/// the axe a wide head on one side, and the sword a long tapered blade.
+	/// </summary>
+	private static void AddToolMesh(List<(Mesh, Transform3D)> parts, ToolType tool)
+	{
+		// Orientation matches the weapons: the head points FORWARD (-Z, into the
+		// scene) and the handle extends toward the hand (+Z, toward the camera).
+		var m = ToolMaterial(tool);
+		// A shared handle (a thin box) for every tool, then a distinctive head.
+		AddBox(parts, new Vector3(0.04f, 0.04f, 0.40f), m, new Vector3(0f, -0.02f, 0.05f)); // handle
+		switch (tool)
+		{
+			case ToolType.Shovel:
+			{
+				// A flat rectangular blade at the front.
+				AddBox(parts, new Vector3(0.10f, 0.02f, 0.18f), m, new Vector3(0f, -0.02f, -0.20f));
+				break;
+			}
+			case ToolType.Pickaxe:
+			{
+				// A horizontal cross head (two prongs) over the handle tip.
+				AddBox(parts, new Vector3(0.22f, 0.03f, 0.04f), m, new Vector3(0f, 0.06f, -0.14f));
+				AddBox(parts, new Vector3(0.03f, 0.08f, 0.04f), m, new Vector3(0.10f, 0.02f, -0.14f));
+				AddBox(parts, new Vector3(0.03f, 0.08f, 0.04f), m, new Vector3(-0.10f, 0.02f, -0.14f));
+				break;
+			}
+			case ToolType.Axe:
+			{
+				// A wide head on one side of the handle tip.
+				AddBox(parts, new Vector3(0.04f, 0.12f, 0.10f), m, new Vector3(0.07f, 0.04f, -0.14f));
+				break;
+			}
+			case ToolType.Sword:
+			{
+				// A long tapered blade extending from the handle, plus a crossguard.
+				AddBox(parts, new Vector3(0.05f, 0.02f, 0.30f), m, new Vector3(0f, 0.0f, -0.20f)); // blade
+				AddBox(parts, new Vector3(0.03f, 0.02f, 0.16f), m, new Vector3(0f, 0.0f, -0.34f)); // blade tip
+				AddBox(parts, new Vector3(0.10f, 0.03f, 0.04f), m, new Vector3(0f, 0.0f, -0.05f)); // crossguard
+				break;
+			}
+		}
 	}
 
 	private static Material WeaponMaterial(WeaponType weapon)
