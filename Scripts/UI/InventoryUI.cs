@@ -523,14 +523,20 @@ public partial class InventoryUI : CanvasLayer
 		float gridW = Math.Max(
 			Inventory.StorageCols, Inventory.HotbarSize) * SlotSize
 			+ (Math.Max(Inventory.StorageCols, Inventory.HotbarSize) - 1) * SlotGap;
-		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
+		// The grid is the storage rows + the hotbar row, PLUS an extra row below
+		// the hotbar for the weapon AMMO SLOT (shown only while a weapon is
+		// selected and the inventory is open). The extra height (SlotSize + the
+		// same 8px offset BuildAmmoSlot uses) keeps the panel tall enough that the
+		// ammo slot is never clipped at the bottom edge.
+		float ammoRowH = SlotSize + 8f;
+		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap + ammoRowH;
 		float titleH = 24f;
 		// The dev/craft panes are inset below the title by pad (content margin);
 		// the grid starts at gridY. The section height is measured from the top
 		// of the panel to the bottom of the grid.
 		float sectionH = 36f + gridH;   // gridY(36) + grid height
 		float panelW = pad * 2f + devW + gap + gridW + gap + craftW;
-		float panelH = pad + titleH + pad + gridH + pad; // top pad + title + gap + grid + bottom pad
+		float panelH = pad + titleH + pad + gridH + pad; // top pad + title + gap + grid (+ammo row) + bottom pad
 		Vector2 viewportSize = GetViewport().GetVisibleRect().Size;
 		Vector2 panelPos = new Vector2(
 			Math.Max(0f, (viewportSize.X - panelW) / 2f),
