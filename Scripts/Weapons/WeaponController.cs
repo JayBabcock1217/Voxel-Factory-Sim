@@ -414,6 +414,14 @@ public partial class WeaponController : Node3D
 
 	private void NotifyAmmoChanged() => AmmoChanged?.Invoke();
 
+	/// <summary>
+	/// Public wrapper to fire the <see cref="AmmoChanged"/> event after a bulk
+	/// restore (e.g. loading a save). The UI subscribes to this event to
+	/// refresh the ammo slots; a single fire after the bulk restore is enough
+	/// (no need to fire per-slot during the restore loop).
+	/// </summary>
+	public void NotifyAmmoChangedForRestore() => AmmoChanged?.Invoke();
+
 	// ------------------------------------------------------------------
 	// Held-item mesh (the first-person "I am holding this item" view)
 	// ------------------------------------------------------------------

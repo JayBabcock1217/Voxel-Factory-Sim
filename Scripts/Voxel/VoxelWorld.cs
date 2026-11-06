@@ -2881,11 +2881,13 @@ public partial class VoxelWorld : Node3D
 				// The save had no usable player position: terrain-spawn instead.
 				// Inventory/drops/machines still restore from the snapshot.
 				RestoreInventoryFromSave(save.Snapshot);
+				RestoreAmmoFromSave(save.Snapshot);
 				save.ApplyDrops(save.Snapshot);
 				save.ApplyMachines(save.Snapshot);
 				return SpawnPlayerOnTerrain(player);
 			}
 			RestoreInventoryFromSave(save.Snapshot);
+			RestoreAmmoFromSave(save.Snapshot);
 			save.ApplyDrops(save.Snapshot);
 			save.ApplyMachines(save.Snapshot);
 			return true;
@@ -2922,6 +2924,37 @@ public partial class VoxelWorld : Node3D
 				counts[i] = data.Inventory[i].Count;
 			}
 			inventory.LoadState(ids, counts);
+		}
+	}
+
+	/// <summary>
+	/// Restores the saved per-hotbar-slot weapon ammo from <paramref name="data"/>
+	/// (v6+). A no-op when there is no weapon controller or the snapshot held no
+	/// ammo. Called once, after the inventory is restored (so the weapons are in
+	/// their slots) and the player is spawned (so the controller exists).
+	/// </summary>
+	private void RestoreAmmoFromSave(WorldSaveFile.Data data)
+	{
+		if (data == null || data.Ammo.Count == 0)
+		{
+			return;
+		}
+
+		if (!IsInsideTree())
+		{
+			return;
+		}
+
+		if (GetTree().GetFirstNodeInGroup("weapon_controller") is Weapons.WeaponController ctrl)
+		{
+			// Clear any stale ammo first (e.g. from a previous session), then
+			// restore each slot's ammo from the snapshot.
+			ctrl.ClearAllAmmo();
+			foreach (var (slot, ammoMaterialId, count) in data.Ammo)
+			{
+				ctrl.RestoreAmmo(slot, ammoMaterialId, count);
+			}
+			ctrl.NotifyAmmoChangedForRestore();
 		}
 	}
 

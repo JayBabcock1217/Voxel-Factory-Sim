@@ -324,6 +324,16 @@ public partial class WorldSave : Node
 			}
 		}
 
+		// Per-hotbar-slot weapon ammo (v6+): snapshot the loaded ammo in each
+		// hotbar slot's ammo slot so it survives a save/load.
+		if (GetTree()?.GetFirstNodeInGroup("weapon_controller") is Weapons.WeaponController weaponCtrl)
+		{
+			foreach (var (slot, ammoMaterialId, count) in weaponCtrl.SnapshotAmmo())
+			{
+				data.Ammo.Add((slot, ammoMaterialId, count));
+			}
+		}
+
 		// Live item drops (the "voxel_drops" group).
 		foreach (Node node in GetTree().GetNodesInGroup("voxel_drops"))
 		{

@@ -78,7 +78,7 @@ public static class WorldSaveFile
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 5;
+	public const int CurrentVersion = 6;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -89,7 +89,7 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
@@ -112,6 +112,14 @@ public static class WorldSaveFile
 	/// never saved an in-progress operation).
 	/// </summary>
 	private const int VersionWithMachineProgress = 5;
+
+	/// <summary>
+	/// The first version that carries the per-hotbar-slot weapon ammo section
+	/// (the loaded ammo in each hotbar slot's ammo slot). v5 and earlier files
+	/// have no ammo section; the reader leaves <see cref="Data.Ammo"/> empty for
+	/// them (a v5 world simply had no saved ammo — the feature did not exist).
+	/// </summary>
+	private const int VersionWithWeaponAmmo = 6;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -162,8 +170,11 @@ public static class WorldSaveFile
 		// no in-progress operation — exactly what it was (v4 never saved one).
 		// Nothing to re-derive; return as-is.
 		//
-		// Future version migrations go here, e.g.:
-		//   if (fromVersion == 5) { /* v5 -> v6: add new field, re-derive ... */ }
+		// v5 -> v6: the reader leaves data.Ammo empty for v5 files (the ammo
+		// section is absent), so a v5 world simply had no saved ammo (the
+		// feature did not exist). Nothing to re-derive; return as-is.
+		//
+		// Future version migrations go here.
 		return data;
 	}
 
@@ -349,6 +360,13 @@ public static class WorldSaveFile
 		/// <summary>Placed light-source voxels (v4+). Empty for v1-v3 saves.</summary>
 		public List<BlockLightRecord> BlockLights { get; set; } = new();
 
+		/// <summary>
+		/// Per-hotbar-slot weapon ammo (v6+): (slotIndex, ammoMaterialId, count)
+		/// for each hotbar slot (0-9) that has a weapon with loaded ammo. Empty
+		/// for v5-and-earlier saves (the feature did not exist).
+		/// </summary>
+		public List<(int Slot, int AmmoMaterialId, int Count)> Ammo { get; set; } = new();
+
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
 	}
@@ -468,6 +486,21 @@ public static class WorldSaveFile
 			w.Write(b.Position.Z);
 			w.Write(b.Level);
 			w.Write((byte)0); // padding
+		}
+
+		// Per-hotbar-slot weapon ammo (v6+). Written unconditionally (even when
+		// empty) so the reader can tell the layout apart by version. Each record
+		// is the hotbar slot index (i32) + the ammo material id (i32) + the
+		// count (i32).
+		if (CurrentVersion >= VersionWithWeaponAmmo)
+		{
+			w.Write(data.Ammo.Count);
+			foreach (var (slot, ammoMaterialId, count) in data.Ammo)
+			{
+				w.Write(slot);
+				w.Write(ammoMaterialId);
+				w.Write(count);
+			}
 		}
 
 		// Trailing FNV-1a over every byte written above the checksum. Flush the
@@ -673,6 +706,24 @@ public static class WorldSaveFile
 					byte level = r.ReadByte();
 					r.ReadByte(); // padding
 					data.BlockLights.Add(new BlockLightRecord(new Vector3I(x, y, z), level));
+				}
+			}
+
+			// Per-hotbar-slot weapon ammo (v6+). v5-and-earlier files end right
+			// after the block-light section (or the machine section, for v2-v3,
+			// or the drops, for v1), so the ammo section is read only for v6-and-
+			// later versions. For older versions the list stays empty (the feature
+			// did not exist).
+			if (version >= VersionWithWeaponAmmo)
+			{
+				int ammoCount = ReadCount(r);
+				data.Ammo = new List<(int, int, int)>(ammoCount);
+				for (int i = 0; i < ammoCount; i++)
+				{
+					int slot = r.ReadInt32();
+					int ammoMaterialId = r.ReadInt32();
+					int count = r.ReadInt32();
+					data.Ammo.Add((slot, ammoMaterialId, count));
 				}
 			}
 
