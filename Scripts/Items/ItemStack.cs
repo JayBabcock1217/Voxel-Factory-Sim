@@ -25,41 +25,79 @@ public class ItemStack
 	/// <summary>How many items are in this stack.</summary>
 	public int Count { get; set; }
 
+	// The kind fields are stored explicitly (set by FromTool/FromMachine/
+	// FromWeapon/FromAmmo), BUT they are also DERIVED from the MaterialId as a
+	// fallback. This is critical for save/load: the save file stores only
+	// (MaterialId, Count), so a loaded stack has no explicit kind field — but
+	// the kind is fully determined by the MaterialId range (tools 100-103,
+	// machines 200-299, weapons 300-399, ammo 400-499), so the derived getter
+	// reconstructs it. See the individual property docs.
+
 	/// <summary>
 	/// The tool kind this stack represents, when <see cref="MaterialId"/> is a
 	/// tool id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsToolId"/>).
-	/// <see langword="null"/> for plain materials, machines, and empty stacks.
+	/// Returns the explicit value if set, otherwise derives it from
+	/// <see cref="MaterialId"/> (so a stack loaded from a save — which stores
+	/// only the id — is still recognized as the right tool).
 	/// </summary>
-	public ToolType? ToolType { get; set; }
+	public ToolType? ToolType
+	{
+		get => _toolType ?? (_isToolId ? (ToolType?)MaterialId : null);
+		set => _toolType = value;
+	}
+	private ToolType? _toolType;
+	private bool _isToolId => FactorySim.Voxel.VoxelMaterialIds.IsToolId(MaterialId);
 
 	/// <summary>
 	/// The machine kind this stack represents, when <see cref="MaterialId"/> is
 	/// a machine id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsMachineId"/>).
-	/// <see langword="null"/> for plain materials, tools, and empty stacks. When
-	/// set, placing this item spawns a <see cref="FactorySim.Machines.Machine"/>
+	/// Returns the explicit value if set, otherwise derives it from
+	/// <see cref="MaterialId"/> (so a saved/loaded stack is still recognized).
+	/// When set, placing this item spawns a <see cref="FactorySim.Machines.Machine"/>
 	/// node (its imported mesh) instead of a voxel.
 	/// </summary>
-	public MachineType? MachineType { get; set; }
+	public MachineType? MachineType
+	{
+		get => _machineType ?? (_isMachineId ? (MachineType?)MaterialId : null);
+		set => _machineType = value;
+	}
+	private MachineType? _machineType;
+	private bool _isMachineId => FactorySim.Voxel.VoxelMaterialIds.IsMachineId(MaterialId);
 
 	/// <summary>
 	/// The weapon kind this stack represents, when <see cref="MaterialId"/> is a
 	/// weapon id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsWeaponId"/>).
-	/// <see langword="null"/> for everything else. A weapon is a single,
-	/// non-stacking item (Count is 1) that, when selected in the hotbar, becomes
-	/// the active weapon the player can fire with the primary mouse button. Its
-	/// loaded ammo lives in the weapon's own ammo slot (see the ammo feature),
-	/// not on this stack.
+	/// Returns the explicit value if set, otherwise derives it from
+	/// <see cref="MaterialId"/> (so a saved/loaded stack is still recognized as a
+	/// weapon). A weapon is a single, non-stacking item (Count is 1) that, when
+	/// selected in the hotbar, becomes the active weapon the player can fire with
+	/// the primary mouse button. Its loaded ammo lives in the weapon's own ammo
+	/// slot (see the ammo feature), not on this stack.
 	/// </summary>
-	public WeaponType? WeaponType { get; set; }
+	public WeaponType? WeaponType
+	{
+		get => _weaponType ?? (_isWeaponId ? (WeaponType?)MaterialId : null);
+		set => _weaponType = value;
+	}
+	private WeaponType? _weaponType;
+	private bool _isWeaponId => FactorySim.Voxel.VoxelMaterialIds.IsWeaponId(MaterialId);
 
 	/// <summary>
 	/// The ammo kind this stack represents, when <see cref="MaterialId"/> is an
 	/// ammo id (see <see cref="FactorySim.Voxel.VoxelMaterialIds.IsAmmoId"/>).
-	/// <see langword="null"/> for everything else. Ammo is a STACKABLE consumable
-	/// (Count up to <see cref="StackLimit"/>) whose only use is being loaded into
-	/// a compatible weapon's ammo slot and consumed as the weapon fires.
+	/// Returns the explicit value if set, otherwise derives it from
+	/// <see cref="MaterialId"/> (so a saved/loaded stack is still recognized as
+	/// ammo). Ammo is a STACKABLE consumable (Count up to <see cref="StackLimit"/>)
+	/// whose only use is being loaded into a compatible weapon's ammo slot and
+	/// consumed as the weapon fires.
 	/// </summary>
-	public AmmoType? AmmoType { get; set; }
+	public AmmoType? AmmoType
+	{
+		get => _ammoType ?? (_isAmmoId ? (AmmoType?)MaterialId : null);
+		set => _ammoType = value;
+	}
+	private AmmoType? _ammoType;
+	private bool _isAmmoId => FactorySim.Voxel.VoxelMaterialIds.IsAmmoId(MaterialId);
 
 	/// <summary>
 	/// The BLOCK LIGHT LEVEL this item emits when placed as a voxel (0-15).

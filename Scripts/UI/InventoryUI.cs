@@ -168,10 +168,6 @@ public partial class InventoryUI : CanvasLayer
 	private int _dragSlot = -1;
 	private bool _dirty;
 
-	// Temporary diagnostic: when true, RefreshAmmoSlots logs the ammo slot state
-	// to the Godot console so we can see why the slots are (or aren't) visible.
-	private bool _debugAmmoLog = true;
-
 	public override void _Ready()
 	{
 		AddToGroup("inventory_ui");
@@ -3204,12 +3200,7 @@ public partial class InventoryUI : CanvasLayer
 		{
 			var held = _inventory != null ? _inventory.Slots[i] : ItemStack.From(0);
 			bool isWeapon = held.IsWeapon;
-			bool show = open && isWeapon;
-			_ammoSlots[i].Visible = show;
-			if (isWeapon && _debugAmmoLog)
-			{
-				GD.Print($"[AmmoSlot] slot {i}: weapon={held.MaterialId} open={open} visible={show} globalPos={_ammoSlots[i].GlobalPosition} size={_ammoSlots[i].Size} panelPos={_panel?.Position}");
-			}
+			_ammoSlots[i].Visible = open && isWeapon;
 			if (!isWeapon)
 			{
 				continue;
