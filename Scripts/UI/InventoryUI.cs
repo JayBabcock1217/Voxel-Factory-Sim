@@ -129,18 +129,36 @@ public partial class InventoryUI : CanvasLayer
 	private static readonly Color HotbarBgSelected = new Color(0.22f, 0.55f, 0.28f, 0.85f);
 	private int _selectedHotbarSlot;
 
-	// The weapon ammo slot: a single slot that sits DIRECTLY BELOW the selected
-	// hotbar slot (it tracks the selection). It is visible only when the selected
-	// hotbar item is a WEAPON; it shows the ammo currently loaded in that weapon
-	// and lets the player load/unload compatible ammo (drag/shift-click from the
-	// inventory). Backed by the WeaponController's per-weapon ammo store.
-	private Panel _ammoPanel;
+	// The weapon ammo slot: lives in the INVENTORY PANE (below the hotbar row),
+	// NOT on the HUD. It is visible only while the inventory is open AND the
+	// selected hotbar item is a WEAPON; it shows the ammo currently loaded in
+	// that weapon and lets the player load/unload compatible ammo (drag /
+	// right-click). Backed by the WeaponController's per-weapon ammo store.
 	private Control _ammoSlot;
 	private TextureRect _ammoIcon;
 	private Label _ammoCount;
 	private Label _ammoLabel;
 	private ColorRect _ammoSlotBg;
-	private static readonly Color AmmoSlotBg = new Color(0.1f, 0.14f, 0.2f, 0.75f);
+	private static readonly Color AmmoSlotBg = new Color(0.1f, 0.14f, 0.2f, 0.85f);
+
+	// The HUD ammo COUNT: a small number drawn just below the selected hotbar
+	// slot. Visible only when the selected item is a weapon; it shows how much
+	// ammo is loaded in that weapon (so the player sees the count in the hotbar
+	// without opening the inventory). The actual ammo slot (load/unload) lives
+	// in the inventory pane.
+	private Label _hotbarAmmoCount;
+	private static readonly Color HotbarAmmoCountColor = new Color(0.85f, 0.9f, 1f);
+
+	// The slot-grid section (the Control that holds the storage grid + hotbar
+	// row). Kept so the ammo slot (a child of it) can be positioned relative to
+	// the grid, and so the grid width is available for centering.
+	private Control _gridSection;
+	private float _ammoSlotGridW;
+
+	// Sentinel: the value _dragSlot takes when a drag was STARTED on the ammo
+	// slot (which is not a real inventory slot, so it has no index). The release
+	// handler checks for it to know a drag is in progress onto the ammo slot.
+	private const int AmmoSlotDragSentinel = -100;
 
 	private int _dragSlot = -1;
 	private bool _dirty;
@@ -468,6 +486,11 @@ public partial class InventoryUI : CanvasLayer
 			_dragSlot = -1;
 			RefreshCursor();
 		}
+
+		// The ammo slot lives in the inventory pane (visible only while open),
+		// and the HUD ammo count's visibility depends on the open state, so
+		// refresh both when the inventory opens/closes.
+		RefreshAmmoSlot();
 	}
 
 	// ------------------------------------------------------------------
@@ -639,6 +662,8 @@ public partial class InventoryUI : CanvasLayer
 			Size = new Vector2(gridW, gridH),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
+		_gridSection = gridSection;
+		_ammoSlotGridW = gridW;
 		_hbox.AddChild(gridSection);
 
 		// Slot grid: rows 0..5 = storage (12 cols each, slots 10-81),
@@ -783,24 +808,30 @@ public partial class InventoryUI : CanvasLayer
 		_root.AddChild(_tooltip);
 
 		BuildHotbar();
-		BuildAmmoSlot();
+		BuildAmmoSlot(_gridSection);
 	}
 
 	/// <summary>
-	/// Builds the weapon AMMO SLOT: a single slot that sits directly BELOW the
-	/// selected hotbar slot and tracks it as the selection moves. It is shown
-	/// only when the selected hotbar item is a weapon (see
-	/// <see cref="RefreshHotbar"/>), and shows the ammo loaded in that weapon.
-	/// The player loads ammo by moving a compatible stack into it (drag or
-	/// shift-click); incompatible ammo is rejected (bounced back). The slot's
-	/// contents are the WeaponController's per-weapon ammo store, not a real
-	/// inventory slot.
+	/// Builds two things for the ammo feature:
+	///  * the AMMO SLOT — a single slot inside the INVENTORY PANE, below the
+	///    hotbar row. Shown only while the inventory is open AND the selected
+	///    hotbar item is a weapon; it shows the ammo loaded in that weapon and
+	///    lets the player load/unload compatible ammo (see
+	///    <see cref="HandleAmmoSlotClick"/>). It is a child of the slot-grid
+	///    section (same parent as the hotbar row) so its position is computed in
+	///    the same space as the hotbar slots.
+	///  * the HUD AMMO COUNT — a small number drawn just below the selected
+	///    hotbar slot on the always-visible HUD hotbar. Shown only when the
+	///    selected item is a weapon; it shows how much ammo is loaded (the
+	///    player's at-a-glance ammo readout without opening the inventory).
+	/// The slot's contents are the WeaponController's per-weapon ammo store, not
+	/// a real inventory slot.
 	/// </summary>
-	private void BuildAmmoSlot()
+	private void BuildAmmoSlot(Control gridSection)
 	{
-		float size = 44f;
-		// Positioned relative to the selected hotbar slot each frame in
-		// RefreshHotbar (it tracks the selection). Start hidden.
+		float size = SlotSize;
+		// The ammo slot: a child of the grid section, positioned below the
+		// hotbar row (centered, like the hotbar row). Start hidden.
 		_ammoSlot = new Control
 		{
 			Name = "AmmoSlot",
@@ -841,46 +872,50 @@ public partial class InventoryUI : CanvasLayer
 		_ammoCount.AddThemeConstantOverride("outline_size", 3);
 		_ammoSlot.AddChild(_ammoCount);
 
-		// A small label to the left of the slot naming the ammo kind (e.g.
-		// "Bullets"). Centered vertically with the slot.
+		// A label to the LEFT of the slot naming the weapon + ammo kind (e.g.
+		// "SMG — Bullets"). Centered vertically with the slot.
 		_ammoLabel = new Label
 		{
 			Name = "AmmoLabel",
 			LayoutMode = 3, // Position
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 			VerticalAlignment = VerticalAlignment.Center,
-			Visible = false,
+			HorizontalAlignment = HorizontalAlignment.Left,
 		};
 		_ammoLabel.AddThemeColorOverride("font_color", new Color(0.85f, 0.85f, 0.9f));
 		_ammoLabel.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 		_ammoLabel.AddThemeConstantOverride("outline_size", 3);
-		_ammoLabel.AddThemeFontSizeOverride("font_size", 13);
+		_ammoLabel.AddThemeFontSizeOverride("font_size", 14);
 
-		// A thin panel backing the slot + label so the whole thing reads as one
-		// unit (the slot is the interactive part; the panel is just a backdrop).
-		_ammoPanel = new Panel
+		// Position below the hotbar row, centered on the grid width.
+		float gridW = _ammoSlotGridW;
+		float hotbarRowY = Inventory.StorageRows * (SlotSize + SlotGap);
+		float ammoRowY = hotbarRowY + SlotSize + SlotGap + 8f;
+		float labelW = 150f;
+		_ammoSlot.Position = new Vector2((gridW - size) / 2f + labelW / 2f, ammoRowY);
+		_ammoLabel.Position = new Vector2((gridW - size) / 2f - labelW, ammoRowY + 2f);
+		_ammoLabel.Size = new Vector2(labelW, size);
+		gridSection.AddChild(_ammoLabel);
+		gridSection.AddChild(_ammoSlot);
+
+		// The HUD ammo count: a small number just below the selected hotbar slot.
+		// A child of the full-rect root (positioned in root space in
+		// RefreshAmmoSlot). Start hidden.
+		_hotbarAmmoCount = new Label
 		{
-			Name = "AmmoPanel",
+			Name = "HotbarAmmoCount",
 			LayoutMode = 3, // Position
 			MouseFilter = Control.MouseFilterEnum.Ignore,
+			HorizontalAlignment = HorizontalAlignment.Center,
+			VerticalAlignment = VerticalAlignment.Center,
 			Visible = false,
+			ZIndex = 5,
 		};
-		var ammoStyle = new StyleBoxFlat
-		{
-			BgColor = new Color(0f, 0f, 0f, 0.5f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-			ContentMarginLeft = 4f,
-			ContentMarginTop = 4f,
-			ContentMarginRight = 4f,
-			ContentMarginBottom = 4f,
-		};
-		_ammoPanel.AddThemeStyleboxOverride("panel", ammoStyle);
-		_ammoPanel.AddChild(_ammoLabel);
-		_ammoPanel.AddChild(_ammoSlot);
-		_root.AddChild(_ammoPanel);
+		_hotbarAmmoCount.AddThemeColorOverride("font_color", HotbarAmmoCountColor);
+		_hotbarAmmoCount.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
+		_hotbarAmmoCount.AddThemeConstantOverride("outline_size", 3);
+		_hotbarAmmoCount.AddThemeFontSizeOverride("font_size", 13);
+		_root.AddChild(_hotbarAmmoCount);
 	}
 
 	/// <summary>
@@ -2576,12 +2611,13 @@ public partial class InventoryUI : CanvasLayer
 
 		if (@event is InputEventMouseButton mouse && mouse.Pressed)
 		{
-			// AMMO SLOT FIRST: while a weapon is selected in the hotbar, the ammo
-			// slot (below it) is visible and interactive. A click on it loads or
-			// unloads the weapon's ammo (see HandleAmmoSlotClick). This is checked
-			// before the regular inventory slot hit-test because the ammo slot is
-			// not one of the 82 inventory slots.
-			if (_ammoSlot != null && _ammoSlot.Visible && AmmoSlotAt(mouse.Position))
+			// AMMO SLOT FIRST: the ammo slot lives in the INVENTORY PANE (below the
+			// hotbar row), so it is only interactive while the inventory is open.
+			// When a weapon is selected, it is visible and a click on it loads or
+			// unloads the weapon's ammo (see HandleAmmoSlotClick). Checked before
+			// the regular inventory slot hit-test because it is not one of the 82
+			// inventory slots.
+			if (IsOpen() && _ammoSlot != null && _ammoSlot.Visible && AmmoSlotAt(mouse.Position))
 			{
 				HandleAmmoSlotClick(mouse);
 				return;
@@ -2621,6 +2657,14 @@ public partial class InventoryUI : CanvasLayer
 			if (!_cursorStack.IsEmpty && under >= 0 && under != _dragSlot)
 			{
 				PlaceCursorInto(under);
+			}
+			// DROPPING ONTO THE AMMO SLOT: if the drag started on a real inventory
+			// slot (the cursor holds that stack) and the mouse is released over the
+			// (visible) ammo slot, load the stack into the weapon. This makes
+			// drag-and-drop from the inventory work the same as clicking.
+			if (_dragSlot >= 0 && _ammoSlot != null && _ammoSlot.Visible && AmmoSlotAt(mouseUp.Position))
+			{
+				TryLoadAmmoFromCursor();
 			}
 			_dragSlot = -1;
 		}
@@ -2882,10 +2926,13 @@ public partial class InventoryUI : CanvasLayer
 		{
 			if (_cursorStack.IsEmpty)
 			{
-				// Empty cursor: unload the loaded ammo onto the cursor.
+				// Empty cursor: unload the loaded ammo onto the cursor. Mark the
+				// drag as started on the ammo slot so a release over a real
+				// inventory slot can drop the ammo back there.
 				if (!loaded.IsEmpty)
 				{
 					_cursorStack = ctrl.UnloadAmmo(w);
+					_dragSlot = AmmoSlotDragSentinel;
 					RefreshCursor();
 				}
 			}
@@ -2938,6 +2985,37 @@ public partial class InventoryUI : CanvasLayer
 		// slot (see OnAmmoChanged). No extra raise needed.
 	}
 
+	/// <summary>
+	/// Loads the cursor's ammo stack into the selected weapon (called when a drag
+	/// from a real inventory slot is released over the ammo slot). Only compatible
+	/// ammo is loaded; anything else is left on the cursor. No-op when the cursor
+	/// is empty or not a compatible ammo.
+	/// </summary>
+	private void TryLoadAmmoFromCursor()
+	{
+		var weapon = SelectedWeapon();
+		if (weapon is not { } w)
+		{
+			return;
+		}
+		WeaponController ctrl = GetWeaponController();
+		if (ctrl == null)
+		{
+			return;
+		}
+		if (!_cursorStack.IsAmmo || _cursorStack.AmmoType != WeaponBehavior.AmmoForWeapon(w))
+		{
+			return; // incompatible or not ammo: leave it on the cursor
+		}
+		var existing = ctrl.GetLoadedAmmo(w);
+		bool ok = ctrl.LoadAmmo(w, _cursorStack);
+		if (ok)
+		{
+			_cursorStack = existing.IsEmpty ? ItemStack.From(0) : existing;
+			RefreshCursor();
+		}
+	}
+
 	private WeaponController GetWeaponController()
 	{
 		if (_weaponController == null || !IsInstanceValid(_weaponController))
@@ -2960,75 +3038,86 @@ public partial class InventoryUI : CanvasLayer
 	private void OnAmmoChanged() => RefreshAmmoSlot();
 
 	/// <summary>
-	/// Refreshes the ammo slot: shown (and positioned below the selected hotbar
-	/// slot) when the selected item is a weapon; hidden otherwise. Updates the
-	/// icon, count, and the ammo-kind label.
+	/// Refreshes the ammo UI for the selected hotbar item:
+	///  * the INVENTORY-PANE ammo slot (below the hotbar row) — shown only while
+	///    the inventory is open AND the selected item is a weapon; shows the
+	///    loaded ammo (icon + count) and the weapon/ammo label.
+	///  * the HUD ammo COUNT (just below the selected hotbar slot) — shown only
+	///    when the selected item is a weapon (regardless of the inventory); shows
+	///    the loaded ammo count so the player sees it at a glance.
+	/// Hidden for both when the selected item is not a weapon.
 	/// </summary>
 	private void RefreshAmmoSlot()
 	{
-		if (_ammoSlot == null || _ammoPanel == null)
+		if (_ammoSlot == null || _hotbarAmmoCount == null)
 		{
 			return;
 		}
 		var weapon = SelectedWeapon();
-		if (weapon is not { } w)
-		{
-			_ammoPanel.Visible = false;
-			_ammoSlot.Visible = false;
-			return;
-		}
 
-		// Position the panel so the SLOT sits directly below the selected
-		// hotbar slot. The hotbar slot's root-space rect is known (the hotbar
-		// panel is a child of the root; the slot is a child of the hotbar).
-		float size = 44f;
-		Vector2 slotTopLeft = HotbarSlotRootRect(_selectedHotbarSlot).Position;
-		// The slot's top-left (the interactive part) goes just below the hotbar
-		// slot, aligned to its left edge.
-		Vector2 slotPos = new Vector2(slotTopLeft.X, slotTopLeft.Y + size + 4f);
-		// The panel wraps the label (to the left) + the slot. Compute the panel
-		// rect so the slot lands at slotPos.
-		float labelW = 70f;
-		Vector2 panelPos = new Vector2(slotPos.X - labelW - 4f, slotPos.Y - 4f);
-		Vector2 panelSize = new Vector2(labelW + 4f + size + 4f, size + 8f);
-		_ammoPanel.Position = panelPos;
-		_ammoPanel.Size = panelSize;
-		// The slot's position within the panel (the panel's content offset is 4).
-		_ammoSlot.Position = new Vector2(labelW + 4f, 4f);
-		_ammoLabel.Position = new Vector2(4f, 0f);
-		_ammoLabel.Size = new Vector2(labelW, size + 8f);
-		_ammoLabel.Text = ItemRegistry.AmmoName(WeaponBehavior.AmmoForWeapon(w));
-		_ammoLabel.Visible = true;
-
-		// Show the loaded ammo (icon + count) or an empty slot.
-		WeaponController ctrl = GetWeaponController();
-		ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(w) : ItemStack.From(0);
-		if (loaded.IsEmpty)
+		// HUD ammo count: visible whenever a weapon is selected (even with the
+		// inventory closed), positioned just below the selected hotbar slot.
+		if (weapon is { } w)
 		{
-			_ammoIcon.Texture = null;
-			_ammoCount.Text = "";
+			WeaponController ctrl = GetWeaponController();
+			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(w) : ItemStack.From(0);
+			_hotbarAmmoCount.Text = loaded.Count.ToString();
+			_hotbarAmmoCount.Position = HotbarAmmoCountPosition();
+			_hotbarAmmoCount.Size = new Vector2(40f, 18f);
+			_hotbarAmmoCount.Visible = true;
 		}
 		else
 		{
-			SetIcon(_ammoIcon, loaded.MaterialId);
-			_ammoCount.Text = loaded.Count.ToString();
+			_hotbarAmmoCount.Visible = false;
 		}
 
-		_ammoPanel.Visible = true;
-		_ammoSlot.Visible = true;
+		// Inventory-pane ammo slot: visible only while the inventory is open AND
+		// a weapon is selected.
+		bool slotVisible = IsOpen() && weapon is { };
+		_ammoSlot.Visible = slotVisible;
+		if (_ammoLabel != null)
+		{
+			_ammoLabel.Visible = slotVisible;
+		}
+		if (!slotVisible)
+		{
+			return;
+		}
+
+		// Fill the slot's contents (icon + count) + the label.
+		if (weapon is { } ww)
+		{
+			WeaponController ctrl = GetWeaponController();
+			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(ww) : ItemStack.From(0);
+			if (loaded.IsEmpty)
+			{
+				_ammoIcon.Texture = null;
+				_ammoCount.Text = "";
+			}
+			else
+			{
+				SetIcon(_ammoIcon, loaded.MaterialId);
+				_ammoCount.Text = loaded.Count.ToString();
+			}
+			_ammoLabel.Text = $"{ItemRegistry.WeaponName(ww)} — {ItemRegistry.AmmoName(WeaponBehavior.AmmoForWeapon(ww))}";
+		}
 	}
 
-	/// <summary>The root-space rect of hotbar slot <paramref name="index"/>.</summary>
-	private Rect2 HotbarSlotRootRect(int index)
+	/// <summary>
+	/// The root-space position for the HUD ammo count: centered under the
+	/// selected hotbar slot, a few pixels below it.
+	/// </summary>
+	private Vector2 HotbarAmmoCountPosition()
 	{
-		// The hotbar panel is a child of the root; the slot is a child of the
-		// hotbar panel. Accumulate the offsets.
-		if (_hotbar == null || _hotbarSlots[index] == null)
+		if (_hotbar == null || _hotbarSlots[_selectedHotbarSlot] == null)
 		{
-			return new Rect2(Vector2.Zero, Vector2.Zero);
+			return Vector2.Zero;
 		}
-		var pos = _hotbar.GlobalPosition + _hotbarSlots[index].Position;
-		return new Rect2(pos, _hotbarSlots[index].Size);
+		// The hotbar panel is a child of the root; the slot is a child of the
+		// hotbar panel. Accumulate the offsets to get the slot's root-space rect.
+		Vector2 slotPos = _hotbar.GlobalPosition + _hotbarSlots[_selectedHotbarSlot].Position;
+		Vector2 slotSize = _hotbarSlots[_selectedHotbarSlot].Size;
+		return new Vector2(slotPos.X, slotPos.Y + slotSize.Y + 2f);
 	}
 
 	/// <summary>
