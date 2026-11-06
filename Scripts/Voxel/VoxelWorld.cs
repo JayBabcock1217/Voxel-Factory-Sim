@@ -2746,6 +2746,66 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Immediately frees every machine in the shared "Machines" container (a
+	/// ROOT node that survives scene reloads). Uses <c>Free()</c> (immediate)
+	/// rather than <c>QueueFree()</c> (deferred to end-of-frame) so that any
+	/// machine spawned right after this call does NOT collide with a stale
+	/// machine's occupancy. Called at the start of <see cref="SpawnOrRestorePlayer"/>
+	/// to guarantee a clean slate before a save's machines are (re)spawned, so
+	/// machines from a previous save/world never persist. A no-op when there is
+	/// no "Machines" container or it is empty.
+	/// </summary>
+	private void ClearAllMachinesImmediate()
+	{
+		var tree = GetTree();
+		if (tree == null)
+		{
+			return;
+		}
+		var machinesRoot = tree.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			return;
+		}
+		// Free() removes the node from the tree RIGHT NOW (Godot 4: Free is
+		// immediate; QueueFree is the deferred, end-of-frame variant), so the
+		// occupancy check in the subsequent SpawnMachine sees no stale machines.
+		// Freeing children while iterating a snapshot of the child list is safe
+		// (GetChildren() returns a copy, so mutating the parent's children does
+		// not affect the iteration).
+		foreach (var child in machinesRoot.GetChildren())
+		{
+			child.Free();
+		}
+	}
+
+	/// <summary>
+	/// Immediately frees every live item drop (the "voxel_drops" group). Uses
+	/// <c>Free()</c> (immediate) so stale drops from a prior save/world never
+	/// linger or overlap the re-spawned ones. Called at the start of
+	/// <see cref="SpawnOrRestorePlayer"/> alongside
+	/// <see cref="ClearAllMachinesImmediate"/> to guarantee a clean slate. A
+	/// no-op when there are no drops.
+	/// </summary>
+	private void ClearAllDropsImmediate()
+	{
+		var tree = GetTree();
+		if (tree == null)
+		{
+			return;
+		}
+		// GetNodesInGroup returns a fresh array, so freeing members while
+		// iterating is safe.
+		foreach (Node node in tree.GetNodesInGroup("voxel_drops"))
+		{
+			if (node is VoxelDrop)
+			{
+				node.Free();
+			}
+		}
+	}
+
+	/// <summary>
 	/// Spawns the player: restores the saved transform when a save exists
 	/// (via <see cref="RestorePlayerFromSave"/>), otherwise places the player on
 	/// the generated terrain (via <see cref="SpawnPlayerOnTerrain"/>). After a
@@ -2755,6 +2815,19 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	private bool SpawnOrRestorePlayer(Node3D player)
 	{
+		// Unconditionally clear any machines AND drops left over from a previous
+		// world / save in this same scene instance. The "Machines" container and
+		// the "voxel_drops" group are ROOT-level (they survive scene reloads), so
+		// objects placed in a prior save can otherwise persist into a fresh world
+		// or a different save. This must happen BEFORE the save-specific logic
+		// (below) and use an IMMEDIATE free (not QueueFree, which is deferred to
+		// end-of-frame) so that the occupancy check in SpawnMachine (called by
+		// ApplyMachines right after) does not see the stale machines and refuse
+		// to re-spawn in their cells. Safe to call even when there is nothing to
+		// clear (a no-op).
+		ClearAllMachinesImmediate();
+		ClearAllDropsImmediate();
+
 		var save = GetSaveService();
 		if (save == null)
 		{

@@ -972,11 +972,14 @@ public partial class WorldSave : Node
 			return;
 		}
 
+		// Free drops IMMEDIATELY (Free, not QueueFree) so the re-spawned drops
+		// below do not overlap the stale ones for a frame, and so stale drops
+		// from a prior save never linger.
 		foreach (Node node in GetTree().GetNodesInGroup("voxel_drops"))
 		{
 			if (node is VoxelDrop)
 			{
-				node.QueueFree();
+				node.Free();
 			}
 		}
 
@@ -1009,13 +1012,16 @@ public partial class WorldSave : Node
 		}
 
 		// Clear the existing machines (a fresh scene has none, but a re-load in
-		// the same session could). Free them all, then respawn the saved set.
+		// the same session could). Free them IMMEDIATELY (Free, not QueueFree)
+		// so the occupancy check in the SpawnMachine calls below does not see
+		// the stale machines and refuse to re-spawn in their cells. (QueueFree
+		// defers the removal to end-of-frame, which is too late.)
 		var machinesRoot = GetTree()?.Root.GetNodeOrNull<Node3D>("Machines");
 		if (machinesRoot != null)
 		{
 			foreach (var child in machinesRoot.GetChildren())
 			{
-				child.QueueFree();
+				child.Free();
 			}
 		}
 
