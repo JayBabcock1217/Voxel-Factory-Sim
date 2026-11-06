@@ -183,18 +183,21 @@ public partial class MachineDefinition : Resource
 	/// unchanged (see <see cref="MachinePort"/>). The indicators can be toggled
 	/// globally with F2 (see <see cref="Machine.SetIndicatorsVisible"/>).
 	///
-	/// Defaults: the X axis is ENABLED out of the box — <see cref="FaceMinusX"/>
-	/// is <see cref="MachinePort.Input"/> and <see cref="FacePlusX"/> is
-	/// <see cref="MachinePort.Output"/> (a natural input→output flow along +X).
-	/// The Y and Z faces default to <see cref="MachinePort.Disabled"/> (no
-	/// indicators). The user can change any face in the inspector.
+	/// Defaults: the FORWARD axis (local +Z — the face the machine points at,
+	/// the same convention the conveyor flow axis uses) is ENABLED out of the
+	/// box: <see cref="FacePlusZ"/> is
+	/// <see cref="MachinePort.Output"/> (the front face, items leave here) and
+	/// <see cref="FaceMinusZ"/> is <see cref="MachinePort.Input"/> (the back
+	/// face, items enter here). The X and Y faces default to
+	/// <see cref="MachinePort.Disabled"/> (no indicators). The user can change
+	/// any face in the inspector.
 	/// </summary>
-	[Export] public MachinePort FacePlusX { get; set; } = MachinePort.Output;
-	[Export] public MachinePort FaceMinusX { get; set; } = MachinePort.Input;
+	[Export] public MachinePort FacePlusX { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FaceMinusX { get; set; } = MachinePort.Disabled;
 	[Export] public MachinePort FacePlusY { get; set; } = MachinePort.Disabled;
 	[Export] public MachinePort FaceMinusY { get; set; } = MachinePort.Disabled;
-	[Export] public MachinePort FacePlusZ { get; set; } = MachinePort.Disabled;
-	[Export] public MachinePort FaceMinusZ { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FacePlusZ { get; set; } = MachinePort.Output;
+	[Export] public MachinePort FaceMinusZ { get; set; } = MachinePort.Input;
 
 	/// <summary>
 	/// The six face ports in the canonical <see cref="MachineFace.FaceDirections"/>
