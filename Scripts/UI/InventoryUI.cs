@@ -168,6 +168,10 @@ public partial class InventoryUI : CanvasLayer
 	private int _dragSlot = -1;
 	private bool _dirty;
 
+	// Temporary diagnostic: when true, RefreshAmmoSlots logs the ammo slot state
+	// to the Godot console so we can see why the slots are (or aren't) visible.
+	private bool _debugAmmoLog = true;
+
 	public override void _Ready()
 	{
 		AddToGroup("inventory_ui");
@@ -496,8 +500,11 @@ public partial class InventoryUI : CanvasLayer
 
 		if (!open)
 		{
-			// A close cancels any in-flight drag; the stack stays on the cursor
-			// until the user re-opens and places it (nothing is lost).
+			// A close while dragging (TAB) auto-drops the cursor's stack BACK INTO
+			// the slot it came from (tracked by _dragSlot), so nothing is left
+			// floating on the cursor. If there is no in-flight drag (or the cursor
+			// is empty), this is a no-op.
+			ReturnCursorToDragSource();
 			_dragSlot = -1;
 			RefreshCursor();
 		}
@@ -3084,6 +3091,71 @@ public partial class InventoryUI : CanvasLayer
 		}
 	}
 
+	/// <summary>
+	/// Returns the cursor's stack to the slot it came from (used when the
+	/// inventory is CLOSED mid-drag, e.g. the player presses TAB). The source is
+	/// tracked by <c>_dragSlot</c>:
+	///  * a real inventory slot index (>= 0): the stack is merged back into that
+	///    slot (or placed if the slot is empty / a different material).
+	///  * an ammo-slot sentinel (IsAmmoDrag): the stack is reloaded into the
+	///    weapon in that hotbar slot (undoing the unload).
+	/// No-op when the cursor is empty or there is no in-flight drag source.
+	/// </summary>
+	private void ReturnCursorToDragSource()
+	{
+		if (_inventory == null || _cursorStack.IsEmpty)
+		{
+			return;
+		}
+		int src = _dragSlot;
+		if (src >= 0)
+		{
+			// Return to a real inventory slot. Merge if the slot is empty or holds
+			// the same material with room; otherwise place the whole stack (the
+			// slot was emptied when the stack was picked up, so it is empty here —
+			// but guard against a same-material stack that grew in the meantime).
+			var slotStack = _inventory.Slots[src];
+			if (slotStack.IsEmpty || (slotStack.MaterialId == _cursorStack.MaterialId && slotStack.Count + _cursorStack.Count <= ItemStack.StackLimit))
+			{
+				int move = slotStack.IsEmpty ? _cursorStack.Count : Math.Min(ItemStack.StackLimit - slotStack.Count, _cursorStack.Count);
+				if (slotStack.IsEmpty)
+				{
+					_inventory.Slots[src] = ItemStack.From(_cursorStack.MaterialId, move);
+				}
+				else
+				{
+					slotStack.Count += move;
+				}
+				_cursorStack = ItemStack.From(_cursorStack.MaterialId, _cursorStack.Count - move);
+				RefreshSlot(src);
+			}
+			// If the slot now holds a different (non-empty) material, the stack
+			// cannot go back (it would be overwritten) — leave it on the cursor
+			// so it is not lost.
+		}
+		else if (IsAmmoDrag(src))
+		{
+			// Return to the ammo slot: reload the unloaded ammo into the weapon in
+			// that hotbar slot (undoing the unload that started the drag).
+			int hotbarIndex = -(src) - 2;
+			if (hotbarIndex >= 0 && hotbarIndex < Inventory.HotbarSize)
+			{
+				var held = _inventory.Slots[hotbarIndex];
+				if (held.IsWeapon)
+				{
+					var w = held.WeaponType.Value;
+					WeaponController ctrl = GetWeaponController();
+					if (ctrl != null)
+					{
+						ctrl.LoadAmmo(w, _cursorStack);
+						_cursorStack = ItemStack.From(0);
+						RefreshCursor();
+					}
+				}
+			}
+		}
+	}
+
 	private WeaponController GetWeaponController()
 	{
 		if (_weaponController == null || !IsInstanceValid(_weaponController))
@@ -3132,7 +3204,12 @@ public partial class InventoryUI : CanvasLayer
 		{
 			var held = _inventory != null ? _inventory.Slots[i] : ItemStack.From(0);
 			bool isWeapon = held.IsWeapon;
-			_ammoSlots[i].Visible = open && isWeapon;
+			bool show = open && isWeapon;
+			_ammoSlots[i].Visible = show;
+			if (isWeapon && _debugAmmoLog)
+			{
+				GD.Print($"[AmmoSlot] slot {i}: weapon={held.MaterialId} open={open} visible={show} globalPos={_ammoSlots[i].GlobalPosition} size={_ammoSlots[i].Size} panelPos={_panel?.Position}");
+			}
 			if (!isWeapon)
 			{
 				continue;

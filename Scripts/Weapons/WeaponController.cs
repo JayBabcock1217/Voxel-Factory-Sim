@@ -58,6 +58,10 @@ public partial class WeaponController : Node3D
 	private InventoryUI _ui;
 	private Inventory _inventory;
 
+	// Temporary diagnostic: when true, logs held-mesh rebuilds to the Godot
+	// console so we can see why the mesh is (or isn't) updating.
+	private bool _debugMeshLog = true;
+
 	// The held-item mesh (rebuilt when the selected hotbar item changes).
 	private MeshInstance3D _heldMesh;
 	// The last held item's identity key (its MaterialId, 0 when empty). The mesh
@@ -383,6 +387,10 @@ public partial class WeaponController : Node3D
 		if (key != _lastHeldItemId)
 		{
 			_lastHeldItemId = key;
+			if (_debugMeshLog)
+			{
+				GD.Print($"[HeldMesh] rebuild: MaterialId={key} IsWeapon={held.IsWeapon} IsTool={held.IsTool} IsAmmo={held.IsAmmo} IsMachine={held.IsMachine} camera={_camera != null} heldMesh={_heldMesh != null} inTree={_heldMesh?.IsInsideTree() ?? false}");
+			}
 			BuildHeldMesh(held);
 		}
 		PositionHeldItem();
