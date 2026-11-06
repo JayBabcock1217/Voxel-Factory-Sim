@@ -163,6 +163,50 @@ public partial class MachineDefinition : Resource
 	/// </summary>
 	[Export(PropertyHint.File, "*.tscn")] public string MachineSceneOverride { get; set; } = "";
 
+	[ExportGroup("Face ports (dev-set)")]
+	/// <summary>
+	/// The per-face item-port config — one <see cref="MachinePort"/> per each of
+	/// the six cube faces. This is the DEV-set config the user edits in the
+	/// inspector: for each face, mark it <see cref="MachinePort.Input"/> (items
+	/// enter here), <see cref="MachinePort.Output"/> (items leave here), or
+	/// <see cref="MachinePort.Disabled"/> (no port). Each field is a scalar
+	/// <see cref="MachinePort"/> (Godot C# does not support <see cref="Export"/>
+	/// of an array of a custom enum), so the six faces are six labeled dropdowns
+	/// in the inspector.
+	///
+	/// It is a definition-level setting (like <see cref="PowerConsumption"/>)
+	/// shared by every placed machine of this type — NOT per-instance player
+	/// state, and NOT saved in the world file. It drives the in-game FACE
+	/// INDICATORS: input faces show an input-colored marker, output faces an
+	/// output-colored marker, disabled faces show nothing. The indicators are
+	/// the visible manifestation of this config; the actual item flow is left
+	/// unchanged (see <see cref="MachinePort"/>). The indicators can be toggled
+	/// globally with F2 (see <see cref="Machine.SetIndicatorsVisible"/>).
+	///
+	/// All faces default to <see cref="MachinePort.Disabled"/> (no indicators) so
+	/// machines render clean until the user configures them.
+	/// </summary>
+	[Export] public MachinePort FacePlusX { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FaceMinusX { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FacePlusY { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FaceMinusY { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FacePlusZ { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FaceMinusZ { get; set; } = MachinePort.Disabled;
+
+	/// <summary>
+	/// The six face ports in the canonical <see cref="MachineFace.FaceDirections"/>
+	/// order (index 0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z) — the array
+	/// form the machine node reads to build its indicators. Derived from the six
+	/// scalar fields above.
+	/// </summary>
+	public MachinePort[] Directions
+	{
+		get => new[]
+		{
+			FacePlusX, FaceMinusX, FacePlusY, FaceMinusY, FacePlusZ, FaceMinusZ,
+		};
+	}
+
 	[ExportGroup("Smelter recipes")]
 	/// <summary>
 	/// The smelter's INPUT material ids (one per recipe), in recipe order. Pairs
@@ -237,4 +281,10 @@ public partial class MachineDefinition : Resource
 	public void SetMachineSceneOverride(string value) { if (MachineSceneOverride != value) { MachineSceneOverride = value ?? ""; Raise(); } }
 	public void SetSmeltInputs(int[] value) { if (!ReferenceEquals(SmeltInputs, value)) { SmeltInputs = value ?? Array.Empty<int>(); Raise(); } }
 	public void SetSmeltOutputs(int[] value) { if (!ReferenceEquals(SmeltOutputs, value)) { SmeltOutputs = value ?? Array.Empty<int>(); Raise(); } }
+	public void SetFacePlusX(MachinePort value) { if (FacePlusX != value) { FacePlusX = value; Raise(); } }
+	public void SetFaceMinusX(MachinePort value) { if (FaceMinusX != value) { FaceMinusX = value; Raise(); } }
+	public void SetFacePlusY(MachinePort value) { if (FacePlusY != value) { FacePlusY = value; Raise(); } }
+	public void SetFaceMinusY(MachinePort value) { if (FaceMinusY != value) { FaceMinusY = value; Raise(); } }
+	public void SetFacePlusZ(MachinePort value) { if (FacePlusZ != value) { FacePlusZ = value; Raise(); } }
+	public void SetFaceMinusZ(MachinePort value) { if (FaceMinusZ != value) { FaceMinusZ = value; Raise(); } }
 }

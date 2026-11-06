@@ -111,6 +111,121 @@ public partial class Machine : StaticBody3D
 		}
 	}
 
+	// ------------------------------------------------------------------
+	// Face-port indicators (the per-face input/output markers the DEV config)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The per-face INDICATOR nodes (one <see cref="MeshInstance3D"/> per face
+	/// whose <see cref="MachineDefinition.Directions"/> entry is Input or
+	/// Output). Indexed by face (0..5, the canonical <see cref="MachineFace"/>
+	/// order); a null slot means that face has no indicator (disabled). These
+	/// are children of the machine in LOCAL space, so they rotate with the
+	/// placement rotation and always sit on the right world face. Built at
+	/// <see cref="Initialize"/> from the definition's Directions, and shown/hidden
+	/// together by <see cref="SetIndicatorsVisible"/> (the F2 toggle).
+	/// </summary>
+	private MeshInstance3D[] _faceIndicators = new MeshInstance3D[MachineFace.Count];
+
+	/// <summary>
+	/// Global visibility of all face-port indicators (the F2 toggle target).
+	/// Default true (indicators shown). Flipped by <see cref="SetIndicatorsVisible"/>,
+	/// which also shows/hides every placed machine's indicator nodes immediately.
+	/// New machines built after a toggle inherit the current value.
+	/// </summary>
+	public static bool IndicatorsVisible { get; private set; } = true;
+
+	/// <summary>The shared, bright, unshaded material for INPUT face indicators.</summary>
+	private static StandardMaterial3D _inputIndicatorMaterial;
+
+	private static StandardMaterial3D InputIndicatorMaterial
+	{
+		get
+		{
+			// A saturated GREEN that reads as "items go IN here." Distinct from
+			// the direction arrow (cyan-green) by hue and by being a flat face
+			// marker rather than a wedge.
+			_inputIndicatorMaterial ??= new StandardMaterial3D
+			{
+				AlbedoColor = new Color(0.15f, 0.95f, 0.35f),
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				EmissionEnabled = true,
+				Emission = new Color(0.15f, 0.95f, 0.35f),
+				EmissionEnergyMultiplier = 1.0f,
+			};
+			return _inputIndicatorMaterial;
+		}
+	}
+
+	/// <summary>The shared, bright, unshaded material for OUTPUT face indicators.</summary>
+	private static StandardMaterial3D _outputIndicatorMaterial;
+
+	private static StandardMaterial3D OutputIndicatorMaterial
+	{
+		get
+		{
+			// A saturated ORANGE/AMBER that reads as "items come OUT here."
+			// Clearly distinct from the green input markers in any lighting.
+			_outputIndicatorMaterial ??= new StandardMaterial3D
+			{
+				AlbedoColor = new Color(1.0f, 0.6f, 0.1f),
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				EmissionEnabled = true,
+				Emission = new Color(1.0f, 0.6f, 0.1f),
+				EmissionEnergyMultiplier = 1.0f,
+			};
+			return _outputIndicatorMaterial;
+		}
+	}
+
+	/// <summary>
+	/// Toggles the global visibility of every placed machine's face-port
+	/// indicators (the F2 key calls this with the new value). Flips
+	/// <see cref="IndicatorsVisible"/> and immediately shows/hides every
+	/// indicator node under the shared "Machines" container, so existing
+	/// machines update without being rebuilt. New machines built afterward
+	/// inherit the current value. Safe to call with the same value (idempotent).
+	/// </summary>
+	public static void SetIndicatorsVisible(bool visible)
+	{
+		IndicatorsVisible = visible;
+		var tree = Engine.GetMainLoop() as SceneTree;
+		if (tree == null)
+		{
+			return; // no scene tree (editor idle); the flag is still set for next build
+		}
+		var machinesRoot = tree.Root.GetNodeOrNull<Node3D>("Machines");
+		if (machinesRoot == null)
+		{
+			return;
+		}
+		for (int i = 0; i < machinesRoot.GetChildCount(); i++)
+		{
+			if (machinesRoot.GetChild(i) is Machine m)
+			{
+				m.ApplyIndicatorVisibility();
+			}
+		}
+	}
+
+	/// <summary>
+	/// Shows or hides THIS machine's face-port indicator nodes according to the
+	/// current <see cref="IndicatorsVisible"/> flag. Called from
+	/// <see cref="SetIndicatorsVisible"/> for every placed machine, and from
+	/// <see cref="BuildFaceIndicators"/> so a freshly-built machine respects the
+	/// current toggle.
+	/// </summary>
+	private void ApplyIndicatorVisibility()
+	{
+		for (int i = 0; i < _faceIndicators.Length; i++)
+		{
+			if (_faceIndicators[i] != null)
+			{
+				_faceIndicators[i].Visible = IndicatorsVisible;
+			}
+		}
+	}
+
 	/// <summary>The shared transparent material applied to a preview ghost's meshes.</summary>
 	private static StandardMaterial3D _previewMaterial;
 
@@ -178,6 +293,13 @@ public partial class Machine : StaticBody3D
 		Basis = PlacementRotation.BasisFor();
 
 		BuildVisual(def);
+		// The face-port indicators (the dev-set input/output markers) are shown
+		// on BOTH real machines and preview ghosts: a ghost is exactly when the
+		// player most wants to see which faces the machine type has ports on,
+		// and they rotate with the ghost as it is turned (R key). They are built
+		// for every machine here (the single place they are (re)created) and
+		// their visibility follows the global F2 toggle.
+		BuildFaceIndicators(def);
 		// A preview ghost must NOT block the player or count as solid — only a
 		// real (placed) machine gets a collision shape.
 		if (!IsPreview)
@@ -403,6 +525,108 @@ public partial class Machine : StaticBody3D
 		_directionArrow.Scale = new Vector3(voxelSize, voxelSize, voxelSize);
 
 		AddChild(_directionArrow);
+	}
+
+	/// <summary>
+	/// Builds (or re-builds) this machine's FACE-PORT indicators — one small flat
+	/// marker on each face whose <see cref="MachineDefinition.Directions"/> entry
+	/// is <see cref="MachinePort.Input"/> or <see cref="MachinePort.Output"/>.
+	/// Input faces get an input-colored marker, output faces an output-colored
+	/// one, and disabled faces get nothing.
+	///
+	/// Each indicator is a thin <see cref="BoxMesh"/> plate sitting just OUTSIDE
+	/// the machine's face (offset by half a voxel along that face's axis), in the
+	/// machine's LOCAL space — so the machine's placement-rotation Basis turns
+	/// the whole set and every plate stays glued to the correct world face. The
+	/// plate is small (a corner of the face, not the whole face) and unshaded
+	/// emissive (reads in any light, no shadow cost), keeping it SUPER CHEAP: a
+	/// primitive mesh per enabled face, shared materials, set up once at build.
+	///
+	/// The set of indicators is driven entirely by the DEV-set definition config
+	/// (<see cref="MachineDefinition.Directions"/>), NOT per-instance state, so
+	/// every machine of a type shows the same faces. Visibility follows the
+	/// global F2 toggle (<see cref="IndicatorsVisible"/>). Idempotent: any stale
+	/// indicators are freed first.
+	/// </summary>
+	private void BuildFaceIndicators(MachineDefinition def)
+	{
+		// Free any stale indicators (re-init safety).
+		for (int i = 0; i < _faceIndicators.Length; i++)
+		{
+			if (_faceIndicators[i] != null)
+			{
+				_faceIndicators[i].QueueFree();
+				_faceIndicators[i] = null;
+			}
+		}
+
+		float voxelSize = World != null ? World.VoxelSize : 1.0f;
+
+		// The six face ports from the definition (all-disabled when the
+		// definition or its Directions is missing / short).
+		var directions = def?.Directions;
+		if (directions == null)
+		{
+			ApplyIndicatorVisibility();
+			return;
+		}
+
+		for (int face = 0; face < MachineFace.Count; face++)
+		{
+			MachinePort port = face < directions.Length ? directions[face] : MachinePort.Disabled;
+			if (port == MachinePort.Disabled)
+			{
+				continue; // no indicator on a disabled face
+			}
+
+			// The face's outward unit direction as a Vector3 (Vector3 has no
+			// Vector3I constructor in this SDK, so build it from the components).
+			Vector3I dirI = MachineFace.FaceDirections[face];
+			Vector3 dir = new Vector3(dirI.X, dirI.Y, dirI.Z);
+			// A thin plate (a flat box) sized to a corner of the face. The thin
+			// dimension runs ALONG the face's outward axis so the plate sits just
+			// proud of the surface; the two in-face dimensions are the plate's
+			// width/height. Kept small so it reads as a marker, not a panel.
+			var plateSize = new Vector3(0.22f, 0.22f, 0.06f);
+			// Orient the plate so its thin axis is the face normal:
+			//   +X/-X face → thin in X; +Y/-Y face → thin in Y; +Z/-Z face → thin in Z.
+			switch (face)
+			{
+				case 0: // +X
+				case 1: // -X
+					plateSize = new Vector3(0.06f, 0.22f, 0.22f);
+					break;
+				case 2: // +Y
+				case 3: // -Y
+					plateSize = new Vector3(0.22f, 0.06f, 0.22f);
+					break;
+				// 4 (+Z) / 5 (-Z): default plateSize (thin in Z)
+			}
+			var plate = new BoxMesh { Size = plateSize };
+
+			// Position the plate at the face, pushed slightly OUTSIDE the surface
+			// (half a voxel along the face normal + a hair past the surface) so it
+			// sits proud of the machine body without z-fighting the mesh.
+			Vector3 pos = dir * (0.5f * voxelSize + 0.04f * voxelSize);
+
+			var indicator = new MeshInstance3D
+			{
+				Name = $"FacePort_{MachineFace.Label(MachineFace.FaceDirections[face])}",
+				Mesh = plate,
+				MaterialOverride = port == MachinePort.Input
+					? InputIndicatorMaterial
+					: OutputIndicatorMaterial,
+				CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+			};
+			indicator.Position = pos;
+			indicator.Scale = new Vector3(voxelSize, voxelSize, voxelSize);
+			AddChild(indicator);
+			_faceIndicators[face] = indicator;
+		}
+
+		// Apply the current global visibility so a freshly-built machine respects
+		// the F2 toggle state.
+		ApplyIndicatorVisibility();
 	}
 
 	/// <summary>

@@ -715,6 +715,20 @@ public partial class VoxelTool : Node3D
 			}
 		}
 
+		// F2: toggle the visibility of ALL machines' face-port indicators (the
+		// dev-set input/output face markers). This is a pure world-level visual
+		// toggle (a dev aid), NOT a placement action, so it works whether or not
+		// the inventory is open — unlike the R/arrows/F1 rotation controls above,
+		// which are gated on the inventory being closed. Handled here (in
+		// _Input, before the GUI) so it always reaches us and never competes with
+		// a focused control.
+		if (@event is InputEventKey f2 && f2.Pressed && !f2.Echo
+			&& (f2.PhysicalKeycode == Key.F2 || f2.Keycode == Key.F2))
+		{
+			FactorySim.Machines.Machine.SetIndicatorsVisible(
+				!FactorySim.Machines.Machine.IndicatorsVisible);
+		}
+
 		// Hotbar selection (mouse wheel + number keys 1-9,0). This is a player
 		// action taken while the inventory is CLOSED (mouse captured, in the 3D
 		// world) — it is deliberately handled here, NOT in the inventory UI, so
