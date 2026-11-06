@@ -349,7 +349,8 @@ public partial class WorldSave : Node
 					var snap = m.TakeSnapshot();
 					data.Machines.Add(new WorldSaveFile.MachineRecord(
 						m.VoxelPos, (int)m.Type, (int)m.PlacementRotation,
-						snap.InputSlots, snap.OutputSlots, snap.RecipeIndex));
+						snap.InputSlots, snap.OutputSlots, snap.RecipeIndex,
+						snap.Progress, snap.IsProcessing));
 				}
 			}
 		}
@@ -1028,12 +1029,16 @@ public partial class WorldSave : Node
 			{
 				spawned++;
 				// Restore the machine's runtime state (buffer contents + selected
-				// recipe) so a smelter/crafter comes back with its work intact.
+				// recipe + in-progress operation) so a smelter/crafter comes back
+				// with its work intact, INCLUDING a mid-cycle smelt/craft that
+				// resumes from where it left off.
 				var snap = new FactorySim.Machines.MachineSnapshot
 				{
 					InputSlots = m.InputSlots,
 					OutputSlots = m.OutputSlots,
 					RecipeIndex = m.RecipeIndex,
+					Progress = m.Progress,
+					IsProcessing = m.IsProcessing,
 				};
 				machine.RestoreSnapshot(snap);
 			}

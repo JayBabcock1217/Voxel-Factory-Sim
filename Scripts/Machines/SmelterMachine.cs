@@ -273,13 +273,22 @@ public partial class SmelterMachine : Machine
 	{
 		var snap = base.TakeSnapshot();
 		snap.RecipeIndex = RecipeIndex;
+		// The in-progress smelt (if any): the fraction through it and whether the
+		// smelter is mid-cycle. On restore, the timer is re-seeded so the smelt
+		// RESUMES rather than restarting.
+		snap.Progress = SmeltProgress;
+		snap.IsProcessing = _smelting;
 		return snap;
 	}
 
 	public override void RestoreSnapshot(MachineSnapshot snap)
 	{
 		base.RestoreSnapshot(snap);
-		if (snap != null && snap.HasRecipe && SmeltableRecipes.Count > 0)
+		if (snap == null)
+		{
+			return;
+		}
+		if (snap.HasRecipe && SmeltableRecipes.Count > 0)
 		{
 			// The saved recipe index is resolved against the live recipe list; if
 			// it is out of range (the recipe list changed between saves) it is
@@ -287,6 +296,17 @@ public partial class SmelterMachine : Machine
 			// non-empty (otherwise keep the auto-selected recipe, if any).
 			int count = SmeltableRecipes.Count;
 			RecipeIndex = System.Math.Min(snap.RecipeIndex, count - 1);
+		}
+		// Resume an in-progress smelt: re-set the flag and seed the timer from the
+		// saved fraction (progress × process time) so the smelt completes where it
+		// left off. The consumed ore is already out of the input buffer (extracted
+		// when the smelt started), so resuming needs only the timer.
+		if (snap.IsProcessing)
+		{
+			_smelting = true;
+			float smeltTime = Mathf.Max(0.05f, Definition?.ProcessTime ?? 1f);
+			_smeltTimer = System.Math.Clamp(snap.Progress, 0f, 1f) * smeltTime;
+			SmeltProgress = System.Math.Clamp(snap.Progress, 0f, 1f);
 		}
 	}
 }

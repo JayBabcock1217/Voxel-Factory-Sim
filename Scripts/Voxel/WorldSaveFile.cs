@@ -66,15 +66,19 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
-	///   v4 — added the block-light section (placed light-source voxels: voxel
-	///        + emission level), so a torch/glowstone's light survives a restart.
+	///   v5 — the machine record now also carries the processor's IN-PROGRESS
+	///        state (the smelt/craft progress fraction + a mid-operation flag),
+	///        so a smelter/crafter mid-cycle RESUMES after a reload instead of
+	///        restarting from scratch.
+	///   v4 — added the block-light section (placed light-source voxels, so a
+	///        torch/glowstone's light survives a restart).
 	///   v3 — the machine record now also carries the machine's runtime state
 	///        (input/output buffer stacks + selected recipe index), so a smelter's
 	///        or crafter's in-progress contents and recipe survive a restart.
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 4;
+	public const int CurrentVersion = 5;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -85,7 +89,7 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3, 4 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
@@ -99,6 +103,15 @@ public static class WorldSaveFile
 	/// v3+ records append the state fields after the 20-byte header.
 	/// </summary>
 	private const int VersionWithMachineState = 3;
+
+	/// <summary>
+	/// The first version whose machine record ALSO carries the processor's
+	/// in-progress state (progress fraction + mid-operation flag), appended
+	/// after the v3 state fields. v3/v4 machine records lack these (they load
+	/// as idle — Progress 0, IsProcessing false — which is correct, since they
+	/// never saved an in-progress operation).
+	/// </summary>
+	private const int VersionWithMachineProgress = 5;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -143,8 +156,14 @@ public static class WorldSaveFile
 		// section is absent), so a v3 world simply had no saved light sources.
 		// Nothing to re-derive; return as-is.
 		//
+		// v4 -> v5: the reader already defaults a v4 machine record's
+		// in-progress fields (Progress 0, IsProcessing false) because the v4
+		// layout simply has no such fields. So a v4 save loads as machines with
+		// no in-progress operation — exactly what it was (v4 never saved one).
+		// Nothing to re-derive; return as-is.
+		//
 		// Future version migrations go here, e.g.:
-		//   if (fromVersion == 4) { /* v4 -> v5: add new field, re-derive ... */ }
+		//   if (fromVersion == 5) { /* v5 -> v6: add new field, re-derive ... */ }
 		return data;
 	}
 
@@ -267,10 +286,18 @@ public static class WorldSaveFile
 		/// <summary>The machine's selected recipe index (-1 = none) (v3+; always -1 for v2).</summary>
 		public int RecipeIndex { get; }
 
+		/// <summary>The in-progress processing fraction (0..1) (v5+; 0 for v3/v4).</summary>
+		public float Progress { get; }
+
+		/// <summary>True when the machine was mid-operation at save time (v5+; false for v3/v4).</summary>
+		public bool IsProcessing { get; }
+
 		public MachineRecord(Vector3I position, int itemId, int rotation,
 			List<(int MaterialId, int Count)> inputSlots = null,
 			List<(int MaterialId, int Count)> outputSlots = null,
-			int recipeIndex = -1)
+			int recipeIndex = -1,
+			float progress = 0f,
+			bool isProcessing = false)
 		{
 			Position = position;
 			ItemId = itemId;
@@ -278,6 +305,8 @@ public static class WorldSaveFile
 			InputSlots = inputSlots ?? new List<(int, int)>();
 			OutputSlots = outputSlots ?? new List<(int, int)>();
 			RecipeIndex = recipeIndex;
+			Progress = progress;
+			IsProcessing = isProcessing;
 		}
 	}
 
@@ -417,6 +446,13 @@ public static class WorldSaveFile
 					w.Write(count);
 				}
 				w.Write(m.RecipeIndex);
+				// v5+: the processor's in-progress state (progress fraction +
+				// mid-operation flag), appended after the v3 state fields.
+				if (CurrentVersion >= VersionWithMachineProgress)
+				{
+					w.Write(m.Progress);
+					w.Write(m.IsProcessing);
+				}
 			}
 		}
 
@@ -586,6 +622,8 @@ public static class WorldSaveFile
 					List<(int, int)> inputSlots = null;
 					List<(int, int)> outputSlots = null;
 					int recipeIndex = -1;
+					float progress = 0f;
+					bool isProcessing = false;
 					if (withState)
 					{
 						int inCount = ReadCount(r);
@@ -605,10 +643,17 @@ public static class WorldSaveFile
 							outputSlots.Add((mid, cnt));
 						}
 						recipeIndex = r.ReadInt32();
+						// v5+: the in-progress state (progress fraction + flag).
+						// v3/v4 files lack these, so they stay 0/false (idle).
+						if (version >= VersionWithMachineProgress)
+						{
+							progress = r.ReadSingle();
+							isProcessing = r.ReadBoolean();
+						}
 					}
 
 					data.Machines.Add(new MachineRecord(new Vector3I(x, y, z), itemId, rotation,
-						inputSlots, outputSlots, recipeIndex));
+						inputSlots, outputSlots, recipeIndex, progress, isProcessing));
 				}
 			}
 

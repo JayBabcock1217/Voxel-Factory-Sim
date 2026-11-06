@@ -175,4 +175,66 @@ public partial class CrafterMachine : Machine
 	/// database). The machine UI shows this so the player can pick a product.
 	/// </summary>
 	public List<CraftingRecipe> AvailableRecipes => new(CraftingDatabase.Shared.AllRecipes);
+
+	// ------------------------------------------------------------------
+	// Save/restore: capture/restore the selected recipe + in-progress craft.
+	// ------------------------------------------------------------------
+
+	public override MachineSnapshot TakeSnapshot()
+	{
+		var snap = base.TakeSnapshot();
+		// The selected recipe is stored as an INDEX into the shared recipe list
+		// (resolved on restore against the live list, so it is robust to the
+		// database changing between saves). -1 when no recipe is set.
+		if (Recipe != null)
+		{
+			var recipes = AvailableRecipes;
+			for (int i = 0; i < recipes.Count; i++)
+			{
+				if (recipes[i] == Recipe)
+				{
+					snap.RecipeIndex = i;
+					break;
+				}
+			}
+		}
+		// The in-progress craft (if any): the fraction through it and whether the
+		// crafter is mid-cycle. On restore, the timer is re-seeded so the craft
+		// RESUMES rather than restarting.
+		snap.Progress = CraftProgress;
+		snap.IsProcessing = _crafting;
+		return snap;
+	}
+
+	public override void RestoreSnapshot(MachineSnapshot snap)
+	{
+		base.RestoreSnapshot(snap);
+		if (snap == null)
+		{
+			return;
+		}
+		// Restore the selected recipe from the saved index (resolved against the
+		// live recipe list; clamped if the list shrank between saves).
+		if (snap.HasRecipe)
+		{
+			var recipes = AvailableRecipes;
+			int idx = System.Math.Min(snap.RecipeIndex, recipes.Count - 1);
+			Recipe = idx >= 0 ? recipes[idx] : null;
+		}
+		else
+		{
+			Recipe = null;
+		}
+		// Resume an in-progress craft: re-set the flag and seed the timer from the
+		// saved fraction (progress × craft time) so the craft completes where it
+		// left off. The consumed ingredients are already out of the input buffer
+		// (extracted when the craft started), so resuming needs only the timer.
+		if (snap.IsProcessing && Recipe != null)
+		{
+			_crafting = true;
+			float craftTime = Mathf.Max(0.05f, Recipe.CraftTime);
+			_craftTimer = System.Math.Clamp(snap.Progress, 0f, 1f) * craftTime;
+			CraftProgress = System.Math.Clamp(snap.Progress, 0f, 1f);
+		}
+	}
 }

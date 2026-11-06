@@ -39,4 +39,23 @@ public sealed class MachineSnapshot
 
 	/// <summary>True when the snapshot carries a selected recipe (RecipeIndex >= 0).</summary>
 	public bool HasRecipe => RecipeIndex >= 0;
+
+	/// <summary>
+	/// The in-progress processing fraction (0..1) for a processor (smelter/crafter)
+	/// at the moment of the save: how far through the current smelt/craft it was.
+	/// 0 when the machine was idle (not mid-operation). Restored by re-seeding the
+	/// machine's processing timer so the in-progress operation RESUMES (and
+	/// completes) after a reload rather than restarting from scratch. The
+	/// consumed ingredients are already out of the input buffer (extracted when the
+	/// operation started), so resuming just needs the timer, not the inputs.
+	/// </summary>
+	public float Progress { get; set; }
+
+	/// <summary>
+	/// True when the machine was MID-OPERATION (a smelt/craft in progress) at the
+	/// moment of the save. On restore, when true, the machine's in-progress flag
+	/// is re-set and its timer seeded from <see cref="Progress"/> so it resumes.
+	/// False when the machine was idle (between operations).
+	/// </summary>
+	public bool IsProcessing { get; set; }
 }
