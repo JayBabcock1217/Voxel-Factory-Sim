@@ -2984,7 +2984,10 @@ public partial class InventoryUI : CanvasLayer
 			return;
 		}
 
-		ItemStack loaded = ctrl.GetLoadedAmmo(w);
+		// The ammo is keyed by the HOTBAR SLOT INDEX, so this slot's ammo is
+		// independent of any other slot's (even if they hold the same weapon).
+		int slot = hotbarIndex;
+		ItemStack loaded = ctrl.GetLoadedAmmo(slot);
 		AmmoType compatible = WeaponBehavior.AmmoForWeapon(w);
 
 		if (mouse.ButtonIndex == MouseButton.Left)
@@ -2996,7 +2999,7 @@ public partial class InventoryUI : CanvasLayer
 				// inventory slot can drop the ammo back there.
 				if (!loaded.IsEmpty)
 				{
-					_cursorStack = ctrl.UnloadAmmo(w);
+					_cursorStack = ctrl.UnloadAmmo(slot);
 					_dragSlot = AmmoDragSentinel(hotbarIndex);
 					RefreshCursor();
 				}
@@ -3005,8 +3008,8 @@ public partial class InventoryUI : CanvasLayer
 			{
 				// Compatible ammo on the cursor: load it. The previously loaded
 				// ammo (if any) bounces back onto the cursor.
-				var existing = ctrl.GetLoadedAmmo(w);
-				bool ok = ctrl.LoadAmmo(w, _cursorStack);
+				var existing = ctrl.GetLoadedAmmo(slot);
+				bool ok = ctrl.LoadAmmo(slot, w, _cursorStack);
 				if (ok)
 				{
 					_cursorStack = existing.IsEmpty ? ItemStack.From(0) : existing;
@@ -3022,15 +3025,15 @@ public partial class InventoryUI : CanvasLayer
 				// Empty cursor: take 1 round out of the loaded ammo.
 				if (loaded.Count > 0)
 				{
-					var remaining = ctrl.GetLoadedAmmo(w);
+					var remaining = ctrl.GetLoadedAmmo(slot);
 					if (remaining.Count > 1)
 					{
 						remaining.Count -= 1;
-						ctrl.LoadAmmo(w, remaining);
+						ctrl.LoadAmmo(slot, w, remaining);
 					}
 					else
 					{
-						ctrl.UnloadAmmo(w);
+						ctrl.UnloadAmmo(slot);
 					}
 					_cursorStack = ItemStack.FromAmmo(compatible, 1);
 					RefreshCursor();
@@ -3039,9 +3042,9 @@ public partial class InventoryUI : CanvasLayer
 			else if (_cursorStack.IsAmmo && _cursorStack.AmmoType == compatible && loaded.Count < ItemStack.StackLimit)
 			{
 				// 1 round from the cursor into the loaded ammo.
-				var cur = ctrl.GetLoadedAmmo(w);
+				var cur = ctrl.GetLoadedAmmo(slot);
 				int newCount = cur.IsEmpty ? 1 : cur.Count + 1;
-				ctrl.LoadAmmo(w, ItemStack.FromAmmo(compatible, newCount));
+				ctrl.LoadAmmo(slot, w, ItemStack.FromAmmo(compatible, newCount));
 				_cursorStack = ItemStack.FromAmmo(compatible, _cursorStack.Count - 1);
 				RefreshCursor();
 			}
@@ -3078,8 +3081,10 @@ public partial class InventoryUI : CanvasLayer
 		{
 			return; // incompatible or not ammo: leave it on the cursor
 		}
-		var existing = ctrl.GetLoadedAmmo(w);
-		bool ok = ctrl.LoadAmmo(w, _cursorStack);
+		// The ammo is keyed by the HOTBAR SLOT INDEX.
+		int slot = hotbarIndex;
+		var existing = ctrl.GetLoadedAmmo(slot);
+		bool ok = ctrl.LoadAmmo(slot, w, _cursorStack);
 		if (ok)
 		{
 			_cursorStack = existing.IsEmpty ? ItemStack.From(0) : existing;
@@ -3143,7 +3148,7 @@ public partial class InventoryUI : CanvasLayer
 					WeaponController ctrl = GetWeaponController();
 					if (ctrl != null)
 					{
-						ctrl.LoadAmmo(w, _cursorStack);
+						ctrl.LoadAmmo(hotbarIndex, w, _cursorStack);
 						_cursorStack = ItemStack.From(0);
 						RefreshCursor();
 					}
@@ -3194,8 +3199,8 @@ public partial class InventoryUI : CanvasLayer
 		bool open = IsOpen();
 
 		// Per-hotbar-slot ammo slots: visible only while open AND that slot holds
-		// a weapon. The ammo is keyed by the weapon's MaterialId, so a weapon moved
-		// between hotbar slots keeps its loaded ammo.
+		// a weapon. The ammo is keyed by the HOTBAR SLOT INDEX, so each slot's
+		// ammo is independent (even for identical weapons in different slots).
 		for (int i = 0; i < Inventory.HotbarSize; i++)
 		{
 			var held = _inventory != null ? _inventory.Slots[i] : ItemStack.From(0);
@@ -3205,8 +3210,8 @@ public partial class InventoryUI : CanvasLayer
 			{
 				continue;
 			}
-			var wpn = held.WeaponType.Value;
-			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(wpn) : ItemStack.From(0);
+			// The ammo is keyed by the slot index (i), not the weapon type.
+			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(i) : ItemStack.From(0);
 			if (loaded.IsEmpty)
 			{
 				_ammoIcons[i].Texture = null;
@@ -3223,10 +3228,12 @@ public partial class InventoryUI : CanvasLayer
 		// the inventory is closed (i.e. while the HUD hotbar is showing). While
 		// the inventory is open the HUD hotbar is hidden and the in-pane slots
 		// take over, so the HUD count hides too.
-		var selectedWeapon = SelectedWeapon();
-		if (selectedWeapon is { } w && !open)
+		int selectedSlot = Mathf.Clamp(_selectedHotbarSlot, 0, Inventory.HotbarSize - 1);
+		var selectedItem = _inventory != null ? _inventory.Slots[selectedSlot] : ItemStack.From(0);
+		if (selectedItem.IsWeapon && !open)
 		{
-			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(w) : ItemStack.From(0);
+			// The HUD count reads the ammo for the SELECTED slot.
+			ItemStack loaded = ctrl != null ? ctrl.GetLoadedAmmo(selectedSlot) : ItemStack.From(0);
 			_hotbarAmmoCount.Text = loaded.Count.ToString();
 			_hotbarAmmoCount.Position = HotbarAmmoCountPosition();
 			_hotbarAmmoCount.Size = new Vector2(40f, 18f);

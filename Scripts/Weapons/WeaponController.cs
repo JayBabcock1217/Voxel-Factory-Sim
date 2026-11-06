@@ -65,8 +65,13 @@ public partial class WeaponController : Node3D
 	// does not rebuild the mesh every frame.
 	private int _lastHeldItemId = -1;
 
-	// The per-weapon ammo store: weapon MaterialId -> loaded ammo stack.
-	private readonly Dictionary<int, ItemStack> _ammoByWeapon = new();
+	// The per-hotbar-SLOT ammo store: hotbar slot index (0..HotbarSize-1) ->
+	// loaded ammo stack. Keyed by SLOT (not by weapon type) so that two copies
+	// of the same weapon in different hotbar slots each have their own,
+	// independent ammo — matching the one-ammo-slot-per-hotbar-slot UI. When a
+	// weapon is moved between slots, its ammo moves with it (the UI re-keys the
+	// store entry on a slot swap; see InventoryUI).
+	private readonly Dictionary<int, ItemStack> _ammoBySlot = new();
 
 	// Firing state.
 	private float _fireCooldown;
@@ -129,6 +134,20 @@ public partial class WeaponController : Node3D
 		}
 	}
 
+	/// <summary>The index of the currently selected hotbar slot (0..HotbarSize-1).</summary>
+	private int SelectedSlotIndex
+	{
+		get
+		{
+			ResolveServices();
+			if (_ui != null)
+			{
+				return Mathf.Clamp(_ui.SelectedHotbarSlot, 0, Inventory.HotbarSize - 1);
+			}
+			return 0;
+		}
+	}
+
 	// ------------------------------------------------------------------
 	// Per-frame: refresh the held mesh + animation, and fire the weapon.
 	// ------------------------------------------------------------------
@@ -152,15 +171,18 @@ public partial class WeaponController : Node3D
 			&& Input.IsMouseButtonPressed(MouseButton.Left);
 
 		var held = HeldItem;
+		int heldSlot = SelectedSlotIndex;
 		if (held.IsWeapon && held.WeaponType is { } weapon)
 		{
 			bool continuous = WeaponBehavior.IsContinuous(weapon);
 			bool shouldFire = continuous ? triggerDown : (triggerDown && !_wasTriggerDown);
 
-			if (shouldFire && _fireCooldown <= 0f && HasAmmo(weapon))
+			if (shouldFire && _fireCooldown <= 0f && HasAmmo(heldSlot, weapon))
 			{
-				// Consume ammo FIRST (so a dry gun can't fire), then shoot.
-				_consumeAmmo(weapon, WeaponBehavior.AmmoPerShot(weapon));
+				// Consume ammo FIRST (so a dry gun can't fire), then shoot. The
+				// ammo is keyed by the SELECTED hotbar slot, so firing always
+				// drains the slot the weapon is currently in.
+				_consumeAmmo(heldSlot, weapon, WeaponBehavior.AmmoPerShot(weapon));
 				FireWeapon(weapon);
 				_fireCooldown = WeaponBehavior.FireInterval(weapon);
 				StartUseAnimation(weapon);
@@ -210,6 +232,9 @@ public partial class WeaponController : Node3D
 	/// Raycast (hitscan) firing: for each pellet, cast a ray from the camera,
 	/// damage the first solid voxel it strikes, and draw a tracer line so the
 	/// player can see where the shot went (the visual debug for raycast weapons).
+	/// The tracer originates AT the camera and extends to the impact point (or
+	/// the end of the ray if nothing is hit), so the player can see the shot
+	/// leaving the gun and going where they are aiming.
 	/// </summary>
 	private void FireRaycast(WeaponType weapon, Vector3 from, Vector3 dir, Node root)
 	{
@@ -217,7 +242,8 @@ public partial class WeaponController : Node3D
 		float spreadDeg = WeaponBehavior.PelletSpreadDegrees(weapon);
 		float damage = WeaponBehavior.DamagePerShot(weapon);
 		float range = WeaponBehavior.RaycastRange(weapon);
-		var tracerColor = new Color(0.9f, 0.95f, 1f);
+		// A bright, visible tracer color (white-blue with a slight glow).
+		var tracerColor = new Color(0.85f, 0.9f, 1f, 0.9f);
 
 		for (int i = 0; i < pellets; i++)
 		{
@@ -228,6 +254,8 @@ public partial class WeaponController : Node3D
 				d = ApplySpread(dir, spreadDeg);
 			}
 
+			// Cast the ray FROM THE CAMERA (not from a muzzle offset) so the
+			// tracer clearly originates at the player's viewpoint.
 			bool hit = _world.RaycastVoxels(from, d, range, out Vector3I hitVoxel, out Vector3 hitNormal);
 			// The impact point: the hit voxel's surface, or the end of the ray.
 			float vs = _world.VoxelSize;
@@ -235,9 +263,8 @@ public partial class WeaponController : Node3D
 				? VoxelSurfacePoint(hitVoxel, hitNormal, vs)
 				: from + d * range;
 
-			// Draw the tracer (muzzle to impact) — the visual debug.
-			Vector3 muzzle = from + d * 0.4f;
-			TracerSpawner.Spawn(root, muzzle, impact, tracerColor);
+			// Draw the tracer from the CAMERA to the impact point.
+			TracerSpawner.Spawn(root, from, impact, tracerColor);
 
 			if (hit)
 			{
@@ -294,53 +321,54 @@ public partial class WeaponController : Node3D
 	}
 
 	// ------------------------------------------------------------------
-	// Ammo
+	// Ammo (keyed by HOTBAR SLOT INDEX, so each slot's ammo is independent)
 	// ------------------------------------------------------------------
-	/// <summary>True when the weapon has at least one unit of its compatible ammo loaded.</summary>
-	public bool HasAmmo(WeaponType weapon)
+	/// <summary>
+	/// True when the weapon in hotbar slot <paramref name="slot"/> has at least
+	/// one unit of its compatible ammo loaded.
+	/// </summary>
+	public bool HasAmmo(int slot, WeaponType weapon)
 	{
-		int id = (int)weapon;
-		if (_ammoByWeapon.TryGetValue(id, out var stack) && !stack.IsEmpty && stack.AmmoType == WeaponBehavior.AmmoForWeapon(weapon))
+		if (_ammoBySlot.TryGetValue(slot, out var stack) && !stack.IsEmpty && stack.AmmoType == WeaponBehavior.AmmoForWeapon(weapon))
 		{
 			return true;
 		}
 		return false;
 	}
 
-	/// <summary>How many units of ammo are currently loaded in the weapon.</summary>
-	public int AmmoCount(WeaponType weapon)
+	/// <summary>How many units of ammo are loaded in the weapon in hotbar slot <paramref name="slot"/>.</summary>
+	public int AmmoCount(int slot)
 	{
-		int id = (int)weapon;
-		return _ammoByWeapon.TryGetValue(id, out var stack) && !stack.IsEmpty ? stack.Count : 0;
+		return _ammoBySlot.TryGetValue(slot, out var stack) && !stack.IsEmpty ? stack.Count : 0;
 	}
 
 	/// <summary>
-	/// Loads (or replaces) the ammo in a weapon's ammo slot. Called by the
-	/// inventory UI when the player moves a stack of the weapon's compatible
-	/// <see cref="AmmoType"/> into the weapon's ammo slot. Only compatible ammo
-	/// is accepted (a bullet weapon rejects rockets, etc.); incompatible stacks
-	/// are rejected (the UI bounces them back).
+	/// Loads (or replaces) the ammo in the ammo slot of hotbar slot
+	/// <paramref name="slot"/>. Called by the inventory UI when the player moves
+	/// a stack of the slot's weapon's compatible <see cref="AmmoType"/> into that
+	/// slot's ammo slot. Only compatible ammo is accepted (a bullet weapon
+	/// rejects rockets, etc.); incompatible stacks are rejected (the UI bounces
+	/// them back).
 	/// </summary>
-	public bool LoadAmmo(WeaponType weapon, ItemStack ammo)
+	public bool LoadAmmo(int slot, WeaponType weapon, ItemStack ammo)
 	{
 		if (ammo == null || !ammo.IsAmmo || ammo.AmmoType != WeaponBehavior.AmmoForWeapon(weapon))
 		{
 			return false; // incompatible ammo
 		}
-		_ammoByWeapon[(int)weapon] = ammo;
+		_ammoBySlot[slot] = ammo;
 		NotifyAmmoChanged();
 		return true;
 	}
 
 	/// <summary>
-	/// Takes all loaded ammo out of a weapon's ammo slot (when the player
-	/// removes it). Returns the stack that was loaded (empty if none).
+	/// Takes all loaded ammo out of the ammo slot of hotbar slot
+	/// <paramref name="slot"/>. Returns the stack that was loaded (empty if none).
 	/// </summary>
-	public ItemStack UnloadAmmo(WeaponType weapon)
+	public ItemStack UnloadAmmo(int slot)
 	{
-		int id = (int)weapon;
-		ItemStack loaded = _ammoByWeapon.TryGetValue(id, out var s) ? s : ItemStack.From(0);
-		_ammoByWeapon.Remove(id);
+		ItemStack loaded = _ammoBySlot.TryGetValue(slot, out var s) ? s : ItemStack.From(0);
+		_ammoBySlot.Remove(slot);
 		if (!loaded.IsEmpty)
 		{
 			NotifyAmmoChanged();
@@ -348,22 +376,40 @@ public partial class WeaponController : Node3D
 		return loaded;
 	}
 
-	private void _consumeAmmo(WeaponType weapon, int amount)
+	/// <summary>
+	/// Moves the loaded ammo from hotbar slot <paramref name="from"/> to hotbar
+	/// slot <paramref name="to"/> (called when the player moves a weapon between
+	/// hotbar slots, so the ammo follows the weapon).
+	/// </summary>
+	public void MoveAmmo(int from, int to)
 	{
-		int id = (int)weapon;
-		if (!_ammoByWeapon.TryGetValue(id, out var stack) || stack.IsEmpty)
+		if (from == to)
+		{
+			return;
+		}
+		if (_ammoBySlot.TryGetValue(from, out var stack) && !stack.IsEmpty)
+		{
+			_ammoBySlot[to] = stack;
+			_ammoBySlot.Remove(from);
+			NotifyAmmoChanged();
+		}
+	}
+
+	private void _consumeAmmo(int slot, WeaponType weapon, int amount)
+	{
+		if (!_ammoBySlot.TryGetValue(slot, out var stack) || stack.IsEmpty)
 		{
 			return;
 		}
 		stack.Count -= amount;
 		if (stack.Count <= 0)
 		{
-			_ammoByWeapon.Remove(id);
+			_ammoBySlot.Remove(slot);
 		}
 		NotifyAmmoChanged();
 	}
 
-	/// <summary>Fired whenever any weapon's ammo count changes (the UI updates the ammo slots).</summary>
+	/// <summary>Fired whenever any slot's ammo count changes (the UI updates the ammo slots).</summary>
 	public event Action AmmoChanged;
 
 	private void NotifyAmmoChanged() => AmmoChanged?.Invoke();
@@ -704,22 +750,26 @@ public partial class WeaponController : Node3D
 	// ------------------------------------------------------------------
 	// Ammo persistence (so loaded ammo survives a save/load)
 	// ------------------------------------------------------------------
-	/// <summary>Snapshots every weapon's loaded ammo as (weaponId, ammoMaterialId, count) triples.</summary>
-	public (int WeaponId, int AmmoMaterialId, int Count)[] SnapshotAmmo()
+	/// <summary>
+	/// Snapshots every slot's loaded ammo as (slotIndex, ammoMaterialId, count)
+	/// triples. Keyed by HOTBAR SLOT (not weapon type) so a save restores each
+	/// slot's ammo into the same slot.
+	/// </summary>
+	public (int Slot, int AmmoMaterialId, int Count)[] SnapshotAmmo()
 	{
 		var list = new List<(int, int, int)>();
-		foreach (var (id, stack) in _ammoByWeapon)
+		foreach (var (slot, stack) in _ammoBySlot)
 		{
 			if (!stack.IsEmpty)
 			{
-				list.Add((id, stack.MaterialId, stack.Count));
+				list.Add((slot, stack.MaterialId, stack.Count));
 			}
 		}
 		return list.ToArray();
 	}
 
-	/// <summary>Restores a weapon's loaded ammo from a snapshot triple.</summary>
-	public void RestoreAmmo(int weaponId, int ammoMaterialId, int count)
+	/// <summary>Restores a slot's loaded ammo from a snapshot triple.</summary>
+	public void RestoreAmmo(int slot, int ammoMaterialId, int count)
 	{
 		if (count <= 0 || ammoMaterialId == 0)
 		{
@@ -728,21 +778,23 @@ public partial class WeaponController : Node3D
 		// Rebuild the stack with the correct AmmoType so compatibility checks pass.
 		if (Enum.TryParse<AmmoType>(ammoMaterialId.ToString(), out var ammoType))
 		{
-			_ammoByWeapon[weaponId] = ItemStack.FromAmmo(ammoType, count);
+			_ammoBySlot[slot] = ItemStack.FromAmmo(ammoType, count);
 		}
 	}
 
 	/// <summary>Clears all loaded ammo (e.g. on a fresh world / save switch).</summary>
 	public void ClearAllAmmo()
 	{
-		_ammoByWeapon.Clear();
+		_ammoBySlot.Clear();
 		NotifyAmmoChanged();
 	}
 
-	/// <summary>The <see cref="ItemStack"/> of ammo currently loaded in a weapon (empty if none).</summary>
-	public ItemStack GetLoadedAmmo(WeaponType weapon)
+	/// <summary>
+	/// The <see cref="ItemStack"/> of ammo currently loaded in the ammo slot of
+	/// hotbar slot <paramref name="slot"/> (empty if none).
+	/// </summary>
+	public ItemStack GetLoadedAmmo(int slot)
 	{
-		int id = (int)weapon;
-		return _ammoByWeapon.TryGetValue(id, out var s) ? s : ItemStack.From(0);
+		return _ammoBySlot.TryGetValue(slot, out var s) ? s : ItemStack.From(0);
 	}
 }

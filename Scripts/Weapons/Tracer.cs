@@ -12,35 +12,53 @@ namespace FactorySim.Weapons;
 /// to the shared "Tracers" container under the scene root (created by
 /// <see cref="TracerSpawner"/>). Tracers are purely visual — they do no damage
 /// and have no physics; they exist only to make hitscan shots visible.
+///
+/// The tracer node itself is positioned at the START point (the muzzle, just in
+/// front of the camera). A single child MeshInstance3D (a thin box) is placed at
+/// the midpoint of the segment, scaled to the segment length, and rotated so its
+/// long axis (local +Y) lies along the segment direction. This is done with an
+/// explicit Basis (no LookAt) so the orientation is deterministic and does not
+/// depend on the node's current rotation.
 /// </summary>
 [GlobalClass]
 public partial class Tracer : Node3D
 {
 	private float _age;
-	private float _lifetime = 0.12f;
+	private float _lifetime = 0.15f;
 	private StandardMaterial3D _material;
 	private MeshInstance3D _mesh;
-	private Vector3 _start;
-	private Vector3 _end;
 
 	public void Initialize(Vector3 start, Vector3 end, Color color)
 	{
-		_start = start;
-		_end = end;
-
 		_material = new StandardMaterial3D
 		{
 			AlbedoColor = color,
 			EmissionEnabled = true,
 			Emission = color,
-			EmissionEnergyMultiplier = 2.5f,
+			EmissionEnergyMultiplier = 3f,
 			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
 			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 		};
 
-		// A thin unit box along local +Y, scaled to the segment length and
-		// oriented to lie along it (LookAt points local +Y at the target).
-		var box = new BoxMesh { Size = new Vector3(0.04f, 1f, 0.04f), Material = _material };
+		// The tracer node sits at the START (muzzle) so the line clearly
+		// originates from the camera. The child mesh is the visible box.
+		GlobalPosition = start;
+
+		Vector3 segment = end - start;
+		float length = segment.Length();
+		if (length < 0.001f)
+		{
+			// Degenerate segment (start == end); nothing to draw.
+			return;
+		}
+		Vector3 dir = segment / length;
+
+		// A thin box, unit-tall along local +Y, scaled to the segment length.
+		var box = new BoxMesh
+		{
+			Size = new Vector3(0.05f, 1f, 0.05f),
+			Material = _material,
+		};
 		_mesh = new MeshInstance3D
 		{
 			Name = "TracerMesh",
@@ -50,14 +68,21 @@ public partial class Tracer : Node3D
 		};
 		AddChild(_mesh);
 
-		GlobalPosition = _start;
-		_mesh.Position = (_end - _start) * 0.5f;
-		_mesh.Scale = new Vector3(1f, (_end - _start).Length(), 1f);
-		var dir = (_end - _start).Normalized();
-		if (dir.LengthSquared() > 0.0001f)
-		{
-			_mesh.LookAt(_mesh.GlobalPosition + dir, Vector3.Up);
-		}
+		// Place the box at the midpoint of the segment (local to the tracer
+		// node, which is at `start`).
+		_mesh.Position = segment * 0.5f;
+		_mesh.Scale = new Vector3(1f, length, 1f);
+
+		// Orient the box so its local +Y axis lies along the segment direction.
+		// Build a Basis whose Y column is the direction, with an arbitrary
+		// (non-parallel) up vector for the remaining axes.
+		var up = Mathf.Abs(dir.Dot(Vector3.Up)) > 0.99f
+			? Vector3.Right
+			: Vector3.Up;
+		var x = up.Cross(dir).Normalized();
+		var y = dir;
+		var z = x.Cross(y).Normalized();
+		_mesh.Basis = new Basis(x, y, z);
 	}
 
 	public override void _Process(double delta)
