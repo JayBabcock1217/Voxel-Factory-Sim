@@ -18,10 +18,12 @@ public static class ProjectileSpawner
 	/// <summary>
 	/// Launches a projectile of <paramref name="weapon"/> type from
 	/// <paramref name="from"/> along <paramref name="direction"/> (which need
-	/// not be normalized). Returns the new projectile, or null when the world is
-	/// unavailable.
+	/// not be normalized). <paramref name="config"/> is the weapon stats resource
+	/// the projectile reads its speed/gravity/lifetime/damage/blast from (the
+	/// same editable resource the <see cref="WeaponController"/> uses). Returns
+	/// the new projectile, or null when the world is unavailable.
 	/// </summary>
-	public static Projectile Spawn(WeaponType weapon, Vector3 from, Vector3 direction, VoxelWorld world)
+	public static Projectile Spawn(WeaponType weapon, Vector3 from, Vector3 direction, VoxelWorld world, WeaponBehavior config)
 	{
 		if (world == null || !world.IsInsideTree())
 		{
@@ -39,7 +41,7 @@ public static class ProjectileSpawner
 		var projectile = new Projectile { Name = "Projectile" };
 		projectilesRoot.AddChild(projectile);
 		projectile.GlobalPosition = from;
-		projectile.Initialize(weapon, from, direction, world);
+		projectile.Initialize(weapon, from, direction, world, config);
 		return projectile;
 	}
 }

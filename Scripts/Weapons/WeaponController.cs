@@ -53,9 +53,19 @@ public partial class WeaponController : Node3D
 	/// <summary>How far in front of the camera the held item sits (world units).</summary>
 	[Export] public float HeldItemDistance { get; set; } = 0.5f;
 
+	/// <summary>
+	/// The weapon stats config (per-weapon fire rate, damage, pellets, spread,
+	/// blast radius, projectile speed/gravity/lifetime, ammo compatibility,
+	/// fire mode, ...). EDITABLE IN THE INSPECTOR: assign a custom
+	/// <see cref="WeaponBehavior"/> resource here to tune any weapon without
+	/// recompiling. Defaults to a fresh instance with the built-in values.
+	/// </summary>
+	[Export] public WeaponBehavior Config { get; set; }
+
 	private Camera3D _camera;
 	private VoxelWorld _world;
 	private InventoryUI _ui;
+	private WeaponBehavior _config;
 	private Inventory _inventory;
 
 	// The held-item mesh (rebuilt when the selected hotbar item changes).
@@ -92,6 +102,11 @@ public partial class WeaponController : Node3D
 		// The InventoryUI finds this controller by group to read/write the
 		// per-weapon ammo store (the ammo slot below the hotbar).
 		AddToGroup("weapon_controller");
+		// Default the config to a fresh instance (with the built-in stats) if
+		// the inspector didn't assign one, so the controller always has a valid
+		// config to read from. To customize, assign a WeaponBehavior resource to
+		// the Config export in the inspector and edit its Stats array there.
+		_config = Config ?? new WeaponBehavior();
 		_world = GetNodeOrNull<VoxelWorld>(VoxelWorldPath)
 			?? (GetTree().GetFirstNodeInGroup("voxel_world") as VoxelWorld);
 		_camera = GetNodeOrNull<Camera3D>(CameraPath);
@@ -148,6 +163,14 @@ public partial class WeaponController : Node3D
 		}
 	}
 
+	/// <summary>
+	/// The active weapon stats config (never null — defaults to a fresh
+	/// instance with the built-in stats when the inspector export is null).
+	/// Exposed so the <see cref="ProjectileSpawner"/> / <see cref="Projectile"/>
+	/// and the <see cref="InventoryUI"/> can read the same editable values.
+	/// </summary>
+	public WeaponBehavior ActiveConfig => _config ??= Config ?? new WeaponBehavior();
+
 	// ------------------------------------------------------------------
 	// Per-frame: refresh the held mesh + animation, and fire the weapon.
 	// ------------------------------------------------------------------
@@ -174,7 +197,7 @@ public partial class WeaponController : Node3D
 		int heldSlot = SelectedSlotIndex;
 		if (held.IsWeapon && held.WeaponType is { } weapon)
 		{
-			bool continuous = WeaponBehavior.IsContinuous(weapon);
+			bool continuous = ActiveConfig.IsContinuous(weapon);
 			bool shouldFire = continuous ? triggerDown : (triggerDown && !_wasTriggerDown);
 
 			if (shouldFire && _fireCooldown <= 0f && HasAmmo(heldSlot, weapon))
@@ -182,9 +205,9 @@ public partial class WeaponController : Node3D
 				// Consume ammo FIRST (so a dry gun can't fire), then shoot. The
 				// ammo is keyed by the SELECTED hotbar slot, so firing always
 				// drains the slot the weapon is currently in.
-				_consumeAmmo(heldSlot, weapon, WeaponBehavior.AmmoPerShot(weapon));
+				_consumeAmmo(heldSlot, weapon, ActiveConfig.AmmoPerShot(weapon));
 				FireWeapon(weapon);
-				_fireCooldown = WeaponBehavior.FireInterval(weapon);
+				_fireCooldown = ActiveConfig.FireInterval(weapon);
 				StartUseAnimation(weapon);
 			}
 		}
@@ -218,7 +241,7 @@ public partial class WeaponController : Node3D
 		Vector3 dir = -_camera.GlobalTransform.Basis.Z; // cameras look down -Z
 		var root = GetTree().Root;
 
-		if (WeaponBehavior.FireModeFor(weapon) == WeaponBehavior.FireMode.Raycast)
+		if (ActiveConfig.FireModeFor(weapon) == WeaponBehavior.FireMode.Raycast)
 		{
 			FireRaycast(weapon, from, dir, root);
 		}
@@ -238,10 +261,10 @@ public partial class WeaponController : Node3D
 	/// </summary>
 	private void FireRaycast(WeaponType weapon, Vector3 from, Vector3 dir, Node root)
 	{
-		int pellets = WeaponBehavior.PelletsPerShot(weapon);
-		float spreadDeg = WeaponBehavior.PelletSpreadDegrees(weapon);
-		float damage = WeaponBehavior.DamagePerShot(weapon);
-		float range = WeaponBehavior.RaycastRange(weapon);
+		int pellets = ActiveConfig.PelletsPerShot(weapon);
+		float spreadDeg = ActiveConfig.PelletSpreadDegrees(weapon);
+		float damage = ActiveConfig.DamagePerShot(weapon);
+		float range = ActiveConfig.RaycastRange(weapon);
 		// A bright, visible tracer color (white-blue with a slight glow).
 		var tracerColor = new Color(0.85f, 0.9f, 1f, 0.9f);
 
@@ -283,7 +306,7 @@ public partial class WeaponController : Node3D
 		// Launch slightly in front of the camera so the mesh doesn't start inside
 		// the player's own collision.
 		Vector3 launchPos = from + dir * 0.5f;
-		ProjectileSpawner.Spawn(weapon, launchPos, dir, _world);
+		ProjectileSpawner.Spawn(weapon, launchPos, dir, _world, ActiveConfig);
 	}
 
 	/// <summary>
@@ -329,7 +352,7 @@ public partial class WeaponController : Node3D
 	/// </summary>
 	public bool HasAmmo(int slot, WeaponType weapon)
 	{
-		if (_ammoBySlot.TryGetValue(slot, out var stack) && !stack.IsEmpty && stack.AmmoType == WeaponBehavior.AmmoForWeapon(weapon))
+		if (_ammoBySlot.TryGetValue(slot, out var stack) && !stack.IsEmpty && stack.AmmoType == ActiveConfig.AmmoForWeapon(weapon))
 		{
 			return true;
 		}
@@ -352,7 +375,7 @@ public partial class WeaponController : Node3D
 	/// </summary>
 	public bool LoadAmmo(int slot, WeaponType weapon, ItemStack ammo)
 	{
-		if (ammo == null || !ammo.IsAmmo || ammo.AmmoType != WeaponBehavior.AmmoForWeapon(weapon))
+		if (ammo == null || !ammo.IsAmmo || ammo.AmmoType != ActiveConfig.AmmoForWeapon(weapon))
 		{
 			return false; // incompatible ammo
 		}

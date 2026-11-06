@@ -2988,7 +2988,7 @@ public partial class InventoryUI : CanvasLayer
 		// independent of any other slot's (even if they hold the same weapon).
 		int slot = hotbarIndex;
 		ItemStack loaded = ctrl.GetLoadedAmmo(slot);
-		AmmoType compatible = WeaponBehavior.AmmoForWeapon(w);
+		AmmoType compatible = ctrl.ActiveConfig.AmmoForWeapon(w);
 
 		if (mouse.ButtonIndex == MouseButton.Left)
 		{
@@ -3077,7 +3077,7 @@ public partial class InventoryUI : CanvasLayer
 		{
 			return;
 		}
-		if (!_cursorStack.IsAmmo || _cursorStack.AmmoType != WeaponBehavior.AmmoForWeapon(w))
+		if (!_cursorStack.IsAmmo || _cursorStack.AmmoType != ctrl.ActiveConfig.AmmoForWeapon(w))
 		{
 			return; // incompatible or not ammo: leave it on the cursor
 		}

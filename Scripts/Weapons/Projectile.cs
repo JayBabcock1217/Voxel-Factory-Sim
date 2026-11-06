@@ -96,15 +96,19 @@ public partial class Projectile : Node3D
 		return _flameMeshInstance;
 	}
 
-	public void Initialize(WeaponType weapon, Vector3 from, Vector3 direction, VoxelWorld world)
+	public void Initialize(WeaponType weapon, Vector3 from, Vector3 direction, VoxelWorld world, WeaponBehavior config)
 	{
 		OwnerWeapon = weapon;
 		_world = world;
-		Gravity = WeaponBehavior.ProjectileGravity(weapon);
-		_lifetime = WeaponBehavior.ProjectileLifetime(weapon);
-		_damage = WeaponBehavior.DamagePerShot(weapon);
-		_blastRadius = WeaponBehavior.BlastRadius(weapon);
-		Velocity = direction.Normalized() * WeaponBehavior.ProjectileSpeed(weapon);
+		// Read the projectile's stats from the editable config resource (the same
+		// one the WeaponController uses), so inspector tweaks apply to projectiles
+		// too. Fall back to a fresh config if null (defensive).
+		var cfg = config ?? new WeaponBehavior();
+		Gravity = cfg.ProjectileGravity(weapon);
+		_lifetime = cfg.ProjectileLifetime(weapon);
+		_damage = cfg.DamagePerShot(weapon);
+		_blastRadius = cfg.BlastRadius(weapon);
+		Velocity = direction.Normalized() * cfg.ProjectileSpeed(weapon);
 
 		// Orient the node so its local +Y (a capsule's long axis) points along
 		// the direction of travel. LookAt makes +Y face the target: aiming at a
