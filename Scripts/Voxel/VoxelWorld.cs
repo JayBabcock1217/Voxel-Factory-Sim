@@ -1492,7 +1492,19 @@ public partial class VoxelWorld : Node3D
 				}
 				if (Time.GetTicksMsec() - _spawnNeighbourhoodReadyAtMs >= SpawnSettleDelayMs)
 				{
-					// Both phases done: spawn the player at the exact saved spot.
+					// ENSURE collision is APPLIED before the player gets physics.
+					// CollisionReady (checked above) only means the collision
+					// SHAPE is built — in sub-cell mode the physics BODIES are
+					// attached lazily by UpdateLocalCollision, which normally
+					// runs LATER this frame (after the mesh budget). If the chunk
+					// under the player was just rebuilt this frame, its bodies
+					// would not yet be in the physics server when the player is
+					// dropped in, so the first physics step would miss the ground
+					// and the player falls through. Running UpdateLocalCollision
+					// here (right before enabling physics) attaches the spawn
+					// neighbourhood's bodies in the SAME frame, so the player's
+					// very first physics step collides with solid ground.
+					UpdateLocalCollision(playerChunk);
 					if (SpawnOrRestorePlayer(playerNode))
 					{
 						_playerSpawned = true;
