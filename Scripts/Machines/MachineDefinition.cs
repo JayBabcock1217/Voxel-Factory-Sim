@@ -183,11 +183,14 @@ public partial class MachineDefinition : Resource
 	/// unchanged (see <see cref="MachinePort"/>). The indicators can be toggled
 	/// globally with F2 (see <see cref="Machine.SetIndicatorsVisible"/>).
 	///
-	/// All faces default to <see cref="MachinePort.Disabled"/> (no indicators) so
-	/// machines render clean until the user configures them.
+	/// Defaults: the X axis is ENABLED out of the box — <see cref="FaceMinusX"/>
+	/// is <see cref="MachinePort.Input"/> and <see cref="FacePlusX"/> is
+	/// <see cref="MachinePort.Output"/> (a natural input→output flow along +X).
+	/// The Y and Z faces default to <see cref="MachinePort.Disabled"/> (no
+	/// indicators). The user can change any face in the inspector.
 	/// </summary>
-	[Export] public MachinePort FacePlusX { get; set; } = MachinePort.Disabled;
-	[Export] public MachinePort FaceMinusX { get; set; } = MachinePort.Disabled;
+	[Export] public MachinePort FacePlusX { get; set; } = MachinePort.Output;
+	[Export] public MachinePort FaceMinusX { get; set; } = MachinePort.Input;
 	[Export] public MachinePort FacePlusY { get; set; } = MachinePort.Disabled;
 	[Export] public MachinePort FaceMinusY { get; set; } = MachinePort.Disabled;
 	[Export] public MachinePort FacePlusZ { get; set; } = MachinePort.Disabled;
