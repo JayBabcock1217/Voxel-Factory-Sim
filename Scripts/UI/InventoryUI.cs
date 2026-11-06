@@ -1179,9 +1179,11 @@ public partial class InventoryUI : CanvasLayer
 		_devPanel.AddChild(devTitle);
 
 		// Collect every item, then bucket it by category (the TabContainer pages).
-		// The ItemEntry flags decide the bucket: IsTool -> Tools, IsMachine ->
-		// Machines, LightLevel > 0 -> Light, everything else (placeable
-		// materials) -> Blocks. Future items land in a bucket automatically.
+		// The ItemEntry flags decide the bucket: tools AND weapons AND ammo ->
+		// Tools (weapons/ammo are grouped with tools, the other non-buildable
+		// items the player holds and uses), IsMachine -> Machines, LightLevel > 0
+		// -> Light, everything else (placeable materials) -> Blocks. Future
+		// items land in a bucket automatically.
 		_devItems.Clear();
 		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig));
 		var blocks = new List<FactorySim.Items.ItemEntry>();
@@ -1190,7 +1192,7 @@ public partial class InventoryUI : CanvasLayer
 		var light = new List<FactorySim.Items.ItemEntry>();
 		foreach (var item in _devItems)
 		{
-			if (item.IsTool) tools.Add(item);
+			if (item.IsTool || item.IsWeapon || item.IsAmmo) tools.Add(item);
 			else if (item.IsMachine) machines.Add(item);
 			else if (item.LightLevel > 0) light.Add(item);
 			else blocks.Add(item);
