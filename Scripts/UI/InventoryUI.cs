@@ -142,7 +142,6 @@ public partial class InventoryUI : CanvasLayer
 	private TextureRect[] _ammoIcons;   // [hotbarIndex] -> the loaded-ammo icon
 	private Label[] _ammoCounts;        // [hotbarIndex] -> the loaded-ammo count
 	private ColorRect[] _ammoSlotBgs;   // [hotbarIndex] -> the slot backdrop
-	private static readonly Color AmmoSlotBg = new Color(0.1f, 0.14f, 0.2f, 0.85f);
 
 	// The HUD ammo COUNT: a small number drawn just below the selected hotbar
 	// slot on the always-visible HUD hotbar. Visible only when the selected item
@@ -540,11 +539,11 @@ public partial class InventoryUI : CanvasLayer
 			Inventory.StorageCols, Inventory.HotbarSize) * SlotSize
 			+ (Math.Max(Inventory.StorageCols, Inventory.HotbarSize) - 1) * SlotGap;
 		// The grid is the storage rows + the hotbar row, PLUS an extra row below
-		// the hotbar for the weapon AMMO SLOT (shown only while a weapon is
-		// selected and the inventory is open). The extra height (SlotSize + the
-		// same 8px offset BuildAmmoSlot uses) keeps the panel tall enough that the
-		// ammo slot is never clipped at the bottom edge.
-		float ammoRowH = SlotSize + 8f;
+		// the hotbar for the weapon AMMO SLOTS (one per hotbar slot, shown when
+		// that slot holds a weapon). The row height is exactly SlotSize + SlotGap
+		// (the same spacing as the inventory rows) so the ammo row sits on the
+		// same level as the inventory slots.
+		float ammoRowH = SlotSize + SlotGap;
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap + ammoRowH;
 		float titleH = 24f;
 		// The dev/craft panes are inset below the title by pad (content margin);
@@ -858,7 +857,10 @@ public partial class InventoryUI : CanvasLayer
 	{
 		float size = SlotSize;
 		float hotbarRowY = Inventory.StorageRows * (SlotSize + SlotGap);
-		float ammoRowY = hotbarRowY + SlotSize + SlotGap + 8f;
+		// The ammo row sits exactly one row-below the hotbar, with the SAME
+		// SlotSize + SlotGap spacing as the inventory rows — so the ammo slots
+		// are on the same level as the inventory slots (no extra offset).
+		float ammoRowY = hotbarRowY + SlotSize + SlotGap;
 
 		_ammoSlots = new Control[Inventory.HotbarSize];
 		_ammoIcons = new TextureRect[Inventory.HotbarSize];
@@ -868,7 +870,9 @@ public partial class InventoryUI : CanvasLayer
 		for (int i = 0; i < Inventory.HotbarSize; i++)
 		{
 			// The ammo slot: directly below hotbar slot i, aligned to its left
-			// edge and width. Start hidden.
+			// edge and width. Styled identically to a regular inventory slot
+			// (same border + background), so it reads as "one of the slots".
+			// Start hidden.
 			float x = _hotbarRowX + i * (SlotSize + SlotGap);
 			var slot = new Control
 			{
@@ -879,14 +883,28 @@ public partial class InventoryUI : CanvasLayer
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 				Visible = false,
 			};
+			var slotStyle = new StyleBoxFlat
+			{
+				BgColor = new Color(0f, 0f, 0f, 0.45f),
+				BorderColor = new Color(0.5f, 0.5f, 0.55f, 0.6f),
+				BorderWidthLeft = 1,
+				BorderWidthTop = 1,
+				BorderWidthRight = 1,
+				BorderWidthBottom = 1,
+			};
+			slot.AddThemeStyleboxOverride("panel", slotStyle);
+			// A subtle tint over the standard slot background so the ammo slot
+			// is recognizable as an ammo slot (vs. a plain inventory slot) while
+			// still reading as the same kind of slot.
 			var bg = new ColorRect
 			{
-				Color = AmmoSlotBg,
+				Color = new Color(0.08f, 0.08f, 0.1f, 0.85f),
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
 			bg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
 			slot.AddChild(bg);
 
+			// The icon is full-rect (like the inventory slots), not inset.
 			var icon = new TextureRect
 			{
 				MouseFilter = Control.MouseFilterEnum.Ignore,
@@ -894,8 +912,7 @@ public partial class InventoryUI : CanvasLayer
 				ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
 				StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
 			};
-			icon.Position = new Vector2(6f, 6f);
-			icon.Size = new Vector2(size - 12f, size - 12f);
+			icon.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
 			slot.AddChild(icon);
 
 			var count = new Label
@@ -2885,16 +2902,19 @@ public partial class InventoryUI : CanvasLayer
 
 	/// <summary>
 	/// The hotbar index of the (visible) ammo slot under a root-space position,
-	/// or -1 when none. Each ammo slot is a child of the panel (via the grid
-	/// section), so its GlobalPosition is its top-left in root space; compare
-	/// directly. Only VISIBLE slots (their hotbar slot holds a weapon) count.
+	/// or -1 when none. Uses the SAME panel-space coordinate math as
+	/// <see cref="SlotAt"/> (subtract the panel's offset, then accumulate the
+	/// slot's local position up the parent chain to the panel) so the hit-test
+	/// is consistent with the inventory slots. Only VISIBLE slots (their hotbar
+	/// slot holds a weapon) count.
 	/// </summary>
 	private int AmmoSlotAt(Vector2 position)
 	{
-		if (_ammoSlots == null)
+		if (_ammoSlots == null || _panel == null)
 		{
 			return -1;
 		}
+		Vector2 local = position - _panel.Position;
 		for (int i = 0; i < _ammoSlots.Length; i++)
 		{
 			var slot = _ammoSlots[i];
@@ -2902,8 +2922,13 @@ public partial class InventoryUI : CanvasLayer
 			{
 				continue;
 			}
-			var rect = new Rect2(slot.GlobalPosition, slot.Size);
-			if (rect.HasPoint(position))
+			Vector2 offset = slot.Position;
+			for (Node n = slot.GetParent(); n != null && n != _panel; n = n.GetParent())
+			{
+				offset += (n as Control)?.Position ?? Vector2.Zero;
+			}
+			var rect = new Rect2(offset, slot.Size);
+			if (rect.HasPoint(local))
 			{
 				return i;
 			}
