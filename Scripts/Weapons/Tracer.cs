@@ -82,21 +82,25 @@ public partial class Tracer : Node3D
 		};
 		AddChild(_mesh);
 
-		// Place the box at the midpoint of the segment (local to the tracer
-		// node, which is at `start`).
-		_mesh.Position = segment * 0.5f;
-		_mesh.Scale = new Vector3(1f, length, 1f);
-
-		// Orient the box so its local +Y axis lies along the segment direction.
-		// Build a Basis whose Y column is the direction, with an arbitrary
-		// (non-parallel) up vector for the remaining axes.
+		// Orient the box so its local +Y axis lies along the segment, and scale
+		// it to the segment length. CRITICAL: the scale must be baked INTO the
+		// basis (the Y column scaled by `length`) rather than set via
+		// _mesh.Scale and then _mesh.Basis — setting Basis REPLACES the basis
+		// columns and would clobber the scale that Scale wrote into them,
+		// leaving the box at unit length (a ~1-unit stub no matter how far the
+		// shot goes). Baking it into the basis avoids that.
 		var up = Mathf.Abs(dir.Dot(Vector3.Up)) > 0.99f
 			? Vector3.Right
 			: Vector3.Up;
 		var x = up.Cross(dir).Normalized();
-		var y = dir;
-		var z = x.Cross(y).Normalized();
+		var z = x.Cross(dir).Normalized();
+		var y = dir * length; // Y column carries the length scale
 		_mesh.Basis = new Basis(x, y, z);
+
+		// Place the box at the midpoint of the segment (local to the tracer
+		// node, which is at `start`). The box spans -length/2..+length/2 along
+		// local +Y, so centering it on the midpoint puts its ends at start/end.
+		_mesh.Position = segment * 0.5f;
 	}
 
 	public override void _Process(double delta)
