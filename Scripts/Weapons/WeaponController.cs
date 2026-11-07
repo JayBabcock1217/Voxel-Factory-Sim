@@ -100,10 +100,6 @@ public partial class WeaponController : Node3D
 	// world's stored health.
 	private readonly Dictionary<Vector3I, float> _voxelDamage = new();
 
-	// One-time diagnostic flags (fire-decision + raycast result).
-	private bool _fireDiagLogged;
-	private bool _rayDiagLogged;
-
 	/// <summary>RNG for the per-pellet angular spread (raycast weapons).</summary>
 	private readonly RandomNumberGenerator _spreadRng = new();
 
@@ -216,18 +212,6 @@ public partial class WeaponController : Node3D
 			bool continuous = ActiveConfig.IsContinuous(weapon);
 			bool shouldFire = continuous ? triggerDown : (triggerDown && !_wasTriggerDown);
 			bool hasAmmo = HasAmmo(heldSlot, weapon);
-
-			// One-time diagnostic: dump the full fire-decision state on the first
-			// frame a weapon is held, so we can see WHY it isn't firing (no ammo?
-			// cooldown? wrong fire mode?).
-			if (!_fireDiagLogged)
-			{
-				_fireDiagLogged = true;
-				GD.Print($"[WeaponFire] held={held.MaterialId} isWeapon={held.IsWeapon} weapon={weapon} " +
-					$"slot={heldSlot} ammoCount={AmmoCount(heldSlot)} hasAmmo={hasAmmo} " +
-					$"mode={ActiveConfig.FireModeFor(weapon)} ammoType={ActiveConfig.AmmoForWeapon(weapon)} " +
-					$"world={_world != null} camera={_camera != null} triggerDown={triggerDown} cooldown={_fireCooldown}");
-			}
 
 			if (shouldFire && _fireCooldown <= 0f && hasAmmo)
 			{
@@ -343,19 +327,6 @@ public partial class WeaponController : Node3D
 					}
 				}
 
-				// One-time diagnostic: confirm the hit voxel and accumulated damage.
-				if (!_rayDiagLogged)
-				{
-					_rayDiagLogged = true;
-					float acc = _voxelDamage.TryGetValue(hitVoxel, out var td) ? td : 0f;
-					GD.Print($"[WeaponRaycast] pellet {i}: HIT {hitVoxel} mat={mat} unbreakable={_world.IsUnbreakable(mat)} " +
-						$"dmg={damage} total={acc} from={from} dir={d} range={range}");
-				}
-			}
-			else if (!_rayDiagLogged)
-			{
-				_rayDiagLogged = true;
-				GD.Print($"[WeaponRaycast] pellet {i}: MISS from={from} dir={d} range={range}");
 			}
 		}
 	}

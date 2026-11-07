@@ -1555,14 +1555,37 @@ public partial class VoxelWorld : Node3D
 		var pending = new List<VoxelChunk>();
 		foreach (VoxelChunk chunk in _chunks.Values)
 		{
-			// SKIP instantly-satisfied chunks: the instant (sub-cell) edit path
-			// already applied their mesh + collision this frame. Launching an
-			// async full build for one here would set MeshBuildInFlight and
-			// starve the instant-edit gate (the edit would be DROPPED). The
-			// async build is the safety net that re-converges the local light
-			// delta to the full flood fill; it still runs — but on a later
-			// frame, once the instant path has settled and the flag is cleared.
-			if (chunk.NeedsMesh && chunk.DataReady && !chunk.InstantSatisfied)
+			// A chunk is a rebuild candidate when it needs a mesh AND its data
+			// is ready, AND it either is NOT instant-satisfied OR its section
+			// light is dirty.
+			//
+			// SKIP instantly-satisfied (non-light-dirty) chunks: the instant
+			// (sub-cell) edit path already applied their mesh + collision this
+			// frame. Launching an async full build for one here would set
+			// MeshBuildInFlight and starve the instant-edit gate (the edit
+			// would be DROPPED). The async build is the safety net that
+			// re-converges the local light delta to the full flood fill; it
+			// still runs — but on a later frame, once the instant path has
+			// settled and the flag is cleared.
+			//
+			// EXCEPTION — SECTION-LIGHT-DIRTY chunks: these MUST be rebuilt even
+			// though they are instant-satisfied. The instant path's block-light
+			// BFS handles BLOCK light (torches) instantly, but it does NOT
+			// recompute SKY light (the wide 3×3-chunk flood fill). A solid-only
+			// edit (breaking a block to open sky, placing a block to block sky)
+			// changes the sky light, which ONLY the full rebuild's wide-field
+			// re-bake fixes. If such a chunk were filtered out as
+			// instant-satisfied, its sky light would never converge (the
+			// "breaking a block doesn't re-light the cave" bug). Including
+			// SectionLightDirty chunks here lets the full rebuild run and re-bake
+			// the wide field, converging the sky light. (The instant path marks
+			// the edited chunk SectionLightDirty for EVERY edit — see the
+			// unconditional MarkSectionLightDirty in the instant path — so this
+			// exception also covers the torch case, whose block light was
+			// handled instantly but whose wide field still needs re-baking for
+			// the cross-border glow to converge.)
+			if (chunk.NeedsMesh && chunk.DataReady
+				&& (!chunk.InstantSatisfied || chunk.SectionLightDirty))
 			{
 				if (chunk.EditPriority > 0 && chunk.EditPriority < priorityCap)
 				{
@@ -2427,26 +2450,6 @@ public partial class VoxelWorld : Node3D
 		int dlz = v.Z - chunk.Coord.Y * ChunkSizeXZ;
 		chunk.Data.Damage(dlx, v.Y, dlz, amount);
 		float health = chunk.Data.GetHealth(dlx, v.Y, dlz);
-		// Diagnostic: print the local coords + index so we can see whether the
-		// damage is written to a sane cell (in [0..15] x, [0..SizeY] y, [0..15] z)
-		// or an out-of-range cell that Index() maps to garbage.
-		int idx = chunk.Data.Index(dlx, v.Y, dlz);
-		if (idx < 0 || idx >= chunk.Data.Health.Length)
-		{
-			GD.Print($"[DamageVoxel] OUT-OF-RANGE {v} coord={chunk.Coord} dlx={dlx} y={v.Y} dlz={dlz} idx={idx} len={chunk.Data.Health.Length}");
-		}
-
-		// One-time-ish diagnostic: track health over time so we can see whether
-		// damage ACCUMULATES across shots (84, 68, 52, ...) or RESETS to full
-		// each time (84, 84, 84, ...). Also note when a break fires.
-		if (health != 0f)
-		{
-			GD.Print($"[DamageVoxel] {v} amt={amount} health {health}");
-		}
-		else
-		{
-			GD.Print($"[DamageVoxel] {v} amt={amount} health 0 -> BREAK");
-		}
 
 		// Record the damage for persistence: only when the voxel is still solid
 		// and below full health. (A broken voxel is removed via SetVoxel, which
