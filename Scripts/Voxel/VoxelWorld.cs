@@ -1059,6 +1059,33 @@ public partial class VoxelWorld : Node3D
 
 		// Player spawning is deferred to the first _Process: the player joins
 		// its group in its own _Ready, which can run after this node's.
+
+		// Apply the user's saved settings (chunk render distance, LOD render
+		// distance, LOD on/off, mesh mode) ONLY when the game was started from
+		// the main menu (which initializes the store before the scene loads).
+		// When running directly from the editor, the inspector export values are
+		// the source of truth — the store would overwrite them with stale data.
+		if (FactorySim.UI.SettingsStore.Instance.IsInitialized)
+		{
+			ApplyStoredSettings();
+		}
+	}
+
+	/// <summary>
+	/// Reads the persisted settings (<see cref="FactorySim.UI.SettingsStore"/>)
+	/// and applies the world-related ones (chunk render distance, LOD render
+	/// distance, LOD on/off, mesh mode) to this world instance. Called from
+	/// <see cref="_Ready"/> when the store was initialized by the main menu,
+	/// and also from <see cref="FactorySim.UI.SettingsStore.ApplyRendering"/>
+	/// so live slider changes are pushed onto the loaded world.
+	/// </summary>
+	public void ApplyStoredSettings()
+	{
+		var store = FactorySim.UI.SettingsStore.Instance;
+		RenderDistanceChunks = store.ChunkRenderDistance;
+		LodRenderDistanceChunks = store.LodRenderDistance;
+		LodEnabled = store.LodEnabled;
+		MeshMode = (VoxelMeshMode)store.MeshMode;
 	}
 
 	public void SetMaterialConfig(VoxelMaterialConfig value)
@@ -3768,23 +3795,36 @@ public partial class VoxelWorld : Node3D
 	// ------------------------------------------------------------------
 
 	/// <summary>
+	/// The Euclidean distance (in base-chunk units) from the player to the
+	/// farthest corner of the full-res chunk square. Full-res chunks are
+	/// generated for Chebyshev distance ≤ <see cref="RenderDistanceChunks"/>
+	/// (a square of side 2R+1), so the corner is at R*√2 in Euclidean
+	/// distance. The LOD inner boundary must match this — NOT R — otherwise
+	/// the triangular gaps between the square's edges and its corners are
+	/// unrendered, leaving a visible hole between full-res chunks and LOD.
+	/// </summary>
+	private float LodInnerBoundary => RenderDistanceChunks * (float)System.Math.Sqrt(2.0);
+
+	/// <summary>
 	/// The LOD level the player wants at <paramref name="distChunks"/>
-	/// (base-chunk distance from the player): 0 inside the normal render
-	/// distance (full-res chunks own it), otherwise the logarithmic
-	/// Distant-Horizons band — level k covers [R * B^(k-1), R * B^k) where
-	/// R is <see cref="RenderDistanceChunks"/> and B is
-	/// <see cref="LodDistanceBase"/>. Clamped to [1, <see cref="LodLevels"/>].
+	/// (base-chunk Euclidean distance from the player): 0 inside the full-res
+	/// area (distance < <see cref="LodInnerBoundary"/>), otherwise the
+	/// logarithmic Distant-Horizons band — level k covers
+	/// [R_inner * B^(k-1), R_inner * B^k) where R_inner is
+	/// <see cref="LodInnerBoundary"/> and B is <see cref="LodDistanceBase"/>.
+	/// Clamped to [1, <see cref="LodLevels"/>].
 	/// </summary>
 	private int DesiredLodLevel(float distChunks)
 	{
-		if (distChunks < RenderDistanceChunks)
+		float inner = LodInnerBoundary;
+		if (distChunks < inner)
 		{
 			return 0;
 		}
 
-		// log_B(dist / R) via natural logs (System.Math.Log with a base is
+		// log_B(dist / inner) via natural logs (System.Math.Log with a base is
 		// not in the Godot Mathf surface we rely on).
-		float t = (float)(System.Math.Log(distChunks / RenderDistanceChunks) / System.Math.Log(LodDistanceBase));
+		float t = (float)(System.Math.Log(distChunks / inner) / System.Math.Log(LodDistanceBase));
 		return Mathf.Clamp(Mathf.CeilToInt(t), 1, LodLevels);
 	}
 
@@ -3801,15 +3841,15 @@ public partial class VoxelWorld : Node3D
 	///
 	/// The scan window is the ANNULUS of the LOD band, not a box out to the
 	/// LOD render distance: a region is only ever rendered while its center
-	/// is in [RenderDistanceChunks, LodRenderDistanceChunks), so anything
-	/// inside the inner radius (full-res chunks own that space — including
-	/// the area just behind the player as they move) or beyond the outer
-	/// radius is never touched here. Scanning a full box out to
+	/// is in [LodInnerBoundary, LodRenderDistanceChunks), so anything
+	/// inside the inner radius (full-res chunks own that space — the inner
+	/// radius is R*√2, the farthest corner of the full-res square) or beyond
+	/// the outer radius is never touched here. Scanning a full box out to
 	/// LodRenderDistanceChunks would (a) create/keep level-1 regions whose
-	/// centers sit 1–2 chunks inside the normal render radius — low-res
-	/// heightfields popping in right behind the player and z-fighting the
-	/// full-res chunks — and (b) visit O(LodRenderDistanceChunks²) region
-	/// cells per level per frame for the handful in the band.
+	/// centers sit inside the full-res area — low-res heightfields popping in
+	/// right behind the player and z-fighting the full-res chunks — and (b)
+	/// visit O(LodRenderDistanceChunks²) region cells per level per frame for
+	/// the handful in the band.
 	///
 	/// The annulus is walked as the four edges of its bounding square, whose
 	/// inner/outer radii are the tight Chebyshev bounds of the Euclidean band
@@ -3848,15 +3888,18 @@ public partial class VoxelWorld : Node3D
 			int prx = Mathf.FloorToInt(px / regionSizeChunks);
 			int prz = Mathf.FloorToInt(pz / regionSizeChunks);
 
-			// Level-k band [R*B^(k-1), R*B^k) — the Euclidean distances this
-			// level is responsible for. BOUND THE WALK BY THIS LEVEL'S OWN BAND
-			// EDGES, not the global LodRenderDistanceChunks: a coarser level's
-			// band ends well before the LOD distance, and walking every level
-			// out to the LOD distance (the old code) made the per-frame scan
-			// O(LodDistance²) per level — thousands of out-of-band cells visited
-			// every frame for no reason.
-			float bandInner = RenderDistanceChunks * (float)System.Math.Pow(LodDistanceBase, k - 1);
-			float bandOuter = RenderDistanceChunks * (float)System.Math.Pow(LodDistanceBase, k);
+			// Level-k band [inner*B^(k-1), inner*B^k) — the Euclidean
+			// distances this level is responsible for. `inner` is the
+			// farthest corner of the full-res square (R*√2), NOT R, so the
+			// LOD tiles seamlessly against the square's edges with no gap.
+			// BOUND THE WALK BY THIS LEVEL'S OWN BAND EDGES, not the global
+			// LodRenderDistanceChunks: a coarser level's band ends well before
+			// the LOD distance, and walking every level out to the LOD distance
+			// (the old code) made the per-frame scan O(LodDistance²) per level
+			// — thousands of out-of-band cells visited every frame for no reason.
+			float lodInner = LodInnerBoundary;
+			float bandInner = lodInner * (float)System.Math.Pow(LodDistanceBase, k - 1);
+			float bandOuter = lodInner * (float)System.Math.Pow(LodDistanceBase, k);
 
 			// Chebyshev span of the annulus the player's level-k band can
 			// occupy (see method docs). The player sits at most
@@ -3916,21 +3959,23 @@ public partial class VoxelWorld : Node3D
 		//  1. Beyond the LOD render distance (far side): even the NEAREST
 		//     edge (centerDistance - size/2) is > LodRenderDistanceChunks away
 		//     — past the horizon.
-		//  2. Fully inside the normal render distance (behind the player): the
-		//     FARTHEST point (centerDistance + size/2) is < RenderDistanceChunks
-		//     away, so the WHOLE region is inside the full-res area. The walk's
-		//     shouldRender is false for such a region (d2 < normalDistSq), so it
-		//     can never render and only overlaps (z-fights) the full-res chunks.
+		//  2. Fully inside the full-res area (behind the player): the FARTHEST
+		//     point (centerDistance + size/2) is < LodInnerBoundary away, so
+		//     the WHOLE region is inside the full-res square (whose farthest
+		//     corner is at R*√2). The walk's shouldRender is false for such a
+		//     region (d2 < innerDistSq), so it can never render and only
+		//     overlaps (z-fights) the full-res chunks.
 		//
 		// The behind test uses the FARTHEST point (centerDistance + size/2), NOT
 		// the near corner (centerDistance - size/2). Using the near corner was
 		// buggy: it freed regions the walk was creating at the same time
-		// (shouldRender=false, centerDistance ≈ RenderDistanceChunks, where
-		// nearCorner < R but farthest > R), so every LOD region was freed the
-		// frame it spawned and LOD never rendered. centerDistance + size/2 < R
+		// (shouldRender=false, centerDistance ≈ inner, where nearCorner < inner
+		// but farthest > inner), so every LOD region was freed the frame it
+		// spawned and LOD never rendered. centerDistance + size/2 < inner
 		// matches the walk's own geometry exactly — those regions are provably
 		// never rendered, so freeing them oscillates nothing.
 		// Enumerate a copy: FreeLod mutates the dictionary.
+		float innerBoundary = LodInnerBoundary;
 		foreach (KeyValuePair<(int, Vector2I), LodChunk> kv in _lodChunks.ToList())
 		{
 			int level = kv.Key.Item1;
@@ -3940,7 +3985,7 @@ public partial class VoxelWorld : Node3D
 			float cz = kv.Key.Item2.Y * regionSizeChunks + regionSizeChunks / 2f;
 			float centerDist = (float)System.Math.Sqrt((cx - px) * (cx - px) + (cz - pz) * (cz - pz));
 			bool far = centerDist - half > LodRenderDistanceChunks;
-			bool fullyInsideFullRes = centerDist + half < RenderDistanceChunks;
+			bool fullyInsideFullRes = centerDist + half < innerBoundary;
 			if (far || fullyInsideFullRes)
 			{
 				FreeLod(level, kv.Key.Item2);
@@ -4002,13 +4047,14 @@ public partial class VoxelWorld : Node3D
 		float d2 = dxc * dxc + dzc * dzc;
 
 		float lodDistSq = LodRenderDistanceChunks * (float)LodRenderDistanceChunks;
-		float normalDistSq = RenderDistanceChunks * (float)RenderDistanceChunks;
+		float innerDistSq = LodInnerBoundary * LodInnerBoundary;
 
 		bool shouldRender;
-		if (d2 >= lodDistSq || d2 < normalDistSq)
+		if (d2 >= lodDistSq || d2 < innerDistSq)
 		{
 			// Outside the LOD band: beyond the LOD render distance or inside
-			// the normal render distance (full-res owns it). NOT a `continue`
+			// the full-res area (the farthest corner of the full-res square is
+			// at LodInnerBoundary, not RenderDistanceChunks). NOT a `continue`
 			// — an existing region must still be hidden here (freed later by
 			// the cleanup pass).
 			shouldRender = false;

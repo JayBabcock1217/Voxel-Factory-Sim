@@ -27,6 +27,9 @@ public sealed class SettingsStore
 
 	private bool _initialized;
 
+	/// <summary>True once <see cref="Initialize"/> has loaded the settings from disk.</summary>
+	public bool IsInitialized => _initialized;
+
 	// --- Display ---
 	public bool Fullscreen { get; set; }
 	public int ResolutionWidth { get; set; } = 1920;
@@ -239,11 +242,12 @@ public sealed class SettingsStore
 			env.AmbientLightColor = Colors.White;
 		}
 
-		// World settings: render distances and LOD on/off are picked up by the
-		// world's per-frame load/unload loop, no regeneration needed.
-		world.RenderDistanceChunks = ChunkRenderDistance;
-		world.LodRenderDistanceChunks = LodRenderDistance;
-		world.LodEnabled = LodEnabled;
+		// World settings: render distances, LOD on/off, and mesh mode are
+		// picked up by the world's per-frame load/unload loop, no regeneration
+		// needed. Routed through the world's ApplyStoredSettings so the same
+		// code path is used whether the world just loaded (from _Ready) or the
+		// user is tweaking sliders live.
+		world.ApplyStoredSettings();
 	}
 
 	private static WorldEnvironment FindWorldEnvironment(Node root)
