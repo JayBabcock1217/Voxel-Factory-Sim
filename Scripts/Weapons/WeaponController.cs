@@ -286,8 +286,11 @@ public partial class WeaponController : Node3D
 				? VoxelSurfacePoint(hitVoxel, hitNormal, vs)
 				: from + d * range;
 
-			// Draw the tracer from the CAMERA to the impact point.
-			TracerSpawner.Spawn(root, from, impact, tracerColor);
+			// Draw the tracer a short distance in FRONT of the camera (the ray
+			// still casts from the camera for accurate hit detection) so the
+			// line doesn't start right at the viewpoint, where it would be
+			// sub-pixel and hard to see.
+			TracerSpawner.Spawn(root, from + d * 0.5f, impact, tracerColor);
 
 			if (hit)
 			{

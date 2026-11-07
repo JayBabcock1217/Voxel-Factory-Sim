@@ -33,9 +33,9 @@ public partial class Tracer : Node3D
 	private const float Lifetime = 0.35f;
 	// The fraction of the lifetime spent at full brightness before fading.
 	private const float HoldFraction = 0.4f;
-	// The box's cross-section width (world units). Wide enough to be visible
-	// at range, narrow enough to read as a "line".
-	private const float BoxWidth = 0.12f;
+	// The box's cross-section width (world units). Kept thin so the tracer
+	// reads as a "line" rather than a beam; the earlier 0.12 looked chunky.
+	private const float BoxWidth = 0.03f;
 
 	private float _age;
 	private StandardMaterial3D _material;
