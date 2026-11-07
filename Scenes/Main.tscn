@@ -43,7 +43,6 @@ shadow_caster_mask = 1
 [node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
 script = ExtResource("2_voxelworld")
 ChunkHeight = 256
-RenderDistanceChunks = 16
 Seed = 123123
 SpawnOffset = 5.0
 BaseHeight = 128.0
@@ -63,7 +62,6 @@ MinLight = 0.011
 MaxLightLevel = 30
 LightFalloff = 15.0
 LodRenderDistanceChunks = 128
-LodDistanceBase = 1.5
 MaterialConfig = ExtResource("11_materialconfig")
 MachineConfig = ExtResource("3_bmxlf")
 EnableRegenerateShortcut = false
