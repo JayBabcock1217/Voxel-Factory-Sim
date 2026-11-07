@@ -88,9 +88,6 @@ public partial class WeaponController : Node3D
 	private float _fireCooldown;
 	private bool _wasTriggerDown;
 
-	// One-time diagnostic flag (prints the config values on the first shot).
-	private bool _rangeDiagLogged;
-
 	/// <summary>RNG for the per-pellet angular spread (raycast weapons).</summary>
 	private readonly RandomNumberGenerator _spreadRng = new();
 
@@ -268,15 +265,6 @@ public partial class WeaponController : Node3D
 		float spreadDeg = ActiveConfig.PelletSpreadDegrees(weapon);
 		float damage = ActiveConfig.DamagePerShot(weapon);
 		float range = ActiveConfig.RaycastRange(weapon);
-		// One-time diagnostic: confirm the config value is actually being read
-		// (so the user can verify their inspector edits are taking effect).
-		if (!_rangeDiagLogged)
-		{
-			_rangeDiagLogged = true;
-			GD.Print($"[WeaponConfig] {weapon}: range={range} pellets={pellets} spread={spreadDeg} dmg={damage} " +
-				$"config={ActiveConfig != null} shotgunRange={ActiveConfig.ShotgunRaycastRange} " +
-				$"smgRange={ActiveConfig.SmgRaycastRange}");
-		}
 		// A bright, visible tracer color (white-blue with a slight glow).
 		var tracerColor = new Color(0.85f, 0.9f, 1f, 0.9f);
 
