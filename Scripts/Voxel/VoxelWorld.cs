@@ -2426,6 +2426,18 @@ public partial class VoxelWorld : Node3D
 		chunk.Data.Damage(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ, amount);
 		float health = chunk.Data.GetHealth(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ);
 
+		// One-time-ish diagnostic: track health over time so we can see whether
+		// damage ACCUMULATES across shots (84, 68, 52, ...) or RESETS to full
+		// each time (84, 84, 84, ...). Also note when a break fires.
+		if (health != 0f)
+		{
+			GD.Print($"[DamageVoxel] {v} amt={amount} health {health}");
+		}
+		else
+		{
+			GD.Print($"[DamageVoxel] {v} amt={amount} health 0 -> BREAK");
+		}
+
 		// Record the damage for persistence: only when the voxel is still solid
 		// and below full health. (A broken voxel is removed via SetVoxel, which
 		// handles its own persistence.) Full health clears the entry.
