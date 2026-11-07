@@ -2495,6 +2495,22 @@ public partial class VoxelWorld : Node3D
 		float maxT = maxDistance / VoxelSize;
 		float t = 0f;
 
+		// Test the STARTING voxel first. The stepping loop below only checks a
+		// cell AFTER crossing into a new one (t starts at 0 and the first check
+		// happens at the first boundary), so without this the cell the ray
+		// originates inside is skipped — meaning a shot fired while the player
+		// is buried in / flush against terrain (e.g. looking down at the block
+		// under their feet) passed straight through the nearest solid block and
+		// hit whatever was beyond it (or nothing). Checking the start cell first
+		// makes a close-range shot hit the block right in front of the player.
+		if (GetVoxel(ix, iy, iz) != VoxelMaterialIds.Air)
+		{
+			hitVoxel = new Vector3I(ix, iy, iz);
+			// No face was crossed (the ray began inside the cell), so there is
+			// no meaningful surface normal.
+			return true;
+		}
+
 		for (int guard = 0; guard < 2048 && t <= maxT; guard++)
 		{
 			int normalAxis = -1;

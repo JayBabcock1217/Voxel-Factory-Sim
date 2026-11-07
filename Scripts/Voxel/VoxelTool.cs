@@ -745,13 +745,15 @@ public partial class VoxelTool : Node3D
 		{
 			if (@event is InputEventMouseButton wheel && wheel.Pressed)
 			{
+				// Inverted scroll: scrolling UP selects the PREVIOUS slot,
+				// scrolling DOWN selects the NEXT slot.
 				if (wheel.ButtonIndex == MouseButton.WheelUp)
 				{
-					_ui?.CycleHotbarFromWorld(1);
+					_ui?.CycleHotbarFromWorld(-1);
 				}
 				else if (wheel.ButtonIndex == MouseButton.WheelDown)
 				{
-					_ui?.CycleHotbarFromWorld(-1);
+					_ui?.CycleHotbarFromWorld(1);
 				}
 			}
 			else
