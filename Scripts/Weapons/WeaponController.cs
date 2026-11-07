@@ -88,6 +88,18 @@ public partial class WeaponController : Node3D
 	private float _fireCooldown;
 	private bool _wasTriggerDown;
 
+	// Per-voxel weapon damage accumulator. MIRRORS THE TOOL'S WORKING PATTERN:
+	// the world's own voxel health (VoxelWorld.DamageVoxel / GetVoxelHealth) is
+	// unreliable as the source of truth for breaking, because VoxelWorld.SetVoxel
+	// resets a voxel's stored health to FULL on every edit — so a voxel the
+	// player has damaged gets its health wiped back to 100 (the "health 4 → 100
+	// loop"). The tool sidesteps this by keeping its OWN per-voxel damage
+	// accumulator (_mineDamage) and calling BreakVoxel when it reaches MaxHealth.
+	// The weapon does the same: it accumulates per-voxel damage here and breaks
+	// the voxel when the total reaches full health, instead of relying on the
+	// world's stored health.
+	private readonly Dictionary<Vector3I, float> _voxelDamage = new();
+
 	// One-time diagnostic flags (fire-decision + raycast result).
 	private bool _fireDiagLogged;
 	private bool _rayDiagLogged;
@@ -311,19 +323,33 @@ public partial class WeaponController : Node3D
 
 			if (hit)
 			{
-				float remaining = _world.DamageVoxel(hitVoxel, damage);
-				if (remaining <= 0f)
+				// Apply damage to the per-voxel accumulator (the tool's pattern).
+				// Unbreakable voxels (bedrock) take no damage and never break.
+				int mat = _world.GetVoxel(hitVoxel.X, hitVoxel.Y, hitVoxel.Z);
+				if (mat != VoxelMaterialIds.Air && !_world.IsUnbreakable(mat))
 				{
-					_world.BreakVoxel(hitVoxel);
+					_voxelDamage.TryGetValue(hitVoxel, out float current);
+					float total = current + damage;
+					if (total >= VoxelHealth.MaxHealth)
+					{
+						// The voxel is destroyed: break it (removes it, re-meshes
+						// the chunk, raises VoxelBroken). Clear its accumulator.
+						_world.BreakVoxel(hitVoxel);
+						_voxelDamage.Remove(hitVoxel);
+					}
+					else
+					{
+						_voxelDamage[hitVoxel] = total;
+					}
 				}
-				// One-time diagnostic: confirm the hit voxel, the damage applied,
-				// and the resulting remaining health.
+
+				// One-time diagnostic: confirm the hit voxel and accumulated damage.
 				if (!_rayDiagLogged)
 				{
 					_rayDiagLogged = true;
-					int mat = _world.GetVoxel(hitVoxel.X, hitVoxel.Y, hitVoxel.Z);
+					float acc = _voxelDamage.TryGetValue(hitVoxel, out var td) ? td : 0f;
 					GD.Print($"[WeaponRaycast] pellet {i}: HIT {hitVoxel} mat={mat} unbreakable={_world.IsUnbreakable(mat)} " +
-						$"dmg={damage} remaining={remaining} from={from} dir={d} range={range}");
+						$"dmg={damage} total={acc} from={from} dir={d} range={range}");
 				}
 			}
 			else if (!_rayDiagLogged)

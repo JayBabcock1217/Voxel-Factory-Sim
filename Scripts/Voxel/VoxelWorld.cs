@@ -2423,8 +2423,18 @@ public partial class VoxelWorld : Node3D
 			return GetVoxelHealth(v);
 		}
 
-		chunk.Data.Damage(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ, amount);
-		float health = chunk.Data.GetHealth(v.X - chunk.Coord.X * ChunkSizeXZ, v.Y, v.Z - chunk.Coord.Y * ChunkSizeXZ);
+		int dlx = v.X - chunk.Coord.X * ChunkSizeXZ;
+		int dlz = v.Z - chunk.Coord.Y * ChunkSizeXZ;
+		chunk.Data.Damage(dlx, v.Y, dlz, amount);
+		float health = chunk.Data.GetHealth(dlx, v.Y, dlz);
+		// Diagnostic: print the local coords + index so we can see whether the
+		// damage is written to a sane cell (in [0..15] x, [0..SizeY] y, [0..15] z)
+		// or an out-of-range cell that Index() maps to garbage.
+		int idx = chunk.Data.Index(dlx, v.Y, dlz);
+		if (idx < 0 || idx >= chunk.Data.Health.Length)
+		{
+			GD.Print($"[DamageVoxel] OUT-OF-RANGE {v} coord={chunk.Coord} dlx={dlx} y={v.Y} dlz={dlz} idx={idx} len={chunk.Data.Health.Length}");
+		}
 
 		// One-time-ish diagnostic: track health over time so we can see whether
 		// damage ACCUMULATES across shots (84, 68, 52, ...) or RESETS to full
