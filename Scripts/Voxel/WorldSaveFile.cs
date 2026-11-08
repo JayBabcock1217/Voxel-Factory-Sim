@@ -66,6 +66,12 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
+	///   v8 — added the hive section (functional foliage that spawns zombies:
+	///        center voxel + radius + depleted flag), so hives survive a
+	///        restart (the same hives come back, with their depletion state).
+	///   v7 — added the enemy section (AI entities: world position + yaw), so
+	///        zombies (and future enemy types) survive a restart.
+	///   v6 — added the per-hotbar-slot weapon ammo section.
 	///   v5 — the machine record now also carries the processor's IN-PROGRESS
 	///        state (the smelt/craft progress fraction + a mid-operation flag),
 	///        so a smelter/crafter mid-cycle RESUMES after a reload instead of
@@ -78,7 +84,7 @@ public static class WorldSaveFile
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 6;
+	public const int CurrentVersion = 8;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -89,7 +95,7 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6, 7, 8 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
@@ -120,6 +126,22 @@ public static class WorldSaveFile
 	/// them (a v5 world simply had no saved ammo — the feature did not exist).
 	/// </summary>
 	private const int VersionWithWeaponAmmo = 6;
+
+	/// <summary>
+	/// The first version that carries the enemy section (AI entities: world
+	/// position + yaw). v6 and earlier files have no enemy section; the reader
+	/// leaves <see cref="Data.Enemies"/> empty for them (the feature did not
+	/// exist).
+	/// </summary>
+	private const int VersionWithEnemies = 7;
+
+	/// <summary>
+	/// The first version that carries the hive section (functional foliage that
+	/// spawns zombies: center voxel + radius + depleted flag). v7 and earlier
+	/// files have no hive section; the reader leaves <see cref="Data.Hives"/>
+	/// empty for them (the feature did not exist).
+	/// </summary>
+	private const int VersionWithHives = 8;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -172,6 +194,14 @@ public static class WorldSaveFile
 		//
 		// v5 -> v6: the reader leaves data.Ammo empty for v5 files (the ammo
 		// section is absent), so a v5 world simply had no saved ammo (the
+		// feature did not exist). Nothing to re-derive; return as-is.
+		//
+		// v6 -> v7: the reader leaves data.Enemies empty for v6 files (the
+		// enemy section is absent), so a v6 world simply had no saved enemies
+		// (the feature did not exist). Nothing to re-derive; return as-is.
+		//
+		// v7 -> v8: the reader leaves data.Hives empty for v7 files (the hive
+		// section is absent), so a v7 world simply had no saved hives (the
 		// feature did not exist). Nothing to re-derive; return as-is.
 		//
 		// Future version migrations go here.
@@ -322,6 +352,53 @@ public static class WorldSaveFile
 	}
 
 	/// <summary>
+	/// One AI enemy entity (v7+): its world position and yaw. The enemy type
+	/// is implicit (currently only zombies exist); when multiple enemy types
+	/// are added, a type id field will be appended.
+	/// </summary>
+	public readonly struct EnemyRecord
+	{
+		/// <summary>World position of the enemy (meters).</summary>
+		public Vector3 Position { get; }
+
+		/// <summary>Body yaw in radians (Y rotation).</summary>
+		public float Yaw { get; }
+
+		public EnemyRecord(Vector3 position, float yaw)
+		{
+			Position = position;
+			Yaw = yaw;
+		}
+	}
+
+	/// <summary>
+	/// One hive (functional foliage, v8+): its center voxel, its sphere radius,
+	/// and whether it is depleted (has stopped spawning). The hive's voxels
+	/// themselves are persisted as part of the edit overlay (they were written
+	/// through <c>SetVoxel</c>), so this record only carries the FUNCTIONAL
+	/// state: where the hive is, how big it is, and whether it is spent. The
+	/// voxel count is recomputed from the (edited) terrain on restore.
+	/// </summary>
+	public readonly struct HiveRecord
+	{
+		/// <summary>World voxel position of the hive's sphere center.</summary>
+		public Vector3I Position { get; }
+
+		/// <summary>The hive's sphere radius (in voxels).</summary>
+		public int Radius { get; }
+
+		/// <summary>True when the hive is depleted (has stopped spawning).</summary>
+		public bool IsDepleted { get; }
+
+		public HiveRecord(Vector3I position, int radius, bool isDepleted)
+		{
+			Position = position;
+			Radius = radius;
+			IsDepleted = isDepleted;
+		}
+	}
+
+	/// <summary>
 	/// A decoded save file: every section, plus the FNV-1a checksum of the
 	/// section bytes (everything between the version field and the trailing
 	/// checksum). The caller compares <see cref="Checksum"/> against the
@@ -366,6 +443,12 @@ public static class WorldSaveFile
 		/// for v5-and-earlier saves (the feature did not exist).
 		/// </summary>
 		public List<(int Slot, int AmmoMaterialId, int Count)> Ammo { get; set; } = new();
+
+		/// <summary>AI enemies (v7+): world position + yaw. Empty for v6-and-earlier saves.</summary>
+		public List<EnemyRecord> Enemies { get; set; } = new();
+
+		/// <summary>Hives (functional foliage, v8+): center voxel + radius + depleted. Empty for v7-and-earlier saves.</summary>
+		public List<HiveRecord> Hives { get; set; } = new();
 
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
@@ -500,6 +583,41 @@ public static class WorldSaveFile
 				w.Write(slot);
 				w.Write(ammoMaterialId);
 				w.Write(count);
+			}
+		}
+
+		// AI enemies (v7+). Written unconditionally (even when empty) so the
+		// reader can tell the layout apart by version. Each record is the world
+		// position (f32 x3) + yaw (f32) = 16 bytes.
+		if (CurrentVersion >= VersionWithEnemies)
+		{
+			w.Write(data.Enemies.Count);
+			foreach (var e in data.Enemies)
+			{
+				w.Write(e.Position.X);
+				w.Write(e.Position.Y);
+				w.Write(e.Position.Z);
+				w.Write(e.Yaw);
+			}
+		}
+
+		// Hives (functional foliage, v8+). Written unconditionally (even when
+		// empty) so the reader can tell the layout apart by version. Each record
+		// is the center voxel (i32 x3) + radius (i32) + depleted flag (u8) + 3
+		// pad bytes (20 bytes each).
+		if (CurrentVersion >= VersionWithHives)
+		{
+			w.Write(data.Hives.Count);
+			foreach (var h in data.Hives)
+			{
+				w.Write(h.Position.X);
+				w.Write(h.Position.Y);
+				w.Write(h.Position.Z);
+				w.Write(h.Radius);
+				w.Write(h.IsDepleted ? (byte)1 : (byte)0);
+				w.Write((byte)0); // padding
+				w.Write((byte)0);
+				w.Write((byte)0);
 			}
 		}
 
@@ -724,6 +842,42 @@ public static class WorldSaveFile
 					int ammoMaterialId = r.ReadInt32();
 					int count = r.ReadInt32();
 					data.Ammo.Add((slot, ammoMaterialId, count));
+				}
+			}
+
+			// AI enemies (v7+). v6-and-earlier files end right after the ammo
+			// section (or earlier), so the enemy section is read only for v7-and-
+			// later versions. For older versions the list stays empty (the feature
+			// did not exist).
+			if (version >= VersionWithEnemies)
+			{
+				int enemyCount = ReadCount(r);
+				data.Enemies = new List<EnemyRecord>(enemyCount);
+				for (int i = 0; i < enemyCount; i++)
+				{
+					Vector3 pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+					float yaw = r.ReadSingle();
+					data.Enemies.Add(new EnemyRecord(pos, yaw));
+				}
+			}
+
+			// Hives (functional foliage, v8+). v7-and-earlier files end right
+			// after the enemy section (or earlier), so the hive section is read
+			// only for v8-and-later versions. For older versions the list stays
+			// empty (the feature did not exist).
+			if (version >= VersionWithHives)
+			{
+				int hiveCount = ReadCount(r);
+				data.Hives = new List<HiveRecord>(hiveCount);
+				for (int i = 0; i < hiveCount; i++)
+				{
+					int x = r.ReadInt32();
+					int y = r.ReadInt32();
+					int z = r.ReadInt32();
+					int radius = r.ReadInt32();
+					byte depleted = r.ReadByte();
+					r.ReadBytes(3); // padding
+					data.Hives.Add(new HiveRecord(new Vector3I(x, y, z), radius, depleted != 0));
 				}
 			}
 

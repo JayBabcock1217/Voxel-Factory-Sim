@@ -105,6 +105,85 @@ public partial class VoxelChunk : Node3D
 	public bool CollisionReady => _collisionReady;
 
 	/// <summary>
+	/// True when at least one sub-cell (or region node) in this chunk has a
+	/// collision body with a non-null shape actually attached in the scene tree.
+	/// This is a GROUND-TRUTH check (stronger than <see cref="CollisionReady"/>):
+	/// CollisionReady means the shape was BUILT; this means the shape is LIVE in
+	/// the physics server. The spawn gate uses this as a final verification
+	/// before giving the player physics, so the player can never fall through
+	/// ground whose collision body hasn't been attached yet.
+	/// </summary>
+	public bool HasLiveCollision
+	{
+		get
+		{
+			foreach (var node in _subCells.Values)
+			{
+				if (node.Body != null && node.Shape != null && node.Shape.Shape != null)
+				{
+					return true;
+				}
+			}
+			foreach (var node in _regionNodes.Values)
+			{
+				if (node.Body != null && node.Shape != null && node.Shape.Shape != null)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// True when the sub-cell containing the local voxel
+	/// (<paramref name="lx"/>, <paramref name="ly"/>, <paramref name="lz"/>)
+	/// has a BUILT collision shape. This is the correct gate for AI entities
+	/// (zombies): the built shape exists as soon as the chunk is MESHED,
+	/// regardless of the collision radius (which only controls whether the
+	/// shape is attached to a LIVE physics body). A zombie spawning far from
+	/// the player (outside the collision radius) must still be able to
+	/// activate — its sub-cell's shape is built, the chunk is solid, and the
+	/// body will be attached later when the player approaches. Checking the
+	/// live body here would block zombies forever at distant hives.
+	/// </summary>
+	public bool HasBuiltCollisionAtLocal(int lx, int ly, int lz)
+	{
+		var cell = VoxelWorld.CellOf(lx, ly, lz);
+		int idx = VoxelWorld.CellIndex(cell.X, cell.Y, cell.Z);
+		if (_subCells.TryGetValue(idx, out SubCellNode node))
+		{
+			// The sub-cell has geometry and its shape is built. Whether the
+			// shape is attached to a live body depends on the collision radius
+			// (UpdateLocalCollision), which is NOT our concern here.
+			return node.BuiltShape != null;
+		}
+		// No sub-cell node for this cell: the cell has no geometry (all air),
+		// so there is nothing to wait for. Report true.
+		return true;
+	}
+
+	/// <summary>
+	/// True when the sub-cell containing the local voxel
+	/// (<paramref name="lx"/>, <paramref name="ly"/>, <paramref name="lz"/>)
+	/// has a LIVE collision body with a non-null shape attached in the
+	/// physics server. This is the strict gate for the player: the body must
+	/// be attached (which requires the chunk to be within
+	/// CollisionRadiusChunks) so the player's very first physics step
+	/// collides with the ground.
+	/// </summary>
+	public bool HasLiveBodyAtLocal(int lx, int ly, int lz)
+	{
+		var cell = VoxelWorld.CellOf(lx, ly, lz);
+		int idx = VoxelWorld.CellIndex(cell.X, cell.Y, cell.Z);
+		if (_subCells.TryGetValue(idx, out SubCellNode node))
+		{
+			return node.Body != null && node.Shape != null && node.Shape.Shape != null;
+		}
+		return false;
+	}
+
+	/// <summary>
 	/// The mesh/collision build currently in flight on the thread pool, or
 	/// <c>null</c> when idle. Set and cleared only on the main thread; the
 	/// worker task writes only to the pending-result fields below and marshals

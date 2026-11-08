@@ -535,6 +535,32 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public bool DebugLight { get; set; } = false;
 
+	[ExportGroup("Hives")]
+	/// <summary>
+	/// How often a zombie hive spawns: ONE hive per <c>HiveEveryNChunks</c> chunks
+	/// (a deterministic per-chunk roll from the seed + chunk coordinate).
+	/// 36–48 gives a "quite spread out" density. 0 (or less) disables hives.
+	/// </summary>
+	[Export(PropertyHint.Range, "0,256,1")]
+	public int HiveEveryNChunks { get; set; } = 42;
+
+	/// <summary>
+	/// The radius (in voxels) of a hive's spherical body. The hive is a solid
+	/// sphere of <see cref="VoxelMaterialIds.Hive"/> voxels of this radius,
+	/// grown on the terrain surface.
+	/// </summary>
+	[Export(PropertyHint.Range, "1,8,1")]
+	public int HiveRadius { get; set; } = 2;
+
+	/// <summary>
+	/// The scene instantiated for each hive's functional node (the
+	/// <c>FactorySim.Hive</c> node that spawns zombies). Defaults to
+	/// <c>res://Scenes/Hive.tscn</c>. Leave null to disable hive spawning
+	/// (the voxels still generate, but no zombies come out of them).
+	/// </summary>
+	[Export]
+	public PackedScene HiveScene { get; set; }
+
 	// ------------------------------------------------------------------
 
 	public VoxelMaterialPalette Palette { get; private set; } = null!;
@@ -852,6 +878,34 @@ public partial class VoxelWorld : Node3D
 	private readonly Dictionary<Vector3I, byte> _blockLightEdits = new();
 
 	/// <summary>
+	/// Every live hive node (the functional "functional foliage" nodes that
+	/// spawn zombies). The world owns these: it spawns one per placed hive
+	/// (on chunk generation) and clears them all on a save switch. The list is
+	/// what gets persisted (see <see cref="HiveRecords"/> / WorldSave).
+	/// </summary>
+	private readonly List<FactorySim.Hive> _hives = new();
+
+	/// <summary>
+	/// The chunks a hive has already been placed in (the deterministic roll
+	/// fired and the hive's voxels + node were written). Prevents re-placing a
+	/// hive when its chunk is regenerated (e.g. the regenerate shortcut), which
+	/// would double-write voxels and spawn a second node for the same hive.
+	/// </summary>
+	private readonly HashSet<Vector2I> _hivesPlacedInChunks = new();
+
+	/// <summary>
+	/// Hives loaded from a save that have not yet been spawned (their chunk is
+	/// not loaded yet). Keyed by the chunk that contains the hive's center voxel.
+	/// When that chunk finishes generating, <see cref="TryPlaceHiveInChunk"/>
+	/// spawns the node there (the voxels are already in the terrain from the
+	/// edit overlay). Consumed as chunks load, so the dictionary drains to empty
+	/// as the player explores. This LAZY model means a restored hive's voxel
+	/// count is computed at the moment its chunk loads (when its voxels are
+	/// actually present), not eagerly at spawn time.
+	/// </summary>
+	private readonly Dictionary<Vector2I, WorldSaveFile.HiveRecord> _pendingSavedHives = new();
+
+	/// <summary>
 	/// The <c>WorldSave</c> service node (looked up lazily). Owns the pending
 	/// snapshot loaded from disk and the save triggers. Null when there is no
 	/// save node in the scene (the world then runs without persistence).
@@ -1008,6 +1062,15 @@ public partial class VoxelWorld : Node3D
 			WorldSave.SessionSeed = 0;
 			WorldSave.SessionHasSeed = false;
 			GD.Print($"[VoxelWorld] Applying session seed {Seed} for this world.");
+		}
+
+		// Default the hive scene to the project's Hive.tscn when it was left
+		// unset (a fresh project has no assigned scene). This makes hives work
+		// out of the box; the user can override it in the inspector to a custom
+		// scene (or set HiveEveryNChunks = 0 to disable hives entirely).
+		if (HiveScene == null)
+		{
+			HiveScene = GD.Load<PackedScene>("res://Scenes/Hive.tscn");
 		}
 
 		_config = BuildConfig();
@@ -1506,7 +1569,14 @@ public partial class VoxelWorld : Node3D
 			// Only AFTER both phases does SpawnOrRestorePlayer run, which places
 			// the player at the EXACT saved coordinates (no clamp / re-seat).
 			playerNode.SetPhysicsProcess(false);
-			bool neighbourhoodReady = SpawnNeighbourhoodReady(playerChunk) && !HasPendingEdits;
+			// The spawn gate waits for the saved edits in the SPAWN NEIGHBOURHOOD
+			// (the 3x3 around the player chunk) to be applied — NOT for every
+			// pending edit in the world. A saved world can carry edits in distant
+			// chunks that will not load during the gate (e.g. a hive's voxels in a
+			// far chunk, written through the edit overlay); waiting on those would
+			// hang the gate forever and the player would never spawn. Edits
+			// outside the neighbourhood apply later, when their own chunk loads.
+			bool neighbourhoodReady = SpawnNeighbourhoodReady(playerChunk) && !HasPendingEditsInSpawnNeighbourhood(playerChunk);
 			if (neighbourhoodReady)
 			{
 				// Latch the first frame the neighbourhood reported ready. The
@@ -1533,10 +1603,26 @@ public partial class VoxelWorld : Node3D
 					// neighbourhood's bodies in the SAME frame, so the player's
 					// very first physics step collides with solid ground.
 					UpdateLocalCollision(playerChunk);
-					if (SpawnOrRestorePlayer(playerNode))
+
+					// GROUND TRUTH: verify the spawn chunk's collision body is
+					// actually live in the physics server. SpawnNeighbourhoodReady
+					// only checks a 3×3, but the player's saved position may be
+					// near a chunk edge — the chunk they land in could be outside
+					// the 3×3 (yet inside CollisionRadiusChunks). If that chunk's
+					// sub-cells have no BuiltShape (mesh not yet built), the body
+					// has no shape and the player falls through. Wait until the
+					// shape is actually attached (retry next frame).
+					if (HasLiveCollisionAt(playerNode.GlobalPosition))
 					{
-						_playerSpawned = true;
-						playerNode.SetPhysicsProcess(true);
+						if (SpawnOrRestorePlayer(playerNode))
+						{
+							_playerSpawned = true;
+							playerNode.SetPhysicsProcess(true);
+							if (playerNode is Player player)
+							{
+								player.SetSpawned();
+							}
+						}
 					}
 				}
 			}
@@ -2113,6 +2199,26 @@ public partial class VoxelWorld : Node3D
 		return def != null && def.Entry != null && def.Entry.Unbreakable;
 	}
 
+	/// <summary>
+	/// The Y of the topmost SOLID voxel in the column at world XZ
+	/// (<paramref name="wx"/>/<paramref name="wz"/>), or -1 when the column has
+	/// no solid voxel (void / cave / unloaded chunk). This is the "surface
+	/// height" the terrain generation and AI use to place things on the ground.
+	/// Scans downward from the top of the chunk, so the first solid hit is the
+	/// surface.
+	/// </summary>
+	public int GetSurfaceHeight(int wx, int wz)
+	{
+		for (int y = ChunkHeight - 1; y >= 0; y--)
+		{
+			if (GetVoxel(wx, y, wz) != VoxelMaterialIds.Air)
+			{
+				return y;
+			}
+		}
+		return -1;
+	}
+
 	// ------------------------------------------------------------------
 	// Voxel health (player damage tracking)
 	// ------------------------------------------------------------------
@@ -2144,7 +2250,13 @@ public partial class VoxelWorld : Node3D
 	/// <summary>
 	/// Returns a copy of every voxel the player has edited this session
 	/// (world voxel → material id, 0 = air/removed). The <c>WorldSave</c>
-	/// service iterates this when collecting a snapshot.
+	/// service iterates this when collecting a snapshot. Hive voxels are NOT
+	/// included here — they are persisted via the v8 hive section (center +
+	/// radius + depleted), and their voxels are re-placed deterministically by
+	/// <c>TryPlaceHiveInChunk</c> when the chunk regenerates. This keeps the
+	/// edit overlay free of hive voxels so <c>ApplyLoadedChunk</c> does not
+	/// funnel them through <c>SetVoxel</c> (which would trigger the
+	/// instant-rebuild path and corrupt the lighting).
 	/// </summary>
 	public IReadOnlyDictionary<Vector3I, int> GetEdits()
 	{
@@ -2389,6 +2501,36 @@ public partial class VoxelWorld : Node3D
 			var save = GetSaveService();
 			return save != null && save.HasPendingEdits;
 		}
+	}
+
+	/// <summary>
+	/// True while the <c>WorldSave</c> service still holds unapplied saved edits
+	/// or health INSIDE the 3x3 spawn neighbourhood (the chunk
+	/// <paramref name="center"/> plus its single ring). Unlike
+	/// <see cref="HasPendingEdits"/> (global), this scopes the check to the area
+	/// the player actually lands in, so edits in distant chunks (e.g. a hive's
+	/// voxels written through the edit overlay) do NOT hold the spawn gate open.
+	/// The gate uses this so the player spawns as soon as the ground under and
+	/// around them is the SAVED ground, without waiting on far-off chunks that
+	/// will not load during the gate.
+	/// </summary>
+	private bool HasPendingEditsInSpawnNeighbourhood(Vector2I center)
+	{
+		var save = GetSaveService();
+		if (save == null)
+		{
+			return false;
+		}
+		// The 3x3 ring around the center chunk (Chebyshev radius 1).
+		var chunks = new HashSet<Vector2I>();
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				chunks.Add(center + new Vector2I(dx, dz));
+			}
+		}
+		return save.HasPendingEditsInChunks(chunks, ChunkSizeXZ);
 	}
 
 	/// <summary>
@@ -2887,6 +3029,370 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// Frees every live zombie (the "zombie" group) immediately. Called at the
+	/// start of <see cref="SpawnOrRestorePlayer"/> so that stale zombies from a
+	/// prior save / world do not persist into a fresh world or a different
+	/// save. <see cref="WorldSave.ApplyEnemies"/> re-clears the group before
+	/// re-spawning the saved enemies, so a double-clear is safe (no-op the
+	/// second time).
+	/// </summary>
+	private void ClearAllZombiesImmediate()
+	{
+		var tree = GetTree();
+		if (tree == null)
+		{
+			return;
+		}
+		foreach (Node node in tree.GetNodesInGroup("zombie"))
+		{
+			node.Free();
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Hives (functional foliage that spawns zombies)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// The live hive nodes. Exposed read-only so <c>WorldSave</c> can collect
+	/// them into a save snapshot (position + depleted state).
+	/// </summary>
+	public IReadOnlyList<FactorySim.Hive> Hives => _hives;
+
+	/// <summary>
+	/// True when hives are enabled (<see cref="HiveEveryNChunks"/> &gt; 0).
+	/// </summary>
+	public bool HivesEnabled => HiveEveryNChunks > 0;
+
+	/// <summary>
+	/// The deterministic per-chunk hive roll: given the world seed and a chunk
+	/// coordinate, is THIS chunk the one that gets a hive? The same seed + coord
+	/// always yields the same answer (so a hive's location is stable across
+	/// chunk regenerations and saves), and exactly 1 in <see cref="HiveEveryNChunks"/>
+	/// chunks (roughly) returns true — a "quite spread out" density.
+	///
+	/// Uses a 2D integer hash of (chunkCoord, seed) mapped into [0, N) and tests
+	/// whether it is 0. This is independent of the terrain heightmap / biome
+	/// noise, so hive placement is stable even if the terrain params change.
+	/// </summary>
+	public bool ShouldPlaceHive(Vector2I chunkCoord)
+	{
+		if (HiveEveryNChunks <= 0)
+		{
+			return false;
+		}
+		return HiveRoll(chunkCoord) == 0;
+	}
+
+	/// <summary>
+	/// Maps (chunkCoord, seed) into a deterministic integer in [0, N). A plain
+	/// 2D integer hash (no floating point, no noise) so the result is identical
+	/// on every run and platform for the same inputs.
+	/// </summary>
+	private int HiveRoll(Vector2I chunkCoord)
+	{
+		// SplitMix64-style finalizer over a combined 64-bit key. The chunk coords
+		// are 32-bit each; the seed is 32-bit. Combine into a 64-bit value and
+		// hash it down to [0, N).
+		ulong key = (ulong)(uint)chunkCoord.X;
+		key = key * 1099511628211UL + (ulong)(uint)chunkCoord.Y;
+		key = key * 1099511628211UL + (ulong)(uint)Seed;
+		key ^= key >> 33;
+		key *= 0xff51afd7ed558ccdUL;
+		key ^= key >> 33;
+		key *= 0xc4ceb9fe1a85ec53UL;
+		key ^= key >> 33;
+		return (int)(key % (ulong)HiveEveryNChunks);
+	}
+
+	/// <summary>
+	/// Computes the hive's center voxel for a chunk that rolled "yes": a
+	/// deterministic position within the chunk (so the same chunk always has
+	/// its hive in the same spot) snapped onto the terrain surface at that XZ.
+	/// The XZ is an inner cell (2..ChunkSizeXZ-3) so the sphere (radius up to 8)
+	/// is unlikely to overhang a chunk border; the Y is the topmost solid voxel
+	/// + radius, so the sphere sits ON the surface (its bottom touches the
+	/// ground). Returns Vector3I.Zero when the column has no surface (void).
+	/// </summary>
+	private Vector3I HiveCenterForChunk(Vector2I chunkCoord)
+	{
+		int n = ChunkSizeXZ;
+		// Deterministic inner offset in [2, n-3): a stable sub-hash of the chunk
+		// coord, independent of the placement roll (which already decided yes/no).
+		ulong hx = (ulong)(uint)(chunkCoord.X * 73856093) ^ (ulong)(uint)(chunkCoord.Y * 19349663);
+		ulong hz = (ulong)(uint)(chunkCoord.Y * 73856093) ^ (ulong)(uint)(chunkCoord.X * 19349663);
+		int lo = 2, hi = n - 3;
+		if (hi <= lo)
+		{
+			lo = 0; hi = n - 1;
+		}
+		int lx = lo + (int)((hx % (ulong)(hi - lo + 1)));
+		int lz = lo + (int)((hz % (ulong)(hi - lo + 1)));
+
+		int wx = chunkCoord.X * n + lx;
+		int wz = chunkCoord.Y * n + lz;
+		int surface = GetSurfaceHeight(wx, wz);
+		if (surface < 0)
+		{
+			return Vector3I.Zero; // no ground here — skip this hive.
+		}
+
+		// The sphere's bottom point sits AT the surface: center.y - radius =
+		// surface, so the lowest cell of the sphere is the ground's top voxel.
+		// That cell is solid terrain, so the air-fill loop (which only writes
+		// into air cells) leaves it as ground and fills the sphere's voxels from
+		// surface+1 upward — the hive appears to rest/embed in the surface
+		// rather than float above it. The depletion baseline adapts to this
+		// automatically: it counts the voxels actually written as hive material.
+		int cy = surface + HiveRadius;
+		return new Vector3I(wx, cy, wz);
+	}
+
+	/// <summary>
+	/// Called from <see cref="OnGenerationComplete"/> for every freshly
+	/// generated chunk: roll the deterministic hive check for this chunk, and
+	/// when it lands, write the hive's voxels into the (now data-ready) chunk
+	/// and spawn its functional node. A no-op when hives are disabled, the
+	/// chunk already got a hive, or the column has no surface.
+	///
+	/// The hive's voxels are written DIRECTLY into the chunk data (bypassing
+	/// <see cref="SetVoxel"/>) to avoid corrupting the Starlight engine's
+	/// section state (which would leave the chunk and its neighbours black).
+	/// Persistence is handled by the v8 hive section (center + radius +
+	/// depleted) — NOT the edit overlay. On save load, <c>ApplyHives</c> and
+	/// this method re-write the voxels directly.
+	/// </summary>
+	private void TryPlaceHiveInChunk(Vector2I coord, VoxelChunk chunk)
+	{
+		if (_hivesPlacedInChunks.Contains(coord))
+		{
+			return; // already placed (chunk regenerated, etc.).
+		}
+		// Mark it now (before doing any work) so a re-entry can't double-place.
+		_hivesPlacedInChunks.Add(coord);
+
+		// 1) A SAVED hive for this chunk takes priority and is NOT gated on the
+		//    density setting: a saved world restores its hives even if the user
+		//    later set HiveEveryNChunks to 0 (disabled). Its voxels are NOT in
+		//    the edit overlay (hive voxels are persisted via the v8 hive section,
+		//    not the edit overlay), so we MUST write them directly into the
+		//    chunk data here (same direct-write path as the fresh placement).
+		//    The save is authoritative: we do NOT roll the deterministic check.
+		if (_pendingSavedHives.TryGetValue(coord, out var saved))
+		{
+			_pendingSavedHives.Remove(coord);
+			WriteHiveVoxelsDirect(saved.Position, saved.Radius, coord, chunk);
+			chunk.NeedsMesh = true;
+			chunk.EditPriority = ++_editPriorityCounter;
+			MarkNeighboursForRebuild(coord);
+			SpawnHiveNode(saved.Position, saved.Radius, saved.IsDepleted);
+			return;
+		}
+
+		// 2) Otherwise, the density gate applies: when hives are disabled there
+		//    are no NEW hives, so this is a no-op.
+		if (!HivesEnabled)
+		{
+			return;
+		}
+
+		// 3) The deterministic roll decides whether this (fresh) chunk gets a
+		//    new hive.
+		if (!ShouldPlaceHive(coord))
+		{
+			return;
+		}
+		Vector3I center = HiveCenterForChunk(coord);
+		if (center == Vector3I.Zero)
+		{
+			return; // no surface — no hive here.
+		}
+
+		WriteHiveVoxelsDirect(center, HiveRadius, coord, chunk);
+		chunk.NeedsMesh = true;
+		chunk.EditPriority = ++_editPriorityCounter;
+		MarkNeighboursForRebuild(coord);
+
+		SpawnHiveNode(center, HiveRadius, false);
+	}
+
+	/// <summary>
+	/// Writes a hive sphere's voxels DIRECTLY into <paramref name="chunk"/>'s
+	/// data (bypassing <see cref="SetVoxel"/>, which would funnel through the
+	/// instant-rebuild path and corrupt the Starlight engine's section state —
+	/// the wide light field's flood fill never sees the new solids, leaving the
+	/// chunk and its neighbours with zero light = black). Only fills air cells
+	/// (never overwrites existing solid terrain). Voxels that overhang into a
+	/// neighbour chunk are skipped (that neighbour's own hive roll handles it).
+	/// The caller is responsible for marking the chunk + neighbours for a full
+	/// budget rebuild (which runs a proper wide light flood fill).
+	/// </summary>
+	private void WriteHiveVoxelsDirect(Vector3I center, int radius, Vector2I coord, VoxelChunk chunk)
+	{
+		int r2 = radius * radius;
+		int wx0 = coord.X * ChunkSizeXZ;
+		int wz0 = coord.Y * ChunkSizeXZ;
+		for (int dx = -radius; dx <= radius; dx++)
+		{
+			for (int dy = -radius; dy <= radius; dy++)
+			{
+				for (int dz = -radius; dz <= radius; dz++)
+				{
+					if (dx * dx + dy * dy + dz * dz > r2)
+					{
+						continue;
+					}
+					int vx = center.X + dx;
+					int vy = center.Y + dy;
+					int vz = center.Z + dz;
+					if (vy < 0 || vy >= ChunkHeight)
+					{
+						continue;
+					}
+					int lx = vx - wx0;
+					int lz = vz - wz0;
+					if (lx < 0 || lx >= ChunkSizeXZ || lz < 0 || lz >= ChunkSizeXZ)
+					{
+						continue;
+					}
+					if (chunk.Data.Get(lx, vy, lz) == VoxelMaterialIds.Air)
+					{
+						chunk.Data.Set(lx, vy, lz, (byte)VoxelMaterialIds.Hive);
+						chunk.Data.SetHealth(lx, vy, lz, VoxelHealth.MaxHealth);
+					}
+				}
+			}
+		}
+	}
+
+	/// <summary>
+	/// Instantiates a <c>FactorySim.Hive</c> node from <see cref="HiveScene"/>,
+	/// places it at the hive's center (world units), spawns it (wiring it to
+	/// this world + recomputing its voxel count from the now-present terrain),
+	/// and records it in <see cref="_hives"/>. <paramref name="depleted"/> is
+	/// the saved depletion state (a restored hive that was already spent). A
+	/// no-op when no hive scene is assigned (the voxels still exist, but there
+	/// is no functional node / zombie spawning).
+	/// </summary>
+	private void SpawnHiveNode(Vector3I center, int radius, bool depleted)
+	{
+		if (HiveScene == null)
+		{
+			return;
+		}
+		var hive = HiveScene.Instantiate<FactorySim.Hive>();
+		if (hive == null)
+		{
+			return;
+		}
+		hive.CenterVoxel = center;
+		hive.Radius = radius;
+		hive.MaterialId = VoxelMaterialIds.Hive;
+
+		// Add to the tree FIRST: GlobalPosition is only valid (and readable)
+		// for a node that is inside the tree. Setting it before AddChild logs
+		// "Condition !is_inside_tree()" and silently returns, leaving the hive
+		// at the origin. The world is at the origin, so local Position == global
+		// once it is in the tree, but we still assign GlobalPosition AFTER
+		// AddChild to be correct under any parent transform.
+		AddChild(hive);
+		// World-unit position at the sphere center (voxel center).
+		float vs = VoxelSize;
+		hive.GlobalPosition = new Vector3(
+			(center.X + 0.5f) * vs,
+			(center.Y + 0.5f) * vs,
+			(center.Z + 0.5f) * vs);
+
+		hive.Spawn(this);
+		if (depleted)
+		{
+			hive.MarkDepleted();
+		}
+		_hives.Add(hive);
+	}
+
+	/// <summary>
+	/// Immediately frees every live hive node (and the zombies they spawned,
+	/// which are tracked by each hive). Called at the start of
+	/// <see cref="SpawnOrRestorePlayer"/> so a save switch / new world does not
+	/// keep hives from a prior world. <see cref="ApplyHives"/> re-spawns the
+	/// saved hives, so a double-clear is safe.
+	/// </summary>
+	private void ClearAllHivesImmediate()
+	{
+		for (int i = _hives.Count - 1; i >= 0; i--)
+		{
+			if (GodotObject.IsInstanceValid(_hives[i]))
+			{
+				_hives[i].Free();
+			}
+		}
+		_hives.Clear();
+		_hivesPlacedInChunks.Clear();
+		_pendingSavedHives.Clear();
+	}
+
+	/// <summary>
+	/// Restores hives from a save snapshot (LAZY): clears any live hives, then
+	/// records each saved hive in <see cref="_pendingSavedHives"/> (keyed by its
+	/// chunk) so the node is spawned when that chunk loads — at which point the
+	/// hive's voxels are present in the terrain (re-applied from the edit
+	/// overlay) and its voxel count / depletion baseline can be computed
+	/// correctly. A hive whose chunk is already loaded is spawned immediately.
+	/// Called by <see cref="SpawnOrRestorePlayer"/> alongside the enemy restore.
+	/// </summary>
+	private void ApplyHives(List<WorldSaveFile.HiveRecord> records)
+	{
+		// Snapshot the chunks that already have a FRESH hive placed this session
+		// (by TryPlaceHiveInChunk during generation). ClearAllHivesImmediate
+		// clears _hivesPlacedInChunks, so we must capture this BEFORE the clear
+		// — otherwise a saved hive record for the same chunk would double-spawn
+		// (a second node on top of the fresh one).
+		var preExistingHiveChunks = new HashSet<Vector2I>(_hivesPlacedInChunks);
+
+		ClearAllHivesImmediate();
+		if (records == null || records.Count == 0)
+		{
+			return;
+		}
+
+		int queued = 0, immediate = 0;
+		foreach (var rec in records)
+		{
+			Vector2I chunk = ChunkCoordOf(rec.Position.X, rec.Position.Z);
+			// A fresh hive was already placed in this chunk this session (the
+			// deterministic roll matched). The fresh hive is authoritative —
+			// its voxels were just written into the terrain and its node is
+			// live. Skip the saved record to avoid a double-spawn.
+			if (preExistingHiveChunks.Contains(chunk))
+			{
+				continue;
+			}
+
+			// Chunk already loaded? Write voxels + spawn the node now. Hive
+			// voxels are NOT in the edit overlay (they're persisted via the v8
+			// hive section), so we must write them directly into the chunk data.
+			if (_chunks.TryGetValue(chunk, out var loaded) && loaded.DataReady)
+			{
+				_hivesPlacedInChunks.Add(chunk);
+				WriteHiveVoxelsDirect(rec.Position, rec.Radius, chunk, loaded);
+				loaded.NeedsMesh = true;
+				loaded.EditPriority = ++_editPriorityCounter;
+				MarkNeighboursForRebuild(chunk);
+				SpawnHiveNode(rec.Position, rec.Radius, rec.IsDepleted);
+				immediate++;
+			}
+			else
+			{
+				// Chunk not loaded yet: queue it for when it generates.
+				_pendingSavedHives[chunk] = rec;
+				queued++;
+			}
+		}
+		GD.Print($"[VoxelWorld] Restored hives: {immediate} immediate, {queued} pending chunk load.");
+	}
+
+	/// <summary>
 	/// Spawns the player: restores the saved transform when a save exists
 	/// (via <see cref="RestorePlayerFromSave"/>), otherwise places the player on
 	/// the generated terrain (via <see cref="SpawnPlayerOnTerrain"/>). After a
@@ -2908,6 +3414,8 @@ public partial class VoxelWorld : Node3D
 		// clear (a no-op).
 		ClearAllMachinesImmediate();
 		ClearAllDropsImmediate();
+		ClearAllZombiesImmediate();
+		ClearAllHivesImmediate();
 
 		// Ensure the player's weapon controller exists (the held-item mesh, the
 		// use animations, the ammo store, and the firing logic). Created as a
@@ -2952,12 +3460,16 @@ public partial class VoxelWorld : Node3D
 				RestoreAmmoFromSave(save.Snapshot);
 				save.ApplyDrops(save.Snapshot);
 				save.ApplyMachines(save.Snapshot);
+				save.ApplyEnemies(save.Snapshot);
+				ApplyHives(save.Snapshot.Hives);
 				return SpawnPlayerOnTerrain(player);
 			}
 			RestoreInventoryFromSave(save.Snapshot);
 			RestoreAmmoFromSave(save.Snapshot);
 			save.ApplyDrops(save.Snapshot);
 			save.ApplyMachines(save.Snapshot);
+			save.ApplyEnemies(save.Snapshot);
+			ApplyHives(save.Snapshot.Hives);
 			return true;
 		}
 		return SpawnPlayerOnTerrain(player);
@@ -3667,6 +4179,12 @@ public partial class VoxelWorld : Node3D
 		// into their buffers (an overhang can only land in one of these 8).
 		MarkNeighboursForRebuild(coord);
 
+		// Hives (functional foliage): roll the deterministic per-chunk hive
+		// check. When this chunk gets a hive, its voxels are written into the
+		// (now data-ready) chunk and a Hive node is spawned. A no-op when hives
+		// are disabled, the chunk already got one, or there is no surface.
+		TryPlaceHiveInChunk(coord, current);
+
 		// Pre-spawn: this chunk's data just became ready. If it is inside the
 		// 3x3 spawn neighbourhood, stamp the whole neighbourhood with a top
 		// priority so the budget meshes those 9 chunks first — keeping the
@@ -3788,6 +4306,78 @@ public partial class VoxelWorld : Node3D
 				}
 			}
 		}
+	}
+
+	/// <summary>
+	/// True when the sub-cell at world position <paramref name="pos"/> has a
+	/// BUILT collision shape (regardless of whether it's attached to a live
+	/// physics body). This is the gate for AI entities (zombies): the shape
+	/// exists once the chunk is meshed, so a zombie can activate on any
+	/// full-res chunk even if it's outside the collision radius. The player
+	/// uses the stricter <see cref="HasLiveCollisionAt"/> (live body) because
+	/// it must actually collide on the very first physics step.
+	/// </summary>
+	public bool HasBuiltCollisionAt(Vector3 pos)
+	{
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vy = Mathf.FloorToInt(pos.Y / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		if (!_chunks.TryGetValue(ChunkCoordOf(vx, vz), out VoxelChunk chunk))
+		{
+			return false;
+		}
+		int lx = vx - chunk.Coord.X * ChunkSizeXZ;
+		int lz = vz - chunk.Coord.Y * ChunkSizeXZ;
+		return chunk.HasBuiltCollisionAtLocal(lx, vy, lz);
+	}
+
+	/// <summary>
+	/// True when the chunk at world position <paramref name="pos"/> has a
+	/// live collision body with a non-null shape in the physics server. This
+	/// is the strict gate for the PLAYER: the body must be attached (which
+	/// requires the chunk to be within CollisionRadiusChunks) so the player's
+	/// very first physics step collides with the ground. AI entities use
+	/// <see cref="HasBuiltCollisionAt"/> instead (built shape, no radius gate).
+	/// </summary>
+	public bool HasLiveCollisionAt(Vector3 pos)
+	{
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vy = Mathf.FloorToInt(pos.Y / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		if (!_chunks.TryGetValue(ChunkCoordOf(vx, vz), out VoxelChunk chunk))
+		{
+			return false;
+		}
+		int lx = vx - chunk.Coord.X * ChunkSizeXZ;
+		int lz = vz - chunk.Coord.Y * ChunkSizeXZ;
+		return chunk.HasLiveBodyAtLocal(lx, vy, lz);
+	}
+
+	/// <summary>
+	/// True when the chunk at world position <paramref name="pos"/> is a
+	/// FULL-RES chunk (within <see cref="RenderDistanceChunks"/> Chebyshev
+	/// distance of the player). Full-res chunks are the only ones with real
+	/// voxel geometry (meshed + collision); beyond that, the terrain is
+	/// low-res LOD (heightfield, no per-voxel collision). AI entities (hives,
+	/// zombies) only activate on full-res chunks — an LOD chunk has no voxel
+	/// terrain to stand on or path across.
+	/// </summary>
+	public bool IsFullResChunkAt(Vector3 pos)
+	{
+		var player = GetTree()?.GetFirstNodeInGroup("player") as Node3D;
+		if (player == null)
+		{
+			return false;
+		}
+		Vector2I playerChunk = ChunkCoordOf(
+			Mathf.FloorToInt(player.GlobalPosition.X / VoxelSize),
+			Mathf.FloorToInt(player.GlobalPosition.Z / VoxelSize));
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		Vector2I c = ChunkCoordOf(vx, vz);
+		int dx = System.Math.Abs(c.X - playerChunk.X);
+		int dz = System.Math.Abs(c.Y - playerChunk.Y);
+		return System.Math.Max(dx, dz) <= RenderDistanceChunks;
 	}
 
 	// ------------------------------------------------------------------

@@ -1,0 +1,8 @@
+[gd_scene format=3 uid="uid://dkfwg51v3fres"]
+
+[ext_resource type="Script" uid="uid://c64uy0xojaxpk" path="res://Scripts/Hive.cs" id="1_hive"]
+[ext_resource type="PackedScene" path="res://Scenes/Zombie.tscn" id="2_zombie_scene"]
+
+[node name="Hive" type="Node3D" unique_id=1004105337]
+script = ExtResource("1_hive")
+ZombieScene = ExtResource("2_zombie_scene")

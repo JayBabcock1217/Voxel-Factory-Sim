@@ -365,6 +365,34 @@ public partial class WorldSave : Node
 			}
 		}
 
+		// AI enemies (the "zombie" group). Only spawned (active) zombies are
+		// persisted; unspawned ones (still waiting for the terrain) are not
+		// yet in the world.
+		foreach (Node node in GetTree().GetNodesInGroup("zombie"))
+		{
+			if (node is Zombie z && z.IsSpawned)
+			{
+				data.Enemies.Add(new WorldSaveFile.EnemyRecord(
+					z.GlobalPosition, z.Rotation.Y));
+			}
+		}
+
+		// Hives (functional foliage, v8+). The live hive nodes are owned by the
+		// world (its Hives list); persist each one's center voxel, radius, and
+		// depleted flag. The hive's voxels are already in the edit overlay, so
+		// this only records the functional state.
+		if (GetTree().GetFirstNodeInGroup("voxel_world") is VoxelWorld voxelWorld)
+		{
+			foreach (var hive in voxelWorld.Hives)
+			{
+				if (GodotObject.IsInstanceValid(hive))
+				{
+					data.Hives.Add(new WorldSaveFile.HiveRecord(
+						hive.CenterVoxel, hive.Radius, hive.IsDepleted));
+				}
+			}
+		}
+
 		return data;
 	}
 
@@ -898,6 +926,51 @@ public partial class WorldSave : Node
 		&& (PendingEdits.Edits.Count > 0 || PendingEdits.Health.Count > 0);
 
 	/// <summary>
+	/// True when <see cref="PendingEdits"/> still holds an unapplied edit or
+	/// health entry that falls INSIDE one of <paramref name="chunks"/>. Unlike
+	/// <see cref="HasPendingEdits"/> (which counts ALL pending edits, including
+	/// ones in distant chunks the player will never load during the spawn gate),
+	/// this scopes the check to a specific set of chunks — the spawn
+	/// neighbourhood. Edits outside those chunks (e.g. a hive's voxels in a far
+	/// chunk) do NOT block the spawn: they apply when their own chunk loads,
+	/// which is after the player has already spawned. This is what prevents a
+	/// saved hive in a distant chunk from hanging the spawn gate forever.
+	/// </summary>
+	public bool HasPendingEditsInChunks(HashSet<Vector2I> chunks, int chunkSize)
+	{
+		if (PendingEdits == null)
+		{
+			return false;
+		}
+		foreach (var e in PendingEdits.Edits)
+		{
+			if (InChunk(e.Position, chunks, chunkSize))
+			{
+				return true;
+			}
+		}
+		foreach (var h in PendingEdits.Health)
+		{
+			if (InChunk(h.Position, chunks, chunkSize))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/// <summary>
+	/// True when the world voxel <paramref name="pos"/> falls inside any chunk
+	/// in <paramref name="chunks"/> (a voxel-sized box anchored at
+	/// chunkCoord × chunkSize).
+	/// </summary>
+	private static bool InChunk(Vector3I pos, HashSet<Vector2I> chunks, int chunkSize)
+	{
+		Vector2I c = new Vector2I(pos.X / chunkSize, pos.Z / chunkSize);
+		return chunks.Contains(c);
+	}
+
+	/// <summary>
 	/// Peeks the saved player position from the snapshot WITHOUT consuming it.
 	/// Used by the world to anchor the spawn neighbourhood (the 3x3 of chunks
 	/// the gate waits on) on the saved XZ before the player is actually
@@ -1061,6 +1134,54 @@ public partial class WorldSave : Node
 		}
 		GD.Print($"[WorldSave] Restored {spawned}/{data.Machines.Count} placed machines.");
 	}
+
+	/// <summary>
+	/// Clears every live zombie from the scene (the "zombie" group) and
+	/// re-spawns the enemies recorded in <paramref name="data"/> at their
+	/// saved positions. Called by the world once, after the spawn chunk is
+	/// solid, so the restored zombies land on real terrain. Each zombie is
+	/// instantiated from <c>Scenes/Zombie.tscn</c>, placed at its saved
+	/// position with its saved yaw, and marked as already-spawned (so it
+	/// skips the terrain-snapping wait and becomes active immediately).
+	/// </summary>
+	public void ApplyEnemies(WorldSaveFile.Data data)
+	{
+		if (data == null)
+		{
+			return;
+		}
+
+		// Clear the existing zombies. Free them IMMEDIATELY (Free, not
+		// QueueFree) so the re-spawned ones below do not overlap the stale
+		// ones for a frame.
+		foreach (Node node in GetTree().GetNodesInGroup("zombie"))
+		{
+			node.Free();
+		}
+
+		var zombieScene = GD.Load<PackedScene>("res://Scenes/Zombie.tscn");
+		if (zombieScene == null)
+		{
+			GD.PushWarning("[WorldSave] Could not load Scenes/Zombie.tscn — skipping enemy restore.");
+			return;
+		}
+
+		int spawned = 0;
+		foreach (var e in data.Enemies)
+		{
+			var zombie = zombieScene.Instantiate<Zombie>();
+			GetTree().Root.AddChild(zombie);
+			zombie.GlobalPosition = e.Position;
+			zombie.Rotation = new Vector3(0, e.Yaw, 0);
+			zombie.MarkAsSpawned();
+			spawned++;
+		}
+		GD.Print($"[WorldSave] Restored {spawned}/{data.Enemies.Count} enemies.");
+	}
+	// Note: hive restore is handled by VoxelWorld.ApplyHives (the world owns the
+	// hive nodes + the HiveScene reference); it is called directly from
+	// SpawnOrRestorePlayer with data.Hives. WorldSave only COLLECTS hives into
+	// the snapshot (see CollectSnapshot).
 
 	/// <summary>Clears the pending snapshot (e.g. after it has been fully applied).</summary>
 	public void ClearPending()

@@ -104,6 +104,24 @@ public partial class Player : CharacterBody3D
 	/// <summary>True while the player is in fly mode (no gravity, Space ascends, Shift descends).</summary>
 	public bool Flying => _flying;
 
+	/// <summary>
+	/// True once the spawn gate has opened and the player is active in the
+	/// world. Set by <c>VoxelWorld</c> when it calls
+	/// <see cref="SetSpawned"/>. Enemies and other systems can poll this to
+	/// know the world is ready (chunks loaded, player placed).
+	/// </summary>
+	public bool IsSpawned { get; private set; }
+
+	/// <summary>
+	/// Called by <c>VoxelWorld</c> when the spawn gate opens (player is
+	/// placed, physics enabled, chunks loaded). Flips <see cref="IsSpawned"/>
+	/// to true.
+	/// </summary>
+	public void SetSpawned()
+	{
+		IsSpawned = true;
+	}
+
 	/// <summary>Toggles fly mode on or off.</summary>
 	public void ToggleFly()
 	{
