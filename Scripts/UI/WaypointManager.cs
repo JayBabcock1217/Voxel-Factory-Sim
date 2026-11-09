@@ -6,10 +6,11 @@ namespace FactorySim.UI;
 
 /// <summary>
 /// The in-memory owner of the shared <see cref="MapRenderer"/> (the waypoint
-/// store + terrain-coloring service). A single <see cref="Node"/> hosted in the
-/// gameplay scene (<c>Scenes/Main.tscn</c>) — it is the one object that both the
-/// minimap and the map window draw from, so the two views share the same
-/// waypoints and the same terrain colors.
+/// store + the pushed 2D terrain-data store + terrain-coloring). A single
+/// <see cref="Node"/> hosted in the gameplay scene (<c>Scenes/Main.tscn</c>) — it
+/// is the one object that both the minimap and the map window draw from, so the
+/// two views share the same waypoints, the same terrain data, and the same
+/// terrain colors.
 ///
 /// Lifecycle:
 ///   - The world restores saved waypoints into the renderer once the player is
@@ -17,11 +18,13 @@ namespace FactorySim.UI;
 ///     <see cref="RestoreWaypoints"/>).
 ///   - The save system reads the renderer's waypoint list when collecting a
 ///     snapshot (see <see cref="WorldSave.CollectSnapshot"/>).
-///   - The minimap / map window sample terrain directly from the world (via
-///     <see cref="MapRenderer.SampleRegion"/>) and draw their own display images.
+///   - The world PUSHES each chunk's 2D height+material data to the renderer as
+///     chunks generate / get edited (<see cref="MapRenderer.SetChunk"/> /
+///     <see cref="MapRenderer.SetTile"/>); the minimap / map window only READ it
+///     back (<see cref="MapRenderer.GetTileColor"/>) and never scan the world.
 ///
-/// The renderer is created in <see cref="_Ready"/> (it is stateless about the
-/// terrain — only the waypoint list and a texture-color cache live in it).
+/// The renderer is created in <see cref="_Ready"/>. It holds the waypoint list,
+/// the pushed per-chunk 2D terrain data, and a per-material color cache.
 /// </summary>
 [GlobalClass]
 public partial class WaypointManager : Node

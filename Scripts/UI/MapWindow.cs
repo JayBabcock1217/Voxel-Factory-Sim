@@ -20,10 +20,13 @@ namespace FactorySim.UI;
 ///     player) with click-to-focus and a remove button.
 ///
 /// The terrain pixels come from the SHARED <see cref="MapRenderer"/> (owned by
-/// the <c>WaypointManager</c>), so the map window and the minimap always agree.
-/// This window only re-samples its own visible region when it is open (it drains
-/// a per-frame budget of dirty chunks, like the minimap) — when closed it does
-/// nothing.
+/// the <c>WaypointManager</c>) — the SAME data the minimap displays. The world
+/// PUSHES each chunk's 2D height+material data to the renderer as chunks
+/// generate / get edited, so the map window (like the minimap) never scans the
+/// world: it just reads <see cref="MapRenderer.GetTileColor"/> per visible tile
+/// (an O(1) lookup) and blits it at the current zoom. It differs from the
+/// minimap only in that the player can PAN (drag) and ZOOM (wheel) the view.
+/// When closed it does nothing.
 ///
 /// The node builds its own <see cref="CanvasLayer"/> in <c>_Ready</c> (matching
 /// the project's code-built UI pattern) and is added to the scene by
@@ -53,16 +56,6 @@ public partial class MapWindow : Node
 
 	/// <summary>Initial zoom when the map opens.</summary>
 	[Export] public float InitialZoom { get; set; } = 3f;
-
-	/// <summary>How many terrain tiles the map window re-samples per frame while open.</summary>
-	[Export] public int SampleBudgetPerFrame { get; set; } = 600;
-
-	/// <summary>
-	/// The largest one-time full-fill (in tiles) the map window will do on a view
-	/// change without causing a frame hitch. Views larger than this fall back to
-	/// the budgeted (center-out) fill. 4096 ≈ a 64×64 tile region (a few ms).
-	/// </summary>
-	private const int MaxFullFillTiles = 4096;
 
 	// ------------------------------------------------------------------
 	// State
@@ -183,9 +176,9 @@ public partial class MapWindow : Node
 			return;
 		}
 
-		// Sample the visible region's terrain directly from the world (see
-		// RebuildDisplay). No shared image / dirty-chunk bookkeeping: the view is
-		// sampled fresh each frame, so it always matches what's actually loaded.
+		// Read the visible region from the shared map data (the same data the
+		// minimap shows) and blit it at the current zoom (see RebuildDisplay).
+		// No scanning of the world — the world pushed the data when it generated.
 		RebuildDisplay(renderer);
 	}
 
@@ -881,74 +874,21 @@ public partial class MapWindow : Node
 	}
 
 	// ------------------------------------------------------------------
-	// Terrain cache + display rebuild
+	// Display rebuild (read the shared map data, blit at zoom, draw overlays)
 	// ------------------------------------------------------------------
 
-	// The terrain cache: a tile image covering the visible world region (at the
-	// current zoom), filled from the live world. Filled fully on view change,
-	// then topped up per-frame.
-	private Image _terrainCache;
-	private int _terrainMinX;
-	private int _terrainMinZ;
-	private bool _terrainValid;
-	// True right after the cache is (re)created: the next SampleRegion call must
-	// fill the WHOLE cache at once (a one-time cost) instead of a small per-frame
-	// budget. Without this the budget only fills a narrow center band, so the
-	// map shows just a strip until many frames pass.
-	private bool _needsFullFill;
-
 	/// <summary>
-	/// Samples the visible world region into <see cref="_terrainCache"/>
-	/// (budget-limited), creating / re-creating the cache when the view moves or
-	/// zooms. The cache's (0,0) is at world (<see cref="_terrainMinX"/>,
-	/// <see cref="_terrainMinZ"/>); it is sized to cover the view (with a small
-	/// margin), so the display just reads from it.
-	/// </summary>
-	private void UpdateTerrainCache(MapRenderer renderer)
-	{
-		if (_world == null)
-		{
-			return;
-		}
-		int tileW = Mathf.CeilToInt(_displayW / _zoom) + 2;
-		int tileH = Mathf.CeilToInt(_displayH / _zoom) + 2;
-		int wantMinX = (int)Mathf.Floor(_viewCenter.X - _displayW / (2f * _zoom)) - 1;
-		int wantMinZ = (int)Mathf.Floor(_viewCenter.Y - _displayH / (2f * _zoom)) - 1;
-
-		bool sameView = _terrainValid && _terrainMinX == wantMinX && _terrainMinZ == wantMinZ
-			&& (_terrainCache == null || _terrainCache.GetWidth() >= tileW && _terrainCache.GetHeight() >= tileH);
-		if (!sameView)
-		{
-			// View moved / zoomed / resized: (re)create the cache covering the new
-			// region and fill the WHOLE thing at once (a one-time cost) so the map
-			// is fully populated immediately instead of showing just a center strip.
-			_terrainCache = Image.CreateEmpty(tileW, tileH, false, Image.Format.Rgba8);
-			_terrainCache.Fill(MapRenderer.UnknownColor);
-			_terrainMinX = wantMinX;
-			_terrainMinZ = wantMinZ;
-			_terrainValid = true;
-			_needsFullFill = true;
-		}
-
-		// Fill the cache from the world. On (re)creation, fill the whole cache in
-		// one call so the map is fully populated immediately; afterward, only top
-		// up within the per-frame budget (to refresh edited terrain / newly-
-		// generated chunks as the view stays put). Cap the one-time full fill so
-		// a very large (zoomed-out) view doesn't cause a big frame hitch — if the
-		// region is too big, fall back to the budgeted (center-out) fill.
-		int fullFill = tileW * tileH;
-		int budget = (_needsFullFill && fullFill <= MaxFullFillTiles)
-			? fullFill
-			: SampleBudgetPerFrame;
-		renderer.SampleRegion(_world, _terrainCache, _terrainMinX, _terrainMinZ, budget);
-		_needsFullFill = false;
-	}
-
-	/// <summary>
-	/// Rebuilds the panel's display image: samples the visible world region into
-	/// the terrain cache (budget-limited), blits it (scaled by zoom) into the
-	/// display, and draws the overlays (player, zombies, hives, waypoints,
-	/// selection highlight).
+	/// Rebuilds the panel's display image. The map window shows the SAME data the
+	/// minimap does (the shared <see cref="MapRenderer"/> — the 2D height+material
+	/// data the world pushes as chunks generate), just with a free pan/zoom view.
+	///
+	/// PERFORMANCE: the display is built at TILE resolution — one
+	/// <see cref="MapRenderer.GetTileColor"/> per VISIBLE WORLD TILE (an O(1)
+	/// lookup, NO scanning of the world) — and each tile is then blitted to a
+	/// (zoom × zoom) pixel block. This is ~displayW/zoom × displayH/zoom
+	/// GetTileColor calls (tens of thousands), not displayW × displayH (hundreds
+	/// of thousands of pixels). Overlays (player, zombies, hives, waypoints) are
+	/// drawn on top in screen space.
 	/// </summary>
 	private void RebuildDisplay(MapRenderer renderer)
 	{
@@ -956,47 +896,67 @@ public partial class MapWindow : Node
 		{
 			return;
 		}
-		UpdateTerrainCache(renderer);
-		var src = _terrainCache;
-		if (src == null)
-		{
-			return;
-		}
-		int sw = src.GetWidth();
-		int sh = src.GetHeight();
-		float cx = _displayW * 0.5f;
-		float cy = _displayH * 0.5f;
+		var palette = _world.Palette;
+		int w = _displayW;
+		int h = _displayH;
+		float cx = w * 0.5f;
+		float cy = h * 0.5f;
+		float zoom = _zoom;
 
-		// Direct buffer access (fast; no per-pixel marshaling). Both the cache
-		// and the display are Rgba8, so 4 bytes per pixel.
-		byte[] srcBuf = src.GetData();
+		// Direct buffer access (fast; no per-pixel marshaling). Rgba8 = 4 bytes.
 		byte[] dstBuf = _displayImage.GetData();
-		byte uR = 18, uG = 20, uB = 26, uA = 255; // "unknown" tile color
 
-		for (int sy = 0; sy < _displayH; sy++)
+		// Clear to "unknown" first so any sub-pixel gaps left by fractional-zoom
+		// tile blocks read as dark, not stale/garbage pixels.
+		for (int i = 0; i < dstBuf.Length; i += 4)
 		{
-			for (int sx = 0; sx < _displayW; sx++)
+			dstBuf[i] = 18;
+			dstBuf[i + 1] = 20;
+			dstBuf[i + 2] = 26;
+			dstBuf[i + 3] = 255;
+		}
+
+		// The visible world-tile range at the current zoom (the view center ±
+		// half the display, in tiles).
+		int tileMinX = (int)Mathf.Floor(_viewCenter.X - cx / zoom);
+		int tileMaxX = (int)Mathf.Ceil(_viewCenter.X + cx / zoom);
+		int tileMinZ = (int)Mathf.Floor(_viewCenter.Y - cy / zoom);
+		int tileMaxZ = (int)Mathf.Ceil(_viewCenter.Y + cy / zoom);
+
+		// For each visible world tile, compute its color (O(1)) and blit it to the
+		// screen-pixel block it occupies. A tile spans zoom pixels; we clamp to
+		// the display bounds. (Integer zoom is exact; fractional zoom may leave a
+		// 1px seam at tile edges, which is invisible at the map's scale.)
+		int zInt = Mathf.Max(1, (int)zoom);
+		for (int tz = tileMinZ; tz <= tileMaxZ; tz++)
+		{
+			for (int tx = tileMinX; tx <= tileMaxX; tx++)
 			{
-				// Screen pixel → world tile (at the current zoom).
-				int tx = (int)Mathf.Floor(_viewCenter.X + (sx - cx) / _zoom);
-				int tz = (int)Mathf.Floor(_viewCenter.Y + (sy - cy) / _zoom);
-				int ix = tx - _terrainMinX;
-				int iz = tz - _terrainMinZ;
-				int o = (sy * _displayW + sx) * 4;
-				if (ix >= 0 && ix < sw && iz >= 0 && iz < sh)
+				var col = renderer.GetTileColor(tx, tz, palette);
+				byte cr = (byte)(col.R * 255f);
+				byte cg = (byte)(col.G * 255f);
+				byte cb = (byte)(col.B * 255f);
+				byte ca = (byte)(col.A * 255f);
+
+				// Screen rect for this tile: its top-left world corner maps to a
+				// screen point; the tile spans zoom pixels from there.
+				int sx0 = (int)(cx + (tx - _viewCenter.X) * zoom);
+				int sy0 = (int)(cy + (tz - _viewCenter.Y) * zoom);
+				int sx1 = Mathf.Min(w, sx0 + zInt);
+				int sy1 = Mathf.Min(h, sy0 + zInt);
+				int sxStart = Mathf.Max(0, sx0);
+				int syStart = Mathf.Max(0, sy0);
+				for (int sy = syStart; sy < sy1; sy++)
 				{
-					int so = (iz * sw + ix) * 4;
-					dstBuf[o] = srcBuf[so];
-					dstBuf[o + 1] = srcBuf[so + 1];
-					dstBuf[o + 2] = srcBuf[so + 2];
-					dstBuf[o + 3] = srcBuf[so + 3];
-				}
-				else
-				{
-					dstBuf[o] = uR;
-					dstBuf[o + 1] = uG;
-					dstBuf[o + 2] = uB;
-					dstBuf[o + 3] = uA;
+					int ro = sy * w * 4;
+					for (int sx = sxStart; sx < sx1; sx++)
+					{
+						int o = ro + sx * 4;
+						dstBuf[o] = cr;
+						dstBuf[o + 1] = cg;
+						dstBuf[o + 2] = cb;
+						dstBuf[o + 3] = ca;
+					}
 				}
 			}
 		}
@@ -1010,7 +970,7 @@ public partial class MapWindow : Node
 		// Update the coordinate readout (the view center's world coords).
 		if (_coordsLabel != null)
 		{
-			_coordsLabel.Text = $"X {(int)_viewCenter.X}   Z {(int)_viewCenter.Y}   zoom {_zoom:0.0}";
+			_coordsLabel.Text = $"X {(int)_viewCenter.X}   Z {(int)_viewCenter.Y}   zoom {zoom:0.0}";
 		}
 	}
 

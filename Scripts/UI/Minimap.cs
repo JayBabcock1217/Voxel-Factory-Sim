@@ -12,14 +12,14 @@ namespace FactorySim.UI;
 /// waypoint markers (with off-screen edge arrows for waypoints outside the
 /// circle).
 ///
-/// Performance / correctness: each frame the minimap samples a small square of
-/// world tiles AROUND THE PLAYER directly from the live <see cref="VoxelWorld"/>
-/// (via the shared <see cref="MapRenderer.SampleRegion"/>), spread over a
-/// per-frame budget so it fills in smoothly and never hitches. Because the
-/// sampled region is always re-centered on the player, the circle always has
-/// fresh terrain around the center — there is no stale shared image to go out of
-/// date. The result is rotated by the player's yaw into a circular display
-/// texture (one draw call on a TextureRect).
+/// Performance / correctness: each frame the minimap reads a small square of
+/// world tiles AROUND THE PLAYER from the shared <see cref="MapRenderer"/>. The
+/// world PUSHES each chunk's 2D height+material data to the renderer the moment
+/// the chunk generates / is edited, so reading a tile is an O(1) lookup — the
+/// minimap does NO scanning of the world (no GetSurfaceHeight, no budget). It
+/// simply displays the data the world handed it, re-centered on the player,
+/// rotated by the player's yaw into a circular display texture (one draw call).
+/// Unpushed chunks (not yet generated) read as "unknown".
 ///
 /// The node builds its own <see cref="CanvasLayer"/> in <c>_Ready</c> (matching
 /// the project's code-built UI pattern) and is added to the scene by
@@ -49,13 +49,6 @@ public partial class Minimap : Node
 	/// </summary>
 	[Export] public int RadiusTiles { get; set; } = 64;
 
-	/// <summary>
-	/// How many terrain tiles to sample per frame (spread out so the fill-in is
-	/// smooth). Higher = faster fill-in, more per-frame cost. The sample order is
-	/// center-out, so the player's surroundings fill first even at this budget.
-	/// </summary>
-	[Export] public int SampleBudgetPerFrame { get; set; } = 1024;
-
 	// ------------------------------------------------------------------
 	// State
 	// ------------------------------------------------------------------
@@ -74,20 +67,13 @@ public partial class Minimap : Node
 	private Image _displayImage;
 	private ImageTexture _displayTexture;
 
-	// The terrain slice (RadiusTiles × RadiusTiles world tiles), sampled directly
-	// from the world. Filled fully on (re)creation, then topped up per-frame.
+	// The terrain slice (RadiusTiles × RadiusTiles world tiles), read fresh each
+	// frame from the shared map data (which the world pushes as chunks generate).
 	private Image _slice;
 
-	// Tracks the slice's world origin; when the player moves, the origin moves
-	// with them (a fresh sample of the new region).
-	private int _sliceMinX = int.MinValue;
-	private int _sliceMinZ = int.MinValue;
-	private bool _worldReady;
-	// True right after the slice is (re)created / cleared: the next SampleRegion
-	// call must fill the WHOLE slice at once (a one-time cost) instead of a small
-	// per-frame budget. Without this, the budget only fills a narrow center band
-	// before it runs out, so the map shows just a strip.
-	private bool _needsFullFill = true;
+	// The slice's world origin; re-centered on the player every frame.
+	private int _sliceMinX;
+	private int _sliceMinZ;
 
 	// ------------------------------------------------------------------
 	// Lifecycle
@@ -185,47 +171,19 @@ public partial class Minimap : Node
 		var px = (int)Mathf.Floor(_player.GlobalPosition.X);
 		var pz = (int)Mathf.Floor(_player.GlobalPosition.Z);
 
-		if (!_worldReady)
-		{
-			// First usable frame: position the slice origin on the player and
-			// fill the whole slice at once.
-			_sliceMinX = px - RadiusTiles / 2;
-			_sliceMinZ = pz - RadiusTiles / 2;
-			_slice.Fill(MapRenderer.UnknownColor);
-			_needsFullFill = true;
-			_worldReady = true;
-		}
-		else
-		{
-			// Keep the player roughly centered WITHOUT resetting the slice on
-			// every tile of movement. Resetting to "unknown" on each tile would
-			// make the map perpetually re-fill (and look dark/covered) while the
-			// player walks. Instead, re-center (and clear) only when the player
-			// has drifted more than 1/4 of the slice width away from the current
-			// slice center — between re-centers we just keep the already-sampled
-			// terrain and top up any newly-revealed tiles.
-			int recenterDist = Mathf.Max(4, RadiusTiles / 4);
-			int sliceCenterX = _sliceMinX + RadiusTiles / 2;
-			int sliceCenterZ = _sliceMinZ + RadiusTiles / 2;
-			if (Mathf.Abs(px - sliceCenterX) > recenterDist || Mathf.Abs(pz - sliceCenterZ) > recenterDist)
-			{
-				_sliceMinX = px - RadiusTiles / 2;
-				_sliceMinZ = pz - RadiusTiles / 2;
-				_slice.Fill(MapRenderer.UnknownColor);
-				_needsFullFill = true; // re-center: fill the whole slice again
-			}
-		}
+		// Re-center the slice on the player (the circle always shows the player's
+		// surroundings). The slice origin moves with the player; because the map
+		// data is PUSHED by the world (chunks push their 2D height data when they
+		// generate / get edited), reading a tile is an O(1) lookup — so we simply
+		// read the WHOLE slice fresh every frame. There is no budget, no
+		// dirty-chunk tracking, and no "re-fill" — the map is a pure display of
+		// the data the world handed it. Unpushed chunks (not yet generated) read
+		// as "unknown".
+		_sliceMinX = px - RadiusTiles / 2;
+		_sliceMinZ = pz - RadiusTiles / 2;
 
-		// Sample the slice's region directly from the world. On (re)creation,
-		// fill the WHOLE slice in one call (a one-time cost) so the map is fully
-		// populated immediately; afterward, only top up within the per-frame
-		// budget (to refresh edited terrain / newly-generated chunks). The slice
-		// is small (RadiusTiles², ≤ 64² = 4096 tiles), so a full fill is cheap.
-		int budget = _needsFullFill
-			? RadiusTiles * RadiusTiles
-			: SampleBudgetPerFrame;
-		_manager.Renderer.SampleRegion(_world, _slice, _sliceMinX, _sliceMinZ, budget);
-		_needsFullFill = false;
+		// Read the slice's tiles from the shared map data (O(1) per tile).
+		ReadSlice(_manager.Renderer);
 
 		// Rotate the slice into the circular display and draw the overlays.
 		UpdateDisplay(px, pz);
@@ -236,6 +194,42 @@ public partial class Minimap : Node
 		if (_manager != null)
 		{
 			_manager.WaypointsChanged -= OnWaypointsChanged;
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Reading the slice from the shared map data (pushed by the world)
+	// ------------------------------------------------------------------
+
+	/// <summary>
+	/// Reads the slice's tiles (RadiusTiles × RadiusTiles, centered on the player)
+	/// from the shared <see cref="MapRenderer"/> into <see cref="_slice"/>. Each
+	/// tile is an O(1) lookup (the world pushed the chunk's 2D height+material
+	/// data), so reading the whole slice every frame is cheap — no scanning, no
+	/// budget. This is the "map just displays the world" data path. Writes go
+	/// through the slice's raw buffer (4 bytes/pixel) rather than per-pixel
+	/// SetPixel, to avoid the per-pixel binding marshaling cost.
+	/// </summary>
+	private void ReadSlice(MapRenderer renderer)
+	{
+		var palette = _world.Palette;
+		int size = RadiusTiles;
+		byte[] buf = _slice.GetData();
+		int row = size * 4;
+		for (int dz = 0; dz < size; dz++)
+		{
+			int wz = _sliceMinZ + dz;
+			int ro = dz * row;
+			for (int dx = 0; dx < size; dx++)
+			{
+				int wx = _sliceMinX + dx;
+				var c = renderer.GetTileColor(wx, wz, palette);
+				int o = ro + dx * 4;
+				buf[o] = (byte)(c.R * 255f);
+				buf[o + 1] = (byte)(c.G * 255f);
+				buf[o + 2] = (byte)(c.B * 255f);
+				buf[o + 3] = 255;
+			}
 		}
 	}
 

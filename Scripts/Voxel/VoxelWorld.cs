@@ -583,6 +583,128 @@ public partial class VoxelWorld : Node3D
 
 	public VoxelMaterialPalette Palette { get; private set; } = null!;
 
+	// ------------------------------------------------------------------
+	// Map data push (the map is a pure display of the world's 2D height data)
+	// ------------------------------------------------------------------
+
+	// The shared map data store (the MapRenderer), owned by the WaypointManager
+	// node (group "waypoint_manager"). Lazily resolved — the world pushes each
+	// chunk's 2D height+material data to it as chunks generate / get edited, and
+	// the minimap / map window only ever READ from it (they never scan the world).
+	private UI.MapRenderer _mapRenderer;
+
+	/// <summary>
+	/// Lazily resolves the shared map data store (the MapRenderer) from the
+	/// WaypointManager node. Returns null when there is no map system (e.g. the
+	/// scene is a headless world with no UI), in which case all map pushes are
+	/// no-ops.
+	///
+	/// When the renderer is first resolved (the world may have generated several
+	/// chunks before the WaypointManager's _Ready ran and created the renderer),
+	/// we push the 2D data for every ALREADY-loaded, data-ready chunk so the map
+	/// isn't blank for the area around the spawn point.
+	/// </summary>
+	private UI.MapRenderer MapRenderer
+	{
+		get
+		{
+			if (_mapRenderer == null && IsInsideTree())
+			{
+				var mgr = GetTree()?.GetFirstNodeInGroup("waypoint_manager") as UI.WaypointManager;
+				_mapRenderer = mgr?.Renderer;
+				if (_mapRenderer != null)
+				{
+					// First successful resolve: backfill the map with the data for
+					// every chunk that is already loaded and data-ready (chunks
+					// generated before the renderer existed were never pushed).
+					foreach (var kv in _chunks)
+					{
+						if (kv.Value.DataReady)
+						{
+							PushChunkToMap(kv.Value);
+						}
+					}
+				}
+			}
+			return _mapRenderer;
+		}
+	}
+
+	/// <summary>
+	/// Computes a chunk's 2D map data (16×16 surface height + topmost material)
+	/// from its voxel data and PUSHES it to the shared map store. Called the
+	/// moment a chunk finishes generating (<see cref="OnGenerationComplete"/>) —
+	/// this is the main data path. Scans each column top-down for the first solid
+	/// voxel (the surface) — done ONCE per chunk at generation, not per-frame.
+	/// </summary>
+	private void PushChunkToMap(VoxelChunk chunk)
+	{
+		var map = MapRenderer;
+		if (map == null || chunk == null || chunk.Data == null)
+		{
+			return;
+		}
+		int size = UI.ChunkMapData.Size;
+		var data = chunk.Data;
+		int height = data.SizeY;
+		var heights = new int[size * size];
+		var materials = new byte[size * size];
+		for (int lz = 0; lz < size; lz++)
+		{
+			for (int lx = 0; lx < size; lx++)
+			{
+				int i = lz * size + lx;
+				// Scan top-down for the first solid voxel in this column. World Y
+				// == local Y (chunks start at Y=0; chunk.Coord is the XZ index).
+				int surfY = -1;
+				byte mat = 0;
+				for (int y = height - 1; y >= 0; y--)
+				{
+					byte m = data.Get(lx, y, lz);
+					if (m != VoxelMaterialIds.Air)
+					{
+						surfY = y;
+						mat = m;
+						break;
+					}
+				}
+				heights[i] = surfY;
+				materials[i] = mat;
+			}
+		}
+		map.SetChunk(chunk.Coord, heights, materials);
+	}
+
+	/// <summary>
+	/// Pushes a single edited tile to the map. Called from <see cref="SetVoxel"/>
+	/// when a player edit changes a column's surface. Recomputes just that one
+	/// column (top-down scan) and writes it. A no-op when the chunk isn't loaded
+	/// or has no map data yet (it will be pushed whole when generation completes).
+	/// </summary>
+	private void PushEditedTileToMap(VoxelChunk chunk, int lx, int lz)
+	{
+		var map = MapRenderer;
+		if (map == null || chunk == null || chunk.Data == null)
+		{
+			return;
+		}
+		var data = chunk.Data;
+		int height = data.SizeY;
+		int surfY = -1;
+		byte mat = 0;
+		for (int y = height - 1; y >= 0; y--)
+		{
+			byte m = data.Get(lx, y, lz);
+			if (m != VoxelMaterialIds.Air)
+			{
+				surfY = y;
+				mat = m;
+				break;
+			}
+		}
+		map.SetTile(chunk.Coord, lx, lz, surfY, mat);
+	}
+
 	/// <summary>
 	/// The per-section light engine (the instant-edit light path). Chunks sample
 	/// this for per-vertex light; the full rebuild re-bakes its section fields.
@@ -4144,6 +4266,12 @@ public partial class VoxelWorld : Node3D
 				System.Math.Max(_instantEditMax.Y, local.Y),
 				System.Math.Max(_instantEditMax.Z, local.Z));
 		}
+
+		// Map: this edit may have changed the column's surface (a voxel placed on
+		// top, or the topmost voxel broken). Recompute and push just this one tile
+		// to the shared map store (a no-op when the chunk has no map data yet — it
+		// is pushed whole when generation completes). Cheap: one top-down scan.
+		PushEditedTileToMap(chunk, lx, lz);
 	}
 
 	/// <summary>
@@ -4322,6 +4450,15 @@ public partial class VoxelWorld : Node3D
 		// mesh-gated spawn wait short (see BoostSpawnNeighbourhoodPriority).
 		// No-op once the player has spawned.
 		BoostSpawnNeighbourhoodPriority();
+
+		// Map: push this chunk's 2D height+material data to the shared map store
+		// so the minimap / map window can display it. Done LAST, after all the
+		// data modifications above (saved edits, canopy overhangs, hives) so the
+		// pushed data reflects the chunk's final voxel state. The map only
+		// displays what the world hands it — it never scans the world. This is a
+		// one-time cost per chunk (16×16 columns, each a top-down scan), not a
+		// per-frame cost — this is what keeps the map from tanking the framerate.
+		PushChunkToMap(current);
 	}
 
 	/// <summary>
@@ -4381,6 +4518,9 @@ public partial class VoxelWorld : Node3D
 		// re-open that edge at the boundary.
 		MarkNeighboursForRebuild(coord);
 		_chunks.Remove(coord);
+		// Map: drop this chunk's 2D data so stale terrain doesn't linger on the
+		// minimap / map window once the chunk is gone.
+		MapRenderer?.RemoveChunk(coord);
 		// Drop any pending generation-queue entry for this coord so it can be
 		// re-enqueued if it is still in range. The next EnqueueSpiralRing /
 		// PumpGenerationQueue pass (which sorts by the live player position)

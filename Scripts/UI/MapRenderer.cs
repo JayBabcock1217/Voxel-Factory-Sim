@@ -35,20 +35,80 @@ public readonly struct Waypoint
 }
 
 /// <summary>
-/// The shared map SERVICES that back BOTH the minimap and the full map window:
-///   - the player's WAYPOINT store (add / remove / restore / save), and
-///   - the TERRAIN COLORING (a world tile → its topmost material's color, with a
-///     height-relief shade for a 2.5D look).
+/// The 2D map data for ONE world chunk (ChunkSizeXZ × ChunkSizeXZ tiles): the
+/// surface height (Y of the topmost solid voxel) and the topmost material id for
+/// each column. -1 height = no solid voxel (void). This is the "2D height data"
+/// the world PUSHES to the map the moment a chunk finishes generating (see
+/// <see cref="VoxelWorld.OnGenerationComplete"/>) — the map never scans the world
+/// itself, it only displays what the world hands it.
 ///
-/// It deliberately does NOT own a persistent terrain image. The minimap and the
-/// map window each sample their OWN visible region directly from the live
-/// <see cref="VoxelWorld"/> (via <see cref="SampleRegion"/>), spread over a
-/// per-frame budget. This is simpler and more robust than a shared image window:
-/// there is no "re-center" bookkeeping that can desync from the player and leave
-/// the visible area unsampled (which is exactly what made the map render empty).
-/// Sampling a tile is one <see cref="VoxelWorld.GetSurfaceHeight"/> + one
-/// <see cref="VoxelWorld.GetVoxel"/> (both cheap, chunk-backed), and the budget
-/// keeps the per-frame cost small and the fill-in smooth.
+/// The two parallel arrays are indexed [z * Size + x] (row-major, x = fast axis).
+/// </summary>
+public sealed class ChunkMapData
+{
+	/// <summary>
+	/// The chunk's tile count per axis (16×16). MUST match
+	/// <see cref="VoxelWorld.ChunkSizeXZ"/> (an instance property defaulting to 16,
+	/// which the degenerate-fix in <c>VoxelWorld</c> snaps back to 16, so it is
+	/// effectively a constant). A compile-time const here lets the map data use
+	/// fixed-size arrays without querying a live world instance.
+	/// </summary>
+	public const int Size = 16;
+
+	/// <summary>Surface height per tile (Y of topmost solid voxel), or -1 for void. Indexed [z*Size+x].</summary>
+	public readonly int[] Heights = new int[Size * Size];
+
+	/// <summary>Topmost material id per tile (0 = air/void). Indexed [z*Size+x].</summary>
+	public readonly byte[] Materials = new byte[Size * Size];
+
+	public void Clear()
+	{
+		for (int i = 0; i < Heights.Length; i++)
+		{
+			Heights[i] = -1;
+		}
+	}
+
+	/// <summary>
+	/// Writes one tile. <paramref name="x"/>,<paramref name="z"/> are chunk-local
+	/// (0..Size-1). Called by the world when a column's surface changes (generation
+	/// or an edit).
+	/// </summary>
+	public void SetTile(int x, int z, int height, int material)
+	{
+		if (x < 0 || x >= Size || z < 0 || z >= Size)
+		{
+			return;
+		}
+		int i = z * Size + x;
+		Heights[i] = height;
+		Materials[i] = (byte)material;
+	}
+}
+
+/// <summary>
+/// The SHARED MAP DATA STORE that backs BOTH the minimap and the full map window.
+/// It is the single source of truth for what the map shows, so the two views can
+/// never disagree.
+///
+/// ARCHITECTURE (push-based — see the breakdown in the PR / commit notes):
+///   1. The world computes each chunk's 2D height+material data ONCE, the moment
+///      the chunk finishes generating (<see cref="VoxelWorld.OnGenerationComplete"/>)
+///      and on every edit (<see cref="VoxelWorld.SetVoxel"/>), and PUSHES it here
+///      via <see cref="SetChunk"/> / <see cref="SetTile"/>.
+///   2. The minimap and map window NEVER scan the world. They simply read
+///      <see cref="GetTileColor"/> for each visible tile (an O(1) dictionary +
+///      array lookup) and blit the pixels. There is no per-frame
+///      GetSurfaceHeight scan, no budget, no dirty-chunk tracking — the map is a
+///      pure DISPLAY of the data the world handed it.
+///
+/// This is what fixes the 40fps: the old design scanned up to ChunkHeight (256)
+/// voxels per visible tile, every frame, for BOTH the minimap and the full map.
+/// Now the per-tile cost is a single dictionary lookup + two array reads + one
+/// multiply-add for the height shade.
+///
+/// Also owns the player's WAYPOINT store (add / remove / restore / save), shared
+/// by both views.
 /// </summary>
 public partial class MapRenderer : RefCounted
 {
@@ -66,98 +126,114 @@ public partial class MapRenderer : RefCounted
 	public event System.Action WaypointsChanged;
 
 	// ------------------------------------------------------------------
-	// Terrain sampling
+	// Terrain data (pushed by the world)
 	// ------------------------------------------------------------------
 
-	/// <summary>The color of an "unknown" tile (terrain not loaded / sampled yet).</summary>
+	/// <summary>The color of an "unknown" tile (chunk not yet generated / pushed).</summary>
 	public static readonly Color UnknownColor = new Color(0.07f, 0.08f, 0.10f, 1f);
 
-	/// <summary>
-	/// Samples a world XZ region directly from the live world, writing up to
-	/// <paramref name="budget"/> tiles this frame into <paramref name="dest"/>
-	/// (an image whose (0,0) corresponds to world (<paramref name="minX"/>,
-	/// <paramref name="minZ"/>)). Returns true when there are still unsampled
-	/// tiles in the region (the caller should keep calling next frame).
-	///
-	/// A tile's color comes from its topmost solid voxel: the material's texture
-	/// (averaged) or albedo tint, darkened by a height-relief shade. A column with
-	/// no solid voxel (void / unloaded chunk) is written as "unknown".
-	///
-	/// Tiles are sampled in an order that prioritizes the CENTER of the region
-	/// (where the player is) so the map fills in from the middle outward — the
-	/// player's immediate surroundings become visible first, rather than the map
-	/// appearing to fill from one corner (which read as "most of it is covered").
-	/// </summary>
-	public bool SampleRegion(VoxelWorld world, Image dest, int minX, int minZ, int budget)
-	{
-		if (world == null || dest == null)
-		{
-			return false;
-		}
-		int destW = dest.GetWidth();
-		int destH = dest.GetHeight();
-		int paletteCount = world.Palette?.MaterialCount ?? 0;
-		int sampled = 0;
+	/// <summary>Per-chunk 2D height+material data, keyed by chunk coord. Sparse (only pushed chunks).</summary>
+	private readonly Dictionary<Vector2I, ChunkMapData> _chunks = new();
 
-		// Sample rows in order of closeness to the center row, so the player's
-		// location (the image center) fills first. This keeps the per-frame cost
-		// identical to row-major but makes the map read as "filled" much faster.
-		int midZ = destH / 2;
-		var rowOrder = BuildCenterOutOrder(destH, midZ);
-		foreach (int dz in rowOrder)
+	/// <summary>
+	/// Replaces (or inserts) the 2D map data for a chunk. Called by the world when
+	/// a chunk finishes generating (a full 16×16 push) — this is the main data path.
+	/// </summary>
+	public void SetChunk(Vector2I coord, int[] heights, byte[] materials)
+	{
+		int size = ChunkMapData.Size;
+		if (heights == null || materials == null || heights.Length != size * size || materials.Length != size * size)
 		{
-			if (sampled >= budget)
-			{
-				break;
-			}
-			for (int dx = 0; dx < destW && sampled < budget; dx++)
-			{
-				int wx = minX + dx;
-				int wz = minZ + dz;
-				int surfaceY = world.GetSurfaceHeight(wx, wz);
-				Color color;
-				if (surfaceY < 0)
-				{
-					color = UnknownColor;
-				}
-				else
-				{
-					int mat = world.GetVoxel(wx, surfaceY, wz);
-					color = TerrainColor(mat, surfaceY, world, paletteCount);
-				}
-				dest.SetPixel(dx, dz, color);
-				sampled++;
-			}
+			return;
 		}
-		return sampled < destW * destH;
+		if (!_chunks.TryGetValue(coord, out ChunkMapData data))
+		{
+			data = new ChunkMapData();
+			_chunks[coord] = data;
+		}
+		// Bulk-copy the pushed arrays into the stored tile data.
+		System.Array.Copy(heights, data.Heights, size * size);
+		System.Array.Copy(materials, data.Materials, size * size);
 	}
 
-	/// <summary>Row indices ordered by closeness to the center row (nearest first).</summary>
-	private static int[] BuildCenterOutOrder(int count, int center)
+	/// <summary>
+	/// Updates a single tile of a chunk's map data. Called by the world when an
+	/// EDIT changes a column's surface (a voxel placed/broken). If the chunk has
+	/// no data yet (not generated), this is a no-op (it will be pushed whole when
+	/// generation completes).
+	/// </summary>
+	public void SetTile(Vector2I coord, int localX, int localZ, int height, int material)
 	{
-		var order = new int[count];
-		int idx = 0;
-		order[idx++] = center;
-		// Expand outward: center±1, center±2, ... until all rows are listed.
-		for (int d = 1; idx < count; d++)
+		if (_chunks.TryGetValue(coord, out ChunkMapData data))
 		{
-			int above = center - d;
-			if (above >= 0)
-			{
-				order[idx++] = above;
-			}
-			int below = center + d;
-			if (below < count)
-			{
-				order[idx++] = below;
-			}
+			data.SetTile(localX, localZ, height, material);
 		}
-		return order;
+	}
+
+	/// <summary>
+	/// Removes a chunk's map data (called by the world when a chunk is freed so
+	/// stale terrain doesn't linger on the map). A no-op when the chunk has no data.
+	/// </summary>
+	public void RemoveChunk(Vector2I coord)
+	{
+		_chunks.Remove(coord);
+	}
+
+	/// <summary>Drops ALL terrain data (world switch / new world). Waypoints are kept.</summary>
+	public void ClearTerrain()
+	{
+		_chunks.Clear();
+	}
+
+	/// <summary>
+	/// The display color for a world tile (O(1)). Looks up the chunk's pushed 2D
+	/// data and colors the tile by its topmost material + a height-relief shade.
+	/// Returns <see cref="UnknownColor"/> for tiles whose chunk hasn't been pushed
+	/// yet (not generated) or that are void.
+	/// </summary>
+	public Color GetTileColor(int wx, int wz, VoxelMaterialPalette palette)
+	{
+		int size = ChunkMapData.Size;
+		// Floor-divide into the chunk coord (matches VoxelWorld.ChunkCoordOf).
+		int cx = FloorDiv(wx, size);
+		int cz = FloorDiv(wz, size);
+		if (!_chunks.TryGetValue(new Vector2I(cx, cz), out ChunkMapData data))
+		{
+			return UnknownColor;
+		}
+		int lx = wx - cx * size;
+		int lz = wz - cz * size;
+		int i = lz * size + lx;
+		int h = data.Heights[i];
+		if (h < 0)
+		{
+			return UnknownColor;
+		}
+		return TileColor(data.Materials[i], h, palette);
+	}
+
+	// Floor division (matches the world's chunk-coord convention for negatives).
+	private static int FloorDiv(int a, int b)
+	{
+		int q = a / b;
+		if (a < 0 && a % b != 0)
+		{
+			q--;
+		}
+		return q;
 	}
 
 	// ------------------------------------------------------------------
 	// Coloring
 	// ------------------------------------------------------------------
+
+	// Per-material base color, cached (a material's texture/tint is static).
+	// Keyed by material id. Computed once per material.
+	private readonly Dictionary<int, Color> _baseColorCache = new();
+
+	// Per-texture cached average color (a texture is static; sampling its pixels
+	// once and reusing is far cheaper than re-reading every tile).
+	private readonly Dictionary<Texture2D, Color> _avgColorCache = new();
 
 	/// <summary>
 	/// The color for a terrain tile: the topmost material's albedo (texture-aware
@@ -166,32 +242,38 @@ public partial class MapRenderer : RefCounted
 	/// color is used when the material has one (so the map matches the terrain's
 	/// actual look, not just its tint).
 	/// </summary>
-	private Color TerrainColor(int materialId, int surfaceY, VoxelWorld world, int paletteCount)
+	private Color TileColor(int materialId, int surfaceY, VoxelMaterialPalette palette)
 	{
-		var palette = world.Palette;
 		if (palette == null || materialId <= 0)
 		{
 			return UnknownColor;
 		}
 
-		int slot = materialId - 1;
-		if (slot >= palette.Materials.Length)
-		{
-			return UnknownColor;
-		}
-
-		// Base color: the texture's average when present (the palette's tint is
-		// white for textured materials, so the tint alone wouldn't carry the
-		// texture's color); otherwise the material's albedo tint.
 		Color baseColor;
-		Texture2D tex = slot < palette.Textures.Length ? palette.Textures[slot] : null;
-		if (tex != null)
+		if (_baseColorCache.TryGetValue(materialId, out baseColor))
 		{
-			baseColor = AverageTextureColor(tex);
+			// Cache hit (fast path).
 		}
 		else
 		{
-			baseColor = slot < palette.Tints.Length ? palette.Tints[slot] : Colors.White;
+			int slot = materialId - 1;
+			if (slot >= palette.Materials.Length)
+			{
+				return UnknownColor;
+			}
+			// Base color: the texture's average when present (the palette's tint is
+			// white for textured materials, so the tint alone wouldn't carry the
+			// texture's color); otherwise the material's albedo tint.
+			Texture2D tex = slot < palette.Textures.Length ? palette.Textures[slot] : null;
+			if (tex != null)
+			{
+				baseColor = AverageTextureColor(tex);
+			}
+			else
+			{
+				baseColor = slot < palette.Tints.Length ? palette.Tints[slot] : Colors.White;
+			}
+			_baseColorCache[materialId] = baseColor;
 		}
 
 		// Height relief: normalize the surface height into a 0..1 shade and mix
@@ -205,10 +287,6 @@ public partial class MapRenderer : RefCounted
 			baseColor.B * shade,
 			1f);
 	}
-
-	// Per-texture cached average color (a texture is static; sampling its pixels
-	// once and reusing is far cheaper than re-reading every re-sample).
-	private readonly System.Collections.Generic.Dictionary<Texture2D, Color> _avgColorCache = new();
 
 	/// <summary>Average (downsampled) color of a texture, cached per texture.</summary>
 	private Color AverageTextureColor(Texture2D tex)
