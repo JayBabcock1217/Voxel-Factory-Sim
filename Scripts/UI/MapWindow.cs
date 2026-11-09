@@ -82,6 +82,15 @@ public partial class MapWindow : Node
 	private bool _placeMode;
 	private long _selectedWaypointId = -1;
 
+	/// <summary>
+	/// True while the map window is open. Exposed so other systems (notably the
+	/// <see cref="FactorySim.Voxel.VoxelTool"/> hotbar / world-input handler) can
+	/// know to SUSPEND their world input while the map has the mouse and the
+	/// player's attention — e.g. hotbar scrolling must not cycle the hotbar
+	/// while the map is open.
+	/// </summary>
+	public bool IsOpen => _open;
+
 	// View: the world tile at the CENTER of the panel, and pixels-per-tile zoom.
 	private Vector2 _viewCenter = new Vector2(0, 0);
 	private float _zoom = 3f;
@@ -319,16 +328,26 @@ public partial class MapWindow : Node
 		_panel.Size = new Vector2(w, h);
 		_panel.Position = new Vector2((vp.X - w) * 0.5f, (vp.Y - h) * 0.5f);
 
+		// The map rect is a plain child of the Panel (a Control, NOT a container),
+		// so SizeFlags.ExpandFill has no effect — it keeps its default (tiny) size
+		// and the map renders blank. Position and size it explicitly: below the
+		// header, filling the panel.
+		float headerH = 48f;
+		_mapRect.Position = new Vector2(0, headerH);
+		_mapRect.Size = new Vector2(_panel.Size.X, _panel.Size.Y - headerH);
+
+		// The name-input row sits under the map (hidden until placing).
+		_nameRow.Position = new Vector2(10, _panel.Size.Y - 56);
+		_nameRow.Size = new Vector2(_panel.Size.X - 20, 40);
+
 		// The list panel: a fixed-width column on the right edge of the map.
 		float listW = 260f;
-		_listPanel.Position = new Vector2(_panel.Size.X - listW - 10, 48);
-		_listPanel.Size = new Vector2(listW, _panel.Size.Y - 96);
+		_listPanel.Position = new Vector2(_panel.Size.X - listW - 10, headerH + 8);
+		_listPanel.Size = new Vector2(listW, _panel.Size.Y - headerH - 16);
 
 		// Resize the display image to the map rect's actual size.
-		float mapW = _mapRect.Size.X;
-		float mapH = _mapRect.Size.Y;
-		_displayW = Mathf.Max(8, (int)mapW);
-		_displayH = Mathf.Max(8, (int)mapH);
+		_displayW = Mathf.Max(8, (int)_mapRect.Size.X);
+		_displayH = Mathf.Max(8, (int)_mapRect.Size.Y);
 		if (_displayImage == null || _displayImage.GetWidth() != _displayW || _displayImage.GetHeight() != _displayH)
 		{
 			_displayImage = Image.CreateEmpty(_displayW, _displayH, false, Image.Format.Rgba8);

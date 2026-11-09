@@ -39,16 +39,22 @@ public partial class Minimap : Node
 	[Export] public int MarginPx { get; set; } = 12;
 
 	/// <summary>
-	/// How many world tiles the circle spans at its widest (the map's zoom).
-	/// Each tile is (DiameterPx / RadiusTiles) px on screen.
+	/// The width (in world tiles) of the square terrain slice that the circle is
+	/// cut out of. It must be LARGER than the circle's diameter (in tiles) so the
+	/// circle always fits inside sampled terrain with a margin — otherwise the
+	/// circle's diagonal edges read past the slice and show as dark "unknown"
+	/// (which is what made the map look "covered"). The circle's radius in tiles
+	/// is (DiameterPx/2) / (DiameterPx/RadiusTiles) = RadiusTiles/2, so a value
+	/// ~50% larger than needed (RadiusTiles ≈ 1.5 × DiameterPx/tile) is safe.
 	/// </summary>
-	[Export] public int RadiusTiles { get; set; } = 64;
+	[Export] public int RadiusTiles { get; set; } = 96;
 
 	/// <summary>
 	/// How many terrain tiles to sample per frame (spread out so the fill-in is
-	/// smooth). Higher = faster fill-in, more per-frame cost.
+	/// smooth). Higher = faster fill-in, more per-frame cost. The sample order is
+	/// center-out, so the player's surroundings fill first even at this budget.
 	/// </summary>
-	[Export] public int SampleBudgetPerFrame { get; set; } = 512;
+	[Export] public int SampleBudgetPerFrame { get; set; } = 1024;
 
 	// ------------------------------------------------------------------
 	// State
@@ -185,16 +191,20 @@ public partial class Minimap : Node
 		}
 		else
 		{
-			// Keep the slice centered on the player. When the origin moves, reset
-			// the slice to unknown so the new region samples fresh (no stale data
-			// from the old location). A small threshold avoids resetting (and a
-			// brief blank) on sub-tile jitter.
-			int wantMinX = px - RadiusTiles / 2;
-			int wantMinZ = pz - RadiusTiles / 2;
-			if (wantMinX != _sliceMinX || wantMinZ != _sliceMinZ)
+			// Keep the player roughly centered WITHOUT resetting the slice on
+			// every tile of movement. Resetting to "unknown" on each tile would
+			// make the map perpetually re-fill (and look dark/covered) while the
+			// player walks. Instead, re-center (and clear) only when the player
+			// has drifted more than RecenterFraction of the slice width away from
+			// the current slice center — between re-centers we just keep the
+			// already-sampled terrain and top up any newly-revealed tiles.
+			int recenterDist = Mathf.Max(4, RadiusTiles / 4);
+			int sliceCenterX = _sliceMinX + RadiusTiles / 2;
+			int sliceCenterZ = _sliceMinZ + RadiusTiles / 2;
+			if (Mathf.Abs(px - sliceCenterX) > recenterDist || Mathf.Abs(pz - sliceCenterZ) > recenterDist)
 			{
-				_sliceMinX = wantMinX;
-				_sliceMinZ = wantMinZ;
+				_sliceMinX = px - RadiusTiles / 2;
+				_sliceMinZ = pz - RadiusTiles / 2;
 				_slice.Fill(MapRenderer.UnknownColor);
 			}
 		}

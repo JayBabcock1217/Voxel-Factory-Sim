@@ -741,7 +741,10 @@ public partial class VoxelTool : Node3D
 		// rather than IsActionJustPressed, so each scroll tick cycles exactly
 		// once — IsActionJustPressed is frame-based and could fire for more than
 		// one input event in the same frame.
-		if (!InventoryOpen)
+		// World input (hotbar scroll, machine-rotation keys) is suspended while
+		// the inventory OR the full map window is open — both take over the mouse
+		// and the player's attention, so these controls must not fire.
+		if (!InventoryOpen && !MapWindowOpen)
 		{
 			if (@event is InputEventMouseButton wheel && wheel.Pressed)
 			{
@@ -929,6 +932,21 @@ public partial class VoxelTool : Node3D
 		{
 			ResolveServices();
 			return _inventory != null && _inventory.IsOpen;
+		}
+	}
+
+	/// <summary>
+	/// True while the full map window (toggled with M) is open. When the map is
+	/// open it has taken over the mouse and the player's attention, so world
+	/// input (hotbar scroll, machine-rotation keys, etc.) must be SUSPENDED —
+	/// the same way it is suspended while the inventory is open.
+	/// </summary>
+	private bool MapWindowOpen
+	{
+		get
+		{
+			var map = GetTree()?.GetFirstNodeInGroup("map_window") as UI.MapWindow;
+			return map != null && map.IsOpen;
 		}
 	}
 

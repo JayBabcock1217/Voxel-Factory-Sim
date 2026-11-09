@@ -82,6 +82,11 @@ public partial class MapRenderer : RefCounted
 	/// A tile's color comes from its topmost solid voxel: the material's texture
 	/// (averaged) or albedo tint, darkened by a height-relief shade. A column with
 	/// no solid voxel (void / unloaded chunk) is written as "unknown".
+	///
+	/// Tiles are sampled in an order that prioritizes the CENTER of the region
+	/// (where the player is) so the map fills in from the middle outward — the
+	/// player's immediate surroundings become visible first, rather than the map
+	/// appearing to fill from one corner (which read as "most of it is covered").
 	/// </summary>
 	public bool SampleRegion(VoxelWorld world, Image dest, int minX, int minZ, int budget)
 	{
@@ -93,8 +98,18 @@ public partial class MapRenderer : RefCounted
 		int destH = dest.GetHeight();
 		int paletteCount = world.Palette?.MaterialCount ?? 0;
 		int sampled = 0;
-		for (int dz = 0; dz < destH && sampled < budget; dz++)
+
+		// Sample rows in order of closeness to the center row, so the player's
+		// location (the image center) fills first. This keeps the per-frame cost
+		// identical to row-major but makes the map read as "filled" much faster.
+		int midZ = destH / 2;
+		var rowOrder = BuildCenterOutOrder(destH, midZ);
+		foreach (int dz in rowOrder)
 		{
+			if (sampled >= budget)
+			{
+				break;
+			}
 			for (int dx = 0; dx < destW && sampled < budget; dx++)
 			{
 				int wx = minX + dx;
@@ -115,6 +130,29 @@ public partial class MapRenderer : RefCounted
 			}
 		}
 		return sampled < destW * destH;
+	}
+
+	/// <summary>Row indices ordered by closeness to the center row (nearest first).</summary>
+	private static int[] BuildCenterOutOrder(int count, int center)
+	{
+		var order = new int[count];
+		int idx = 0;
+		order[idx++] = center;
+		// Expand outward: center±1, center±2, ... until all rows are listed.
+		for (int d = 1; idx < count; d++)
+		{
+			int above = center - d;
+			if (above >= 0)
+			{
+				order[idx++] = above;
+			}
+			int below = center + d;
+			if (below < count)
+			{
+				order[idx++] = below;
+			}
+		}
+		return order;
 	}
 
 	// ------------------------------------------------------------------
