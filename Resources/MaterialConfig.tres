@@ -1,20 +1,19 @@
 [gd_resource type="Resource" script_class="VoxelMaterialConfig" format=3 uid="uid://ua4uxttj6sjk"]
 
 [ext_resource type="Script" uid="uid://mb6etibithmm" path="res://Scripts/Voxel/VoxelMaterialConfig.cs" id="1_cfg"]
-[ext_resource type="Texture2D" uid="uid://cxohq1jg5d1ew" path="res://Textures/SBS - Tiny Texture Pack - 128x128/128x128/Grass/Grass_04-128x128.png" id="1_dtx1w"]
+[ext_resource type="Texture2D" uid="uid://cw0anxruh77ck" path="res://Textures/Retro/Grass/Grass_01/Grass_01_basecolor.png" id="1_ibkv2"]
+[ext_resource type="Texture2D" uid="uid://ck3dx5dqes0q5" path="res://Textures/Retro/Grass/Grass_03/Grass_03_basecolor.png" id="1_ku7w7"]
 [ext_resource type="Script" uid="uid://b8hcjeljed3uf" path="res://Scripts/Voxel/VoxelMaterialDef.cs" id="2_def"]
 [ext_resource type="Script" uid="uid://c72oygqcv8vd0" path="res://Scripts/Voxel/VoxelMaterialEntry.cs" id="3_entry"]
-[ext_resource type="Texture2D" uid="uid://b66i0jw14cynm" path="res://Textures/SBS - Tiny Texture Pack 2 - 128x128/128x128/Dirt/Dirt_01-128x128.png" id="4_g15el"]
-[ext_resource type="Texture2D" uid="uid://dte2vc40ja4l" path="res://Textures/SBS - Tiny Texture Pack 2 - 128x128/128x128/Stone/Stone_07-128x128.png" id="5_ibkv2"]
-[ext_resource type="Texture2D" uid="uid://twyb06gvh3b1" path="res://Textures/SBS - Tiny Texture Pack 2 - 128x128/128x128/Stone/Stone_11-128x128.png" id="6_pff2r"]
-[ext_resource type="Texture2D" uid="uid://ckseqinm5iy0b" path="res://Textures/SBS - Tiny Texture Pack - 128x128/128x128/Wood/Wood_01-128x128.png" id="7_u7ytl"]
-[ext_resource type="Texture2D" uid="uid://lk1m853b8x8m" path="res://Textures/SBS - Tiny Texture Pack 2 - 128x128/128x128/Stone/Stone_09-128x128.png" id="8_ku7w7"]
-[ext_resource type="Texture2D" uid="uid://dw3i1ppsh87fq" path="res://Textures/SBS - Tiny Texture Pack 2 - 128x128/128x128/Dirt/Dirt_11-128x128.png" id="9_ke2uw"]
+[ext_resource type="Texture2D" uid="uid://dihnrcxipkfkm" path="res://Textures/Retro/Sand/Sand_01/Sand_01_basecolor.png" id="6_sand1"]
+[ext_resource type="Texture2D" uid="uid://csxn7kx4p6yri" path="res://Textures/Retro/Rock/Rock_01/Rock_01_basecolor.png" id="7_cavest"]
+[ext_resource type="Texture2D" uid="uid://cf1kswv5awpf3" path="res://Textures/Retro/Rocky/Rocky_01/Rocky_01_basecolor.png" id="8_rock1"]
+[ext_resource type="Texture2D" uid="uid://brv1d61jm3gr7" path="res://Textures/Retro/Rock/Rock_02/Rock_02_basecolor.png" id="10_stone1"]
 
 [sub_resource type="Resource" id="entry1"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.45, 0.68, 0.35, 1)
-Texture = ExtResource("1_dtx1w")
+Texture = ExtResource("1_ku7w7")
 SpecularAmount = 0.0
 
 [sub_resource type="Resource" id="def1"]
@@ -26,7 +25,6 @@ Entry = SubResource("entry1")
 [sub_resource type="Resource" id="entry2"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.48, 0.35, 0.23, 1)
-Texture = ExtResource("4_g15el")
 
 [sub_resource type="Resource" id="def2"]
 script = ExtResource("2_def")
@@ -37,7 +35,7 @@ Entry = SubResource("entry2")
 [sub_resource type="Resource" id="entry3"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.55, 0.57, 0.6, 1)
-Texture = ExtResource("5_ibkv2")
+Texture = ExtResource("10_stone1")
 
 [sub_resource type="Resource" id="def3"]
 script = ExtResource("2_def")
@@ -48,7 +46,7 @@ Entry = SubResource("entry3")
 [sub_resource type="Resource" id="entry4"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.34, 0.31, 0.29, 1)
-Texture = ExtResource("6_pff2r")
+Texture = ExtResource("7_cavest")
 
 [sub_resource type="Resource" id="def4"]
 script = ExtResource("2_def")
@@ -59,7 +57,6 @@ Entry = SubResource("entry4")
 [sub_resource type="Resource" id="entry5"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.4, 0.28, 0.16, 1)
-Texture = ExtResource("7_u7ytl")
 
 [sub_resource type="Resource" id="def5"]
 script = ExtResource("2_def")
@@ -70,6 +67,7 @@ Entry = SubResource("entry5")
 [sub_resource type="Resource" id="entry6"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.16, 0.45, 0.22, 1)
+Texture = ExtResource("1_ibkv2")
 
 [sub_resource type="Resource" id="def6"]
 script = ExtResource("2_def")
@@ -80,7 +78,7 @@ Entry = SubResource("entry6")
 [sub_resource type="Resource" id="entry7"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.62, 0.58, 0.52, 1)
-Texture = ExtResource("8_ku7w7")
+Texture = ExtResource("8_rock1")
 
 [sub_resource type="Resource" id="def7"]
 script = ExtResource("2_def")
@@ -101,7 +99,7 @@ Entry = SubResource("entry8")
 [sub_resource type="Resource" id="entry9"]
 script = ExtResource("3_entry")
 AlbedoColor = Color(0.85, 0.78, 0.55, 1)
-Texture = ExtResource("9_ke2uw")
+Texture = ExtResource("6_sand1")
 
 [sub_resource type="Resource" id="def9"]
 script = ExtResource("2_def")

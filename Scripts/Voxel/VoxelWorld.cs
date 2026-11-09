@@ -470,12 +470,19 @@ public partial class VoxelWorld : Node3D
 	[ExportGroup("Materials")]
 	/// <summary>
 	/// Per-material appearance (color, texture, transparency, metallic, roughness,
-	/// emission). Assign a <see cref="VoxelMaterialConfig"/> resource here (create
-	/// one in the FileSystem dock, right-click it to Save as a .tres, then edit
-	/// each material's Entry — including its Texture — in the inspector). When a
-	/// material's Entry has a Texture set, that same texture is used both on the
-	/// terrain AND as the item icon in the inventory / hotbar / crafting UI.
-	/// Leaving it unset falls back to a freshly built default config.
+	/// emission). THIS IS THE SINGLE SOURCE OF TRUTH for materials: assign the
+	/// <see cref="VoxelMaterialConfig"/> .tres here (in Main.tscn it is
+	/// <c>res://Resources/MaterialConfig.tres</c>). To change a material's texture,
+	/// open that .tres (or select the VoxelWorld node and expand this property),
+	/// pick a material, and set its <c>Entry &gt; Texture</c> — that same texture
+	/// is used on the terrain AND as the item icon in the inventory / hotbar /
+	/// crafting UI. Edits made in the editor's inspector are persisted back to the
+	/// .tres by <see cref="SaveMaterialConfig"/>; at runtime, <see
+	/// cref="BackfillKnownMaterials"/> adds any newly-introduced special materials
+	/// (torch, hive, ...) that an older file is missing, and <see
+	/// cref="VoxelMaterialConfig.SanitizeTextures"/> drops broken texture
+	/// references. The in-memory <c>= new()</c> default is only a fallback when
+	/// the export is left unset.
 	/// </summary>
 	[Export]
 	public VoxelMaterialConfig MaterialConfig { get; set; } = new();
@@ -551,6 +558,17 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	[Export(PropertyHint.Range, "1,8,1")]
 	public int HiveRadius { get; set; } = 2;
+
+	/// <summary>
+	/// No NEW hives generate within this many CHUNKS (Chebyshev distance) of the
+	/// player's spawn point. This keeps the area around where the player starts
+	/// hive-free (no immediate zombie pressure on a fresh world). Saved hives
+	/// are still restored (the save is authoritative); only the deterministic
+	/// fresh placement is gated. 0 disables the exclusion (hives can generate
+	/// anywhere the density roll lands).
+	/// </summary>
+	[Export(PropertyHint.Range, "0,512,1")]
+	public int HiveSpawnExclusionChunks { get; set; } = 64;
 
 	/// <summary>
 	/// The scene instantiated for each hive's functional node (the
@@ -850,6 +868,10 @@ public partial class VoxelWorld : Node3D
 	// is "the" neighbourhood, even before the first chunk loads.
 	private Vector3 _spawnAnchor = Vector3.Zero;
 
+	// The chunk the player spawns in (Chebyshev reference for the hive spawn
+	// exclusion). Computed from _spawnAnchor on first use; -1,-1 until set.
+	private Vector2I _spawnChunk = new(-1, -1);
+
 	/// <summary>
 	/// Every voxel the player has edited this session, keyed by world voxel
 	/// (latest value wins). This is the persistence layer: <c>SetVoxel</c> is
@@ -1032,12 +1054,34 @@ public partial class VoxelWorld : Node3D
 		// default MaterialConfig (no textures). Seed MaterialConfigPath with it so the
 		// next run loads a real file the user can edit (textures, colors, ...). Only
 		// seed when the export is the empty in-memory default (Materials has no entries)
-		// — the SAME rule as BiomeConfig above. If the export already points at a saved
-		// .tres (the user's edits, possibly with textures), it is NOT touched: re-writing
-		// it from the in-memory default here would silently wipe the user's textures.
+		// — the SAME rule as BiomeConfig above.
+		//
+		// IMPORTANT: if the export is left UNSET in the scene (no MaterialConfig
+		// line), the C# field initializer `= new()` hands us an in-memory default
+		// that is NOT empty (the constructor seeds the code defaults), so the
+		// empty check above can never catch it. Writing that default to
+		// MaterialConfigPath would silently overwrite the user's .tres (their
+		// textures included). To stay safe, seed ONLY when we can prove the export
+		// was actually assigned: the loaded resource's own path matches the export
+		// path. When the export is unset, fall back to explicitly loading the .tres
+		// (if it exists) instead of the code default.
 		if (MaterialConfig != null && (MaterialConfig.Materials == null || MaterialConfig.Materials.Length == 0))
 		{
 			SaveMaterialConfig();
+		}
+		else if (MaterialConfig != null && MaterialConfig.ResourcePath != MaterialConfigPath)
+		{
+			// The in-memory default (or a config from somewhere else) is in use.
+			// Prefer the user's saved file: load it when it exists, keep the code
+			// default when it does not (a fresh project with nothing saved yet).
+			if (FileAccess.FileExists(MaterialConfigPath))
+			{
+				if (ResourceLoader.Load<VoxelMaterialConfig>(MaterialConfigPath) is { } saved)
+				{
+					GD.Print($"[VoxelWorld] MaterialConfig export was not assigned in the scene — loading the saved config from {MaterialConfigPath}.");
+					SetMaterialConfig(saved);
+				}
+			}
 		}
 
 		// A "New World" session carries a user-chosen seed published by the main
@@ -1092,6 +1136,36 @@ public partial class VoxelWorld : Node3D
 		if (MaterialConfig != null && MaterialConfig.BackfillKnownMaterials())
 		{
 			SaveMaterialConfig();
+		}
+
+		// Drop any material texture reference that is not a real Texture2D (a
+		// broken/disposed resource, or a bare Resource placeholder from a .tres
+		// whose texture image was missing at load time). Left in place, the
+		// engine's property bridge throws InvalidCastException when it re-sets
+		// the property. Clearing it makes the material fall back to its flat
+		// color for THIS run.
+		//
+		// Deliberately NOT persisted: the .tres keeps pointing at the (missing)
+		// texture path, so restoring the file brings the texture back on the
+		// next run. Re-saving a sanitized config here was a data-loss bug — it
+		// rewrote the .tres with every texture assignment stripped, so the
+		// config permanently "reset to defaults" after each play session.
+		if (MaterialConfig != null)
+		{
+			MaterialConfig.SanitizeTextures();
+			// TEMP DIAGNOSTIC: log the config's origin + each material's texture
+			// state at startup so a missing texture is visible in the console
+			// (remove after verifying).
+			GD.Print($"[MatDiag] config origin: {MaterialConfig.ResourcePath} (export path: {MaterialConfigPath})");
+			foreach (var def in MaterialConfig.Materials ?? System.Array.Empty<VoxelMaterialDef>())
+			{
+				if (def?.Entry == null)
+				{
+					continue;
+				}
+				var t = def.Entry.Texture;
+				GD.Print($"[MatDiag] id={def.Id} name='{def.Name}' texture={(t == null ? "NULL" : (t is Texture2D ? "Texture2D(" + t.ResourcePath + ")" : t.GetClass() + "(" + t.ResourcePath + ")"))}");
+			}
 		}
 
 		// Apply the material config once, then follow live inspector edits.
@@ -3081,7 +3155,38 @@ public partial class VoxelWorld : Node3D
 		{
 			return false;
 		}
+		// Spawn exclusion: no fresh hives within HiveSpawnExclusionChunks of the
+		// player's spawn chunk. This only gates the DETERMINISTIC fresh placement
+		// (the save path in TryPlaceHiveInChunk restores hives unconditionally),
+		// so a saved world keeps its hives even if one happens to sit near spawn.
+		if (HiveSpawnExclusionChunks > 0 && IsWithinSpawnExclusion(chunkCoord))
+		{
+			return false;
+		}
 		return HiveRoll(chunkCoord) == 0;
+	}
+
+	/// <summary>
+	/// True when <paramref name="chunkCoord"/> is within <see
+	/// cref="HiveSpawnExclusionChunks"/> (Chebyshev distance) of the player's
+	/// spawn chunk. The spawn chunk is derived from <see cref="_spawnAnchor"/>
+	/// (the player's scene position) on first use and cached. When the anchor
+	/// is unset (Vector3.Zero) or the exclusion is 0, this returns false (no
+	/// exclusion).
+	/// </summary>
+	private bool IsWithinSpawnExclusion(Vector2I chunkCoord)
+	{
+		if (_spawnChunk.X < 0)
+		{
+			// Derive the spawn chunk from the anchor. The anchor is the player's
+			// scene position (world units); convert to a chunk coordinate.
+			int sx = Mathf.FloorToInt(_spawnAnchor.X / VoxelSize);
+			int sz = Mathf.FloorToInt(_spawnAnchor.Z / VoxelSize);
+			_spawnChunk = ChunkCoordOf(sx, sz);
+		}
+		int dx = System.Math.Abs(chunkCoord.X - _spawnChunk.X);
+		int dz = System.Math.Abs(chunkCoord.Y - _spawnChunk.Y);
+		return System.Math.Max(dx, dz) <= HiveSpawnExclusionChunks;
 	}
 
 	/// <summary>
@@ -3546,9 +3651,10 @@ public partial class VoxelWorld : Node3D
 		foreach (VoxelChunk chunk in _chunks.Values)
 		{
 			TerrainGenerator.Generate(chunk.Data, chunk.Coord.X * ChunkSizeXZ, chunk.Coord.Y * ChunkSizeXZ, _config, _chunks);
-			// Apply any overhang voxels queued for this chunk, then re-mesh it and
-			// its 8 neighbours (an overhang may have landed in a neighbour buffer).
-			TerrainGenerator.DrainOverhangs(chunk.Coord, chunk.Data);
+			// Apply any overhang voxels queued for this chunk (authoritative
+			// re-drain-until-stable, main thread), then re-mesh it and its 8
+			// neighbours (an overhang may have landed in a neighbour buffer).
+			TerrainGenerator.ReDrainOverhangsUntilStable(chunk.Coord, chunk.Data);
 			chunk.NeedsMesh = true;
 			MarkNeighboursForRebuild(chunk.Coord);
 		}
@@ -4165,10 +4271,11 @@ public partial class VoxelWorld : Node3D
 
 		// A neighbour's foliage stage may have queued canopy-overhang voxels for
 		// THIS chunk (it was still generating when they ran). Apply any that are
-		// left — the own chunk's foliage stage already drained once, so this
-		// second pass only catches a cross-chunk race where a neighbour queued
-		// just after. If anything landed, the chunk needs a mesh rebuild.
-		if (TerrainGenerator.DrainOverhangs(coord, current.Data))
+		// left — re-draining until stable under the per-chunk lock so a voxel
+		// queued a hair later by a concurrent neighbour is NOT lost (the old
+		// single destructive drain dropped those, rendering a half tree). If
+		// anything landed, the chunk needs a mesh rebuild.
+		if (TerrainGenerator.ReDrainOverhangsUntilStable(coord, current.Data))
 		{
 			current.NeedsMesh = true;
 			current.EditPriority = ++_editPriorityCounter;
@@ -4267,41 +4374,49 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// Gives a collision shape to chunks within <see cref="CollisionRadiusChunks"/> of
-	/// the player and clears it from the rest.
+	/// Gives a collision shape to EVERY full-res (full LOD) chunk — i.e. every
+	/// chunk within <see cref="RenderDistanceChunks"/> (Chebyshev) of the player.
+	/// Chunks beyond the full-res area are LOD heightfields (no voxel collision)
+	/// and are never touched here.
 	///
-	/// Incremental: only the chunks inside the collision radius can possibly have
-	/// collision enabled, so only they are touched each frame. The per-frame work is
-	/// O(radius²) — a constant ~49 chunks — instead of O(loaded chunks), which at a
-	/// 16-chunk render distance was ~580 chunks and (with the per-chunk NeedsMesh
-	/// property read crossing the Godot binding) cost ~13 ms/frame. Far chunks are
-	/// left as-is (they stay disabled) and are only re-enabled when they enter the
-	/// radius or are freed (FreeChunk → MarkNeighboursForRebuild path).
+	/// Why the full-res area and not a smaller radius: AI entities (zombies)
+	/// spawn on hives anywhere in the full-res area, and the player can walk the
+	/// full-res area. Giving the WHOLE full-res area live collision means any
+	/// entity on any full-res chunk can collide with the ground. The cost is a
+	/// larger Jolt body count (every sub-cell in the full-res area gets a body),
+	/// but <see cref="SetCollisionEnabled"/>/<see cref="VoxelChunk.SetSubCellCollisionEnabled"/>
+	/// are idempotent (they bail when the state is unchanged), so the per-frame
+	/// cost is the O(area²) loop of property reads — a constant ~625 chunks at a
+	/// 12-chunk render distance — not a re-attach of every body.
+	///
+	/// The loop covers the full-res square [-(R), +(R)] around the player chunk,
+	/// which is exactly the set of chunks that exist in <see cref="_chunks"/>
+	/// (LOD chunks are separate and never collide).
 	/// </summary>
 	private void UpdateLocalCollision(Vector2I playerChunk)
 	{
-		for (int dx = -CollisionRadiusChunks; dx <= CollisionRadiusChunks; dx++)
+		int r = RenderDistanceChunks;
+		for (int dx = -r; dx <= r; dx++)
 		{
-			for (int dz = -CollisionRadiusChunks; dz <= CollisionRadiusChunks; dz++)
+			for (int dz = -r; dz <= r; dz++)
 			{
 				if (!_chunks.TryGetValue(playerChunk + new Vector2I(dx, dz), out VoxelChunk chunk))
 				{
 					continue;
 				}
 
-				// A near chunk always has collision ON: either it's within the
-				// radius (the whole point) or it was just rebuilt and is still
-				// flagged NeedsMesh (the player must never stand on invisible
-				// ground while its mesh/collision is in flight).
+				// Every full-res chunk has collision ON. This is what lets the
+				// player and any AI entity collide with the ground anywhere in
+				// the full-res area (not just within a small radius of the player).
 				chunk.SetCollisionEnabled(true);
 
 				if (SubCellMeshing)
 				{
 					// Sub-cell mode: attach each sub-cell's built shape to a live
-					// body (created lazily, only for in-radius chunks) so the
-					// player collides with the sub-cell terrain. This is the
-					// per-frame body gate that keeps the total Jolt body count
-					// under the cap — far chunks' sub-cells stay body-less.
+					// body so entities collide with the sub-cell terrain. The body
+					// is created lazily (only for sub-cells with geometry) and the
+					// attach is idempotent, so this is cheap on the steady-state
+					// frames where nothing has changed.
 					chunk.SetSubCellCollisionEnabled(true);
 				}
 			}

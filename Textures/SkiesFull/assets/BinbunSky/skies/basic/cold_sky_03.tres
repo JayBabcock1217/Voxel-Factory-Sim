@@ -1,0 +1,6 @@
+[gd_resource type="Sky" format=3 uid="uid://c5h302ivvoojk"]
+
+[ext_resource type="Material" uid="uid://cco6ihtta4xkh" path="res://assets/BinbunSky/src/material/basic/cold_material_03.tres" id="1_u5fxo"]
+
+[resource]
+sky_material = ExtResource("1_u5fxo")

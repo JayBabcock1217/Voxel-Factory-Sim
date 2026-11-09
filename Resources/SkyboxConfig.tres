@@ -1,0 +1,8 @@
+[gd_resource type="Resource" script_class="SkyboxConfig" format=3 uid="uid://ehruevcxtx3t"]
+
+[ext_resource type="Sky" uid="uid://b6suoc36s3v1m" path="res://Textures/SkiesFull/assets/BinbunSky/skies/basic/warm_sky_01.tres" id="1_y0608"]
+[ext_resource type="Script" uid="uid://dj1gn26w0g76k" path="res://Scripts/SkyboxConfig.cs" id="cskyboxcfg01"]
+
+[resource]
+script = ExtResource("cskyboxcfg01")
+DaySky = ExtResource("1_y0608")

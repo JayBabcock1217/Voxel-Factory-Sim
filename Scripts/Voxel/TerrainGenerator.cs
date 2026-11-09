@@ -443,12 +443,31 @@ public static class TerrainGenerator
 	/// A chunk's foliage stage writes its trees' overhang into loaded neighbours
 	/// immediately; a neighbour that is still generating can't be written into,
 	/// so the voxel is queued here instead. When that neighbour finishes
-	/// generating, <see cref="DrainOverhangs"/> applies the queued voxels to its
-	/// now-ready buffer. This is the "queue a modification for when that chunk
-	/// gets generated" half of the border-overhang fix.
+	/// generating, the main-thread <see cref="ReDrainOverhangsUntilStable"/>
+	/// applies the queued voxels to its now-ready buffer. This is the "queue a
+	/// modification for when that chunk gets generated" half of the
+	/// border-overhang fix.
 	/// </summary>
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<
 		Vector2I, System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>> _pendingOverhangs = new();
+
+	/// <summary>
+	/// Per-chunk serial lock guarding a chunk's overhang DRAIN. The drain runs on
+	/// the MAIN thread (see <c>VoxelWorld.OnGenerationComplete</c>) and holds this
+	/// lock for its whole duration, so the main-thread drain of a chunk is atomic
+	/// with respect to every gen-thread append AND with the gen-thread
+	/// "drain-and-restore" below — none of them can interleave and drop a voxel.
+	/// Keyed by chunk coord; created on first use.
+	/// </summary>
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<Vector2I, object> _overhangDrainLocks = new();
+
+	/// <summary>Gets (or creates) the serial drain lock for <paramref name="coord"/>.</summary>
+	private static object OverhangDrainLock(Vector2I coord)
+	{
+		// GetOrAdd — NOT the indexer: the ConcurrentDictionary indexer (get_Item)
+		// throws KeyNotFoundException on a missing key instead of creating it.
+		return _overhangDrainLocks.GetOrAdd(coord, _ => new object());
+	}
 
 	/// <summary>
 	/// Places foliage (trees, cacti) using the bounded worker pool. The 256
@@ -492,24 +511,38 @@ public static class TerrainGenerator
 
 		// Apply any overhang voxels that earlier chunks queued for THIS chunk
 		// (their neighbours were still generating when they ran). The own buffer
-		// is now fully built, so these writes land in the correct terrain. (The
-		// world drains again on completion to catch a cross-chunk race.)
+		// is now fully built, so these writes land in the correct terrain. This is
+		// a NON-destructive drain-and-restore: it never removes the queue entry, so
+		// a concurrent append from a neighbouring chunk can't be lost. The
+		// authoritative destructive re-drain (which clears the queue) runs on the
+		// main thread in VoxelWorld.OnGenerationComplete.
 		var ownCoord = new Vector2I(FloorDiv(wx0, sx), FloorDiv(wz0, sz));
-		DrainOverhangs(ownCoord, chunk);
+		DrainOverhangsForOwnStage(ownCoord, chunk);
 	}
 
 	/// <summary>
-	/// Apply every overhang voxel queued for <paramref name="coord"/> into the
-	/// <paramref name="chunk"/> buffer (air voxels only), then clear the queue
-	/// entry. Returns <c>true</c> when at least one voxel was applied (so the
-	/// caller knows the chunk needs a mesh rebuild). Called from the chunk's own
-	/// foliage stage (generation thread) and again from the world on generation
-	/// completion (main thread) to catch a cross-chunk race where a neighbour
-	/// queued its overhang just after this chunk's stage had already drained.
+	/// Apply the overhang voxels currently queued for <paramref name="coord"/>
+	/// into the <paramref name="chunk"/> buffer (air voxels only), WITHOUT
+	/// removing the queue entry. Returns <c>true</c> when at least one voxel was
+	/// applied.
+	///
+	/// This is the NON-destructive half of the overhang pipeline. The destructive
+	/// "re-drain-until-stable" pass (which atomically clears the queue entry) runs
+	/// on the MAIN thread under the per-chunk drain lock (see
+	/// <c>VoxelWorld.OnGenerationComplete</c>), which is the only correct place to
+	/// drop a queued voxel: the main thread is the single writer that finalises a
+	/// chunk's data, so once it has re-drained with nothing new landing, no
+	/// voxel is left behind. A generation thread must NEVER remove a queue entry
+	/// (the old destructive <c>DrainOverhangs</c> raced with a concurrent append
+	/// from another chunk's foliage stage and dropped those voxels forever).
+	///
+	/// The gen-thread caller (a chunk's own foliage stage) uses
+	/// <see cref="DrainOverhangsForOwnStage"/> instead, which wraps this in a
+	/// drain-and-restore so it is also non-destructive.
 	/// </summary>
-	public static bool DrainOverhangs(Vector2I coord, ChunkData chunk)
+	private static bool DrainInto(Vector2I coord, ChunkData chunk)
 	{
-		if (!_pendingOverhangs.TryRemove(coord, out var bag))
+		if (!_pendingOverhangs.TryGetValue(coord, out var bag))
 			return false;
 		bool applied = false;
 		foreach (var v in bag)
@@ -525,6 +558,96 @@ public static class TerrainGenerator
 			}
 		}
 		return applied;
+	}
+
+	/// <summary>
+	/// Non-destructive overhang drain used by a chunk's OWN foliage stage (the
+	/// generation thread). It applies the queued voxels for <paramref name="coord"/>
+	/// into the <paramref name="chunk"/> buffer, then RESTORES the (now applied)
+	/// bag to the queue so the authoritative main-thread re-drain (on generation
+	/// completion) still sees them. Because the queue entry is never removed, a
+	/// concurrent append from a neighbouring chunk's foliage stage can never be
+	/// lost: the worst case is that a voxel is applied twice (idempotent — a
+	/// second write into a now-solid voxel is a no-op).
+	///
+	/// Holding the per-chunk drain lock during the drain-and-restore serialises it
+	/// with the main-thread drain and with any other gen-thread drain-and-restore
+	/// for the same chunk, so the restore can never drop a voxel another thread
+	/// just applied.
+	/// </summary>
+	public static void DrainOverhangsForOwnStage(Vector2I coord, ChunkData chunk)
+	{
+		var bag = _pendingOverhangs.TryGetValue(coord, out var b) ? b : null;
+		if (bag == null) return;
+
+		object lockObj = OverhangDrainLock(coord);
+		lock (lockObj)
+		{
+			// Re-fetch in case the entry was replaced while we were waiting on the
+			// lock (another drain-and-restore for this chunk ran first).
+			if (!_pendingOverhangs.TryGetValue(coord, out bag))
+				return;
+			foreach (var v in bag)
+			{
+				if (v.Y < 0 || v.Y >= chunk.SizeY) continue;
+				int lx = v.X - coord.X * chunk.SizeX;
+				int lz = v.Z - coord.Y * chunk.SizeZ;
+				if (lx < 0 || lx >= chunk.SizeX || lz < 0 || lz >= chunk.SizeZ) continue;
+				if (chunk.Get(lx, v.Y, lz) == 0)
+					chunk.Set(lx, v.Y, lz, v.Material);
+			}
+			// Restore the applied bag so the main-thread re-drain still sees it.
+			_pendingOverhangs[coord] = bag;
+		}
+	}
+
+	/// <summary>
+	/// AUTHORITATIVE overhang drain: run on the MAIN thread when a chunk's data
+	/// becomes ready (see <c>VoxelWorld.OnGenerationComplete</c>). It holds the
+	/// chunk's per-chunk drain lock for the whole operation and RE-DRAINS the
+	/// queued voxels into <paramref name="chunk"/> until a pass applies nothing
+	/// NEW — i.e. until no voxel is left in the queue for this chunk that still
+	/// lands in air. Then it removes the (now fully-applied) queue entry.
+	///
+	/// Why re-drain-until-stable under a lock: a neighbouring chunk's foliage stage
+	/// may queue a voxel for this chunk at any moment, even after the first drain
+	/// pass. The old single destructive drain could clear the queue right before
+	/// such an append landed, losing the voxel forever (the tree then rendered
+	/// only in its own chunk — a "half tree" across a chunk border). Re-draining
+	/// until a pass changes nothing, while holding the lock, guarantees that by the
+	/// time the entry is removed, every voxel queued up to that instant has been
+	/// applied. A voxel queued a hair LATER is caught by this chunk's next rebuild
+	/// (the neighbour that queued it calls MarkNeighboursForRebuild on the chunk
+	/// it finished, and the budget loop re-runs this drain on that rebuild).
+	///
+	/// Returns <c>true</c> when at least one voxel was applied across the passes
+	/// (so the caller knows the chunk needs a mesh rebuild).
+	/// </summary>
+	public static bool ReDrainOverhangsUntilStable(Vector2I coord, ChunkData chunk)
+	{
+		object lockObj = OverhangDrainLock(coord);
+		lock (lockObj)
+		{
+			bool any = false;
+			while (true)
+			{
+				if (!DrainInto(coord, chunk))
+				{
+					break; // nothing queued (or nothing that lands in air) -> stable
+				}
+				any = true;
+				// A pass applied >=1 voxel. Drain again: if a concurrent append
+				// landed since the last read, it will now be applied; if not, the
+				// next pass reads an empty bag and breaks.
+			}
+			// Stable: clear the queue entry. Safe because we hold the lock — no
+			// gen-thread drain-and-restore or main-thread drain can interleave and
+			// drop a voxel. (A gen-thread PutVoxel append that misses this window
+			// re-creates the entry and is caught by a later rebuild, per the
+			// method summary.)
+			_pendingOverhangs.TryRemove(coord, out _);
+			return any;
+		}
 	}
 
 	/// <summary>
@@ -582,9 +705,9 @@ public static class TerrainGenerator
 		// existing voxel. Resolve the owning chunk per voxel so the instance
 		// can spill across chunk borders. A neighbour that is loaded but still
 		// generating can't be written into yet, so its voxel is QUEUED and
-		// applied when that neighbour finishes (DrainOverhangs). A chunk that
-		// is not loaded at all is dropped (it will generate fresh and its own
-		// foliage stage handles its rooted instances).
+		// applied when that neighbour finishes (ReDrainOverhangsUntilStable).
+		// A chunk that is not loaded at all is dropped (it will generate fresh
+		// and its own foliage stage handles its rooted instances).
 		void PutVoxel(int vx, int vy, int vz, byte mat)
 		{
 			if (vy < 0 || vy >= sy) return;
@@ -595,7 +718,7 @@ public static class TerrainGenerator
 			if (!ch.DataReady)
 			{
 				// Loaded but still generating: queue the voxel for that chunk
-				// (applied by DrainOverhangs once it finishes).
+				// (applied by the main-thread re-drain once it finishes).
 				_pendingOverhangs.AddOrUpdate(coord,
 					_ => new System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>(
 						new OverhangVoxel[] { new OverhangVoxel(vx, vy, vz, mat) }),

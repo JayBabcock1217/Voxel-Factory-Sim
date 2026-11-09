@@ -1799,7 +1799,7 @@ public partial class VoxelChunk : Node3D
 					_pendingBlockLit = pendingBlockLit;
 					_pendingSubCellBuild = true;
 					_pendingSubCells = results;
-					CallDeferred(nameof(ApplyBuildResult));
+					MarshalApplyBuildResult();
 					return;
 				}
 
@@ -1826,8 +1826,9 @@ public partial class VoxelChunk : Node3D
 				// CallDeferred resolves the method on THIS object (the chunk,
 				// where ApplyBuildResult lives) and runs it on the main thread
 				// next frame. Same pattern VoxelWorld.StartGeneration uses to
-				// marshal generation completion back.
-				CallDeferred(nameof(ApplyBuildResult));
+				// marshal generation completion back. The guarded marshal is a no-op
+				// if the chunk was freed while this build was in flight.
+				MarshalApplyBuildResult();
 			}
 			catch (Exception ex)
 			{
@@ -1836,7 +1837,7 @@ public partial class VoxelChunk : Node3D
 				// no-op result back so _meshBuild clears and the chunk can be
 				// retried.
 				GD.PushError($"[VoxelChunk] Mesh build failed for {Coord}: {ex}");
-				CallDeferred(nameof(ApplyBuildResult));
+				MarshalApplyBuildResult();
 			}
 		});
 	}
@@ -1987,6 +1988,25 @@ public partial class VoxelChunk : Node3D
 		}
 		_meshBuild = null;
 		_instantSatisfied = false;
+	}
+
+	/// <summary>
+	/// Marshals <see cref="ApplyBuildResult"/> back to the main thread, but ONLY
+	/// if this chunk is still alive in the scene tree. The async build runs on a
+	/// worker thread; if the chunk was freed (QueueFree) while the build was in
+	/// flight, the node is disposed and calling <c>CallDeferred</c> on it throws
+	/// <see cref="System.ObjectDisposedException"/>. Checking <c>IsInsideTree()</c>
+	/// from the worker thread is safe: a freed node's tree pointer is nulled, so
+	/// this reads false (no exception). When the chunk is gone there is nothing to
+	/// apply anyway — the mesh was never going to be shown.
+	/// </summary>
+	private void MarshalApplyBuildResult()
+	{
+		if (!IsInsideTree())
+		{
+			return; // chunk was freed while the build was in flight
+		}
+		CallDeferred(nameof(ApplyBuildResult));
 	}
 
 	/// <summary>

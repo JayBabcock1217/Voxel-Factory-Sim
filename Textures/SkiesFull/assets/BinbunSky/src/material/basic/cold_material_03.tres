@@ -1,0 +1,88 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://cco6ihtta4xkh"]
+
+[ext_resource type="Shader" uid="uid://kgjsu8n7pyom" path="res://assets/BinbunSky/src/shader/main.gdshader" id="1_2rgii"]
+
+[sub_resource type="Gradient" id="Gradient_2rgii"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_j5di2"]
+noise_type = 0
+seed = 4
+fractal_type = 2
+fractal_octaves = 6
+domain_warp_enabled = true
+domain_warp_type = 1
+domain_warp_amplitude = 15.0
+domain_warp_frequency = 0.02
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_tgxuq"]
+width = 1024
+height = 1024
+noise = SubResource("FastNoiseLite_j5di2")
+color_ramp = SubResource("Gradient_2rgii")
+seamless = true
+invert = true
+seamless_blend_skirt = 0.2
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_xci17"]
+noise_type = 2
+frequency = 0.008
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_t1hpd"]
+noise = SubResource("FastNoiseLite_xci17")
+seamless = true
+seamless_blend_skirt = 0.2
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_3x3r0"]
+noise_type = 2
+frequency = 0.05
+fractal_octaves = 1
+cellular_jitter = 0.8
+cellular_return_type = 6
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_6tsa8"]
+width = 1024
+height = 1024
+noise = SubResource("FastNoiseLite_3x3r0")
+seamless = true
+invert = true
+seamless_blend_skirt = 0.0
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_yy684"]
+frequency = 0.001
+fractal_type = 2
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_nj44f"]
+noise = SubResource("FastNoiseLite_yy684")
+seamless = true
+seamless_blend_skirt = 0.2
+
+[resource]
+shader = ExtResource("1_2rgii")
+shader_parameter/sky_day = Color(0.067642406, 0.36888668, 0.72944844, 1)
+shader_parameter/horizon_day = Color(0.7208256, 0.8490536, 0.9180683, 1)
+shader_parameter/horizon_sunset = Color(0.802443, 0.458757, 0.445403, 1)
+shader_parameter/sky_sunset = Color(0.195466, 0.255627, 0.368923, 1)
+shader_parameter/horizon_night = Color(0.136896, 0.158446, 0.20591, 1)
+shader_parameter/sky_night = Color(0.075202, 0.089561, 0.164068, 1)
+shader_parameter/day_night_mix = 1.0
+shader_parameter/use_directional_light = true
+shader_parameter/horizon_exponent = 8.0
+shader_parameter/sunset_amount_exponent = 1.0
+shader_parameter/night_amount_exponent = 4.0
+shader_parameter/cloud_tex_01 = SubResource("NoiseTexture2D_tgxuq")
+shader_parameter/cloud_tex_02 = SubResource("NoiseTexture2D_t1hpd")
+shader_parameter/cloud_color = Color(0.779787, 0.80223, 0.837441, 1)
+shader_parameter/cloud_tiling = Vector2(0.4, 0.4)
+shader_parameter/wind_speed = Vector2(0.05, 0.05)
+shader_parameter/cloud_density = 2.0000000298024
+shader_parameter/cloud_depth = -0.21
+shader_parameter/cloud_shape_exponent = 2.095
+shader_parameter/cloud_occlude_exponent = 1.3
+shader_parameter/night_noise_01 = SubResource("NoiseTexture2D_6tsa8")
+shader_parameter/night_noise_02 = SubResource("NoiseTexture2D_nj44f")
+shader_parameter/sun_scale = 0.05
+shader_parameter/sun_strength = 15.0
+shader_parameter/sun_color = Color(1, 0.878502, 0.579368, 1)
+shader_parameter/moon_scale = 0.03
+shader_parameter/moon_strength = 15.0
+shader_parameter/moon_color = Color(0.5, 0.55, 0.7, 1)

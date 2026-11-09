@@ -309,22 +309,24 @@ public partial class Zombie : CharacterBody3D
 		// 1. The chunk must be FULL-RES (within RenderDistanceChunks of the
 		//    player). Beyond that, the terrain is low-res LOD (heightfield, no
 		//    per-voxel collision) — a zombie can't stand on or path across LOD.
-		// 2. The sub-cell under the zombie must have a LIVE collision body with
-		//    a shape attached (the same ground-truth check the player's spawn
-		//    gate uses). This guarantees the ground actually collides on the
-		//    zombie's very first physics step. The body is only attached within
-		//    CollisionRadiusChunks of the player, so a zombie at a hive outside
-		//    that radius waits here until the player gets close — which is the
-		//    intended behaviour (hives are dormant outside the full-res area).
+		// 2. The sub-cell under the zombie must have a BUILT collision shape
+		//    (the chunk is MESHED). We check the built shape, NOT the live
+		//    physics body: the body is only attached within CollisionRadiusChunks
+		//    of the player, so a zombie at a distant hive (full-res but outside
+		//    the collision radius) would wait here forever if we required the
+		//    live body. A zombie standing on meshed terrain is fine — it walks
+		//    on the baked voxel geometry, and the live body will attach later if
+		//    the player approaches. The built shape exists as soon as the chunk
+		//    is meshed, regardless of collision radius.
 		bool fullRes = _world.IsFullResChunkAt(GlobalPosition);
-		bool liveCollision = _world.HasLiveCollisionAt(GlobalPosition);
-		if (!fullRes || !liveCollision)
+		bool builtCollision = _world.HasBuiltCollisionAt(GlobalPosition);
+		if (!fullRes || !builtCollision)
 		{
 			// Diagnostic: log once which gate is blocking activation.
 			if (!_warnedGate)
 			{
 				_warnedGate = true;
-				GD.PushWarning($"[Zombie] Spawn gate blocked at {GlobalPosition}: fullRes={fullRes}, liveCollision={liveCollision}, surfaceY={surfaceY}");
+				GD.PushWarning($"[Zombie] Spawn gate blocked at {GlobalPosition}: fullRes={fullRes}, builtCollision={builtCollision}, surfaceY={surfaceY}");
 			}
 			return; // chunk not ready yet; retry next frame
 		}

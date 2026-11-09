@@ -1,0 +1,43 @@
+[gd_resource type="ShaderMaterial" load_steps=9 format=3 uid="uid://bqclfq41x68kw"]
+
+[ext_resource type="Shader" uid="uid://jqrwa1d8fqbj" path="res://assets/BinbunGrass/src/shader/grass.gdshader" id="1_iyw5r"]
+[ext_resource type="Texture2D" uid="uid://crsuyt75pd5xb" path="res://assets/BinbunGrass/src/palette/palette_09.tres" id="2_ycdjh"]
+[ext_resource type="Texture2D" uid="uid://cei8iycqgphp7" path="res://assets/BinbunGrass/src/texture/pixel/grass_pixel_02_atlas.png" id="3_5xmb5"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_1bvp3"]
+seed = 6
+frequency = 0.008
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_lquwl"]
+seamless = true
+seamless_blend_skirt = 0.2
+noise = SubResource("FastNoiseLite_1bvp3")
+
+[sub_resource type="Gradient" id="Gradient_lquwl"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_lquwl"]
+noise_type = 0
+fractal_octaves = 3
+
+[sub_resource type="NoiseTexture2D" id="NoiseTexture2D_7mycd"]
+width = 1024
+height = 1024
+seamless = true
+seamless_blend_skirt = 0.2
+color_ramp = SubResource("Gradient_lquwl")
+noise = SubResource("FastNoiseLite_lquwl")
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_iyw5r")
+shader_parameter/billboard = true
+shader_parameter/shape_atlas = ExtResource("3_5xmb5")
+shader_parameter/use_atlas = true
+shader_parameter/noise_texture = SubResource("NoiseTexture2D_lquwl")
+shader_parameter/color_gradient = ExtResource("2_ycdjh")
+shader_parameter/random_variation = 0.0
+shader_parameter/wind_texture = SubResource("NoiseTexture2D_7mycd")
+shader_parameter/wind_velocity = Vector2(0, 0)
+shader_parameter/alpha_cut_start = 0.45
+shader_parameter/alpha_cut_end = 0.55
+shader_parameter/alpha_mode = 1
