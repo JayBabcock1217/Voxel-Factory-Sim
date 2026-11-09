@@ -54,11 +54,8 @@ public partial class MapWindow : Node
 	/// <summary>Initial zoom when the map opens.</summary>
 	[Export] public float InitialZoom { get; set; } = 3f;
 
-	/// <summary>How many dirty tiles the map window re-samples per frame while open.</summary>
+	/// <summary>How many terrain tiles the map window re-samples per frame while open.</summary>
 	[Export] public int SampleBudgetPerFrame { get; set; } = 600;
-
-	/// <summary>How often (seconds) the map window re-scans loaded chunks in view.</summary>
-	[Export] public float ChunkRescanIntervalSec { get; set; } = 0.5f;
 
 	// ------------------------------------------------------------------
 	// State
@@ -101,7 +98,6 @@ public partial class MapWindow : Node
 	// The list rows (rebuilt on waypoint change / open).
 	private readonly List<WaypointRow> _rows = new();
 
-	private float _lastChunkRescanSec;
 	private int _displayW;
 	private int _displayH;
 	private Vector2 _lastVp;
@@ -168,37 +164,12 @@ public partial class MapWindow : Node
 		var renderer = _manager.Renderer;
 		if (renderer == null)
 		{
-			// Make sure the renderer exists (the minimap may not have run first).
-			var px = (int)Mathf.Floor(_player.GlobalPosition.X);
-			var pz = (int)Mathf.Floor(_player.GlobalPosition.Z);
-			_manager.EnsureRenderer(128, px, pz);
-			renderer = _manager.Renderer;
-			if (renderer == null)
-			{
-				return;
-			}
+			return;
 		}
 
-		// Keep the shared renderer at least as large as the view needs (so the
-		// visible region is always within the image). The renderer is created
-		// centered on the player; if the player has walked far, we ensure it
-		// covers the current view by re-centering (a one-time cost when the view
-		// leaves the image).
-		EnsureRendererCoversView(renderer);
-
-		// Periodically scan the loaded chunks in the visible region and mark new
-		// ones dirty (so the map fills in as it pans / as chunks generate).
-		float t = (float)Time.GetTicksMsec() * 1e-3f;
-		if (t - _lastChunkRescanSec >= ChunkRescanIntervalSec)
-		{
-			_lastChunkRescanSec = t;
-			ScanVisibleChunks(renderer);
-		}
-
-		// Drain a budget of dirty tiles into the shared image.
-		renderer.SampleBudget(_world, SampleBudgetPerFrame);
-
-		// Rebuild the display (terrain + overlays) into the panel texture.
+		// Sample the visible region's terrain directly from the world (see
+		// RebuildDisplay). No shared image / dirty-chunk bookkeeping: the view is
+		// sampled fresh each frame, so it always matches what's actually loaded.
 		RebuildDisplay(renderer);
 	}
 
@@ -884,97 +855,56 @@ public partial class MapWindow : Node
 	}
 
 	// ------------------------------------------------------------------
-	// Chunk scanning + display rebuild
+	// Terrain cache + display rebuild
 	// ------------------------------------------------------------------
 
+	// The terrain cache: a tile image covering the visible world region (at the
+	// current zoom), filled incrementally from the live world (budget-limited).
+	private Image _terrainCache;
+	private int _terrainMinX;
+	private int _terrainMinZ;
+	private bool _terrainValid;
+
 	/// <summary>
-	/// Marks the loaded world chunks under the visible map region as dirty (so
-	/// they get sampled). The visible region in world tiles is
-	/// viewCenter ± (displaySize / 2) / zoom.
+	/// Samples the visible world region into <see cref="_terrainCache"/>
+	/// (budget-limited), creating / re-creating the cache when the view moves or
+	/// zooms. The cache's (0,0) is at world (<see cref="_terrainMinX"/>,
+	/// <see cref="_terrainMinZ"/>); it is sized to cover the view (with a small
+	/// margin), so the display just reads from it.
 	/// </summary>
-	private void ScanVisibleChunks(MapRenderer renderer)
+	private void UpdateTerrainCache(MapRenderer renderer)
 	{
 		if (_world == null)
 		{
 			return;
 		}
-		int chunkSize = _world.ChunkSizeXZ;
-		float halfW = _displayW / (2f * _zoom);
-		float halfH = _displayH / (2f * _zoom);
-		int minX = (int)Mathf.Floor(_viewCenter.X - halfW);
-		int maxX = (int)Mathf.Floor(_viewCenter.X + halfW);
-		int minZ = (int)Mathf.Floor(_viewCenter.Y - halfH);
-		int maxZ = (int)Mathf.Floor(_viewCenter.Y + halfH);
-		int cMinX = ChunkCoordOf(minX, chunkSize);
-		int cMaxX = ChunkCoordOf(maxX, chunkSize);
-		int cMinZ = ChunkCoordOf(minZ, chunkSize);
-		int cMaxZ = ChunkCoordOf(maxZ, chunkSize);
-		for (int cx = cMinX; cx <= cMaxX; cx++)
-		{
-			for (int cz = cMinZ; cz <= cMaxZ; cz++)
-			{
-				var c = new Vector2I(cx, cz);
-				if (_world.GetChunkData(c) != null)
-				{
-					renderer.MarkDirty(c);
-				}
-			}
-		}
-	}
+		int tileW = Mathf.CeilToInt(_displayW / _zoom) + 2;
+		int tileH = Mathf.CeilToInt(_displayH / _zoom) + 2;
+		int wantMinX = (int)Mathf.Floor(_viewCenter.X - _displayW / (2f * _zoom)) - 1;
+		int wantMinZ = (int)Mathf.Floor(_viewCenter.Y - _displayH / (2f * _zoom)) - 1;
 
-	private static int ChunkCoordOf(int world, int chunkSize)
-	{
-		int q = world / chunkSize;
-		if (world < 0 && world % chunkSize != 0)
+		bool sameView = _terrainValid && _terrainMinX == wantMinX && _terrainMinZ == wantMinZ
+			&& (_terrainCache == null || _terrainCache.GetWidth() >= tileW && _terrainCache.GetHeight() >= tileH);
+		if (!sameView)
 		{
-			q--;
+			// View moved / zoomed / resized: (re)create the cache covering the new
+			// region and mark it invalid (it fills in over the next few frames).
+			_terrainCache = Image.CreateEmpty(tileW, tileH, false, Image.Format.Rgba8);
+			_terrainCache.Fill(MapRenderer.UnknownColor);
+			_terrainMinX = wantMinX;
+			_terrainMinZ = wantMinZ;
+			_terrainValid = true;
 		}
-		return q;
+
+		// Fill the cache from the world, budget-limited.
+		renderer.SampleRegion(_world, _terrainCache, _terrainMinX, _terrainMinZ, SampleBudgetPerFrame);
 	}
 
 	/// <summary>
-	/// Ensures the shared renderer's image covers the current visible region. If
-	/// the player has walked far enough that the view is outside the image, the
-	/// renderer is re-centered on the view (a one-time resample). This keeps the
-	/// minimap's image valid too (it reads the same image).
-	/// </summary>
-	private void EnsureRendererCoversView(MapRenderer renderer)
-	{
-		float halfW = _displayW / (2f * _zoom);
-		float halfH = _displayH / (2f * _zoom);
-		int needMinX = (int)Mathf.Floor(_viewCenter.X - halfW) - 2;
-		int needMaxX = (int)Mathf.Floor(_viewCenter.X + halfW) + 2;
-		int needMinZ = (int)Mathf.Floor(_viewCenter.Y - halfH) - 2;
-		int needMaxZ = (int)Mathf.Floor(_viewCenter.Y + halfH) + 2;
-
-		int imgMinX = renderer.MinX;
-		int imgMaxX = renderer.MinX + renderer.Size;
-		int imgMinZ = renderer.MinZ;
-		int imgMaxZ = renderer.MinZ + renderer.Size;
-
-		bool covers = needMinX >= imgMinX && needMaxX <= imgMaxX && needMinZ >= imgMinZ && needMaxZ <= imgMaxZ;
-		if (!covers)
-		{
-			// The view has moved outside the image. Re-create the renderer just
-			// large enough to cover the current view, centered on it. The image
-			// resets to "unknown" and ScanVisibleChunks + SampleBudget resample
-			// the new region (the minimap resamples it too, since it shares the
-			// image). Size = the needed span (min 128), so the view fits.
-			int span = Mathf.Max(needMaxX - needMinX, needMaxZ - needMinZ);
-			int size = Mathf.Max(128, span + 4);
-			int center = (needMinX + needMaxX) / 2;
-			int centerZ = (needMinZ + needMaxZ) / 2;
-			if (_manager != null)
-			{
-				_manager.EnsureRenderer(size, center, centerZ);
-			}
-		}
-	}
-
-	/// <summary>
-	/// Rebuilds the panel's display image: blits the visible slice of the shared
-	/// terrain image (scaled by zoom) and draws the overlays (player, zombies,
-	/// hives, waypoints, selection highlight).
+	/// Rebuilds the panel's display image: samples the visible world region into
+	/// the terrain cache (budget-limited), blits it (scaled by zoom) into the
+	/// display, and draws the overlays (player, zombies, hives, waypoints,
+	/// selection highlight).
 	/// </summary>
 	private void RebuildDisplay(MapRenderer renderer)
 	{
@@ -982,19 +912,22 @@ public partial class MapWindow : Node
 		{
 			return;
 		}
-		var src = renderer.Image;
+		UpdateTerrainCache(renderer);
+		var src = _terrainCache;
+		if (src == null)
+		{
+			return;
+		}
 		int sw = src.GetWidth();
 		int sh = src.GetHeight();
 		float cx = _displayW * 0.5f;
 		float cy = _displayH * 0.5f;
 
-		// Direct buffer access (fast; no per-pixel marshaling). The shared
-		// image and the display are both Rgba8, so 4 bytes per pixel.
+		// Direct buffer access (fast; no per-pixel marshaling). Both the cache
+		// and the display are Rgba8, so 4 bytes per pixel.
 		byte[] srcBuf = src.GetData();
 		byte[] dstBuf = _displayImage.GetData();
-		int srcRow = sw * 4;
-		int dstRow = _displayW * 4;
-		byte uR = 18, uG = 20, uB = 26, uA = 255; // "unknown" tile color (0.07,0.08,0.10)
+		byte uR = 18, uG = 20, uB = 26, uA = 255; // "unknown" tile color
 
 		for (int sy = 0; sy < _displayH; sy++)
 		{
@@ -1003,8 +936,8 @@ public partial class MapWindow : Node
 				// Screen pixel → world tile (at the current zoom).
 				int tx = (int)Mathf.Floor(_viewCenter.X + (sx - cx) / _zoom);
 				int tz = (int)Mathf.Floor(_viewCenter.Y + (sy - cy) / _zoom);
-				int ix = tx - renderer.MinX;
-				int iz = tz - renderer.MinZ;
+				int ix = tx - _terrainMinX;
+				int iz = tz - _terrainMinZ;
 				int o = (sy * _displayW + sx) * 4;
 				if (ix >= 0 && ix < sw && iz >= 0 && iz < sh)
 				{

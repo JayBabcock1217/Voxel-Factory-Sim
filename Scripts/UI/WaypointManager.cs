@@ -5,10 +5,11 @@ using FactorySim.Voxel;
 namespace FactorySim.UI;
 
 /// <summary>
-/// The in-memory owner of the player's map waypoints and the shared
-/// <see cref="MapRenderer"/>. A single <see cref="Node"/> hosted in the gameplay
-/// scene (<c>Scenes/Main.tscn</c>) — it is the one object that both the minimap
-/// and the map window draw from, so the two views can never disagree.
+/// The in-memory owner of the shared <see cref="MapRenderer"/> (the waypoint
+/// store + terrain-coloring service). A single <see cref="Node"/> hosted in the
+/// gameplay scene (<c>Scenes/Main.tscn</c>) — it is the one object that both the
+/// minimap and the map window draw from, so the two views share the same
+/// waypoints and the same terrain colors.
 ///
 /// Lifecycle:
 ///   - The world restores saved waypoints into the renderer once the player is
@@ -16,62 +17,32 @@ namespace FactorySim.UI;
 ///     <see cref="RestoreWaypoints"/>).
 ///   - The save system reads the renderer's waypoint list when collecting a
 ///     snapshot (see <see cref="WorldSave.CollectSnapshot"/>).
-///   - The map window adds/removes waypoints through the renderer (delegated
-///     here for the world / save to call).
+///   - The minimap / map window sample terrain directly from the world (via
+///     <see cref="MapRenderer.SampleRegion"/>) and draw their own display images.
 ///
-/// The renderer is created in <see cref="_Ready"/> centered on the world origin;
-/// the minimap (which runs first) calls <see cref="EnsureRenderer"/> to make it
-/// exists and to (re)center it on the player's spawn area when the world is
-/// ready.
+/// The renderer is created in <see cref="_Ready"/> (it is stateless about the
+/// terrain — only the waypoint list and a texture-color cache live in it).
 /// </summary>
 [GlobalClass]
 public partial class WaypointManager : Node
 {
-	/// <summary>The shared terrain renderer + waypoint store (created in _Ready).</summary>
+	/// <summary>The shared waypoint store + terrain-coloring service.</summary>
 	public MapRenderer Renderer { get; private set; }
 
 	/// <summary>Raised whenever the waypoint set changes (delegated from the renderer).</summary>
 	public event System.Action WaypointsChanged;
 
-	/// <summary>Raised whenever the renderer's terrain texture is re-sampled.</summary>
-	public event System.Action TextureUpdated;
-
-	/// <summary>
-	/// Creates (or returns) the shared <see cref="MapRenderer"/>, centering it on
-	/// <paramref name="centerX"/>,<paramref name="centerZ"/> and the given
-	/// <paramref name="size"/> tiles. Re-creating when the center/size changes
-	/// resets the image to "unknown" (the world's dirty-chunk marks then
-	/// re-sample it). Idempotent when the params are unchanged.
-	/// </summary>
-	public MapRenderer EnsureRenderer(int size, int centerX, int centerZ)
+	public override void _Ready()
 	{
-		// Idempotent: return the existing renderer when it already covers the
-		// requested region (so the minimap's per-frame call is a no-op and the
-		// image — and its sampled pixels — are preserved). Only (re)create when
-		// the region is NOT covered, which resets the image to "unknown" and
-		// triggers a re-sample (the deliberate "re-center" case).
-		int needMinX = centerX - size / 2;
-		int needMinZ = centerZ - size / 2;
-		if (Renderer != null)
-		{
-			bool covers =
-				needMinX >= Renderer.MinX &&
-				needMinX + size <= Renderer.MinX + Renderer.Size &&
-				needMinZ >= Renderer.MinZ &&
-				needMinZ + size <= Renderer.MinZ + Renderer.Size;
-			if (covers)
-			{
-				return Renderer;
-			}
-		}
-		var r = new MapRenderer(size, centerX, centerZ);
-		r.TextureUpdated += OnRendererTextureUpdated;
-		r.WaypointsChanged += OnRendererWaypointsChanged;
-		Renderer = r;
-		return r;
+		// Both the minimap and the map window find this node by group, so
+		// register it (matching the project's code-side AddToGroup pattern used
+		// for the "player" and "voxel_world" groups).
+		AddToGroup("waypoint_manager");
+
+		Renderer = new MapRenderer();
+		Renderer.WaypointsChanged += OnRendererWaypointsChanged;
 	}
 
-	private void OnRendererTextureUpdated() => TextureUpdated?.Invoke();
 	private void OnRendererWaypointsChanged() => WaypointsChanged?.Invoke();
 
 	/// <summary>
@@ -86,4 +57,12 @@ public partial class WaypointManager : Node
 	/// <summary>Builds the save-form list from the renderer (used by the save system).</summary>
 	public List<WorldSaveFile.WaypointRecord> ToSaveRecords()
 		=> Renderer?.ToSaveRecords() ?? new List<WorldSaveFile.WaypointRecord>();
+
+	public override void _ExitTree()
+	{
+		if (Renderer != null)
+		{
+			Renderer.WaypointsChanged -= OnRendererWaypointsChanged;
+		}
+	}
 }

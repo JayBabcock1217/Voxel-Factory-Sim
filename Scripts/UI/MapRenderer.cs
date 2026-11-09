@@ -35,59 +35,23 @@ public readonly struct Waypoint
 }
 
 /// <summary>
-/// The shared terrain-map renderer + waypoint store that backs BOTH the
-/// minimap and the full map window.
+/// The shared map SERVICES that back BOTH the minimap and the full map window:
+///   - the player's WAYPOINT store (add / remove / restore / save), and
+///   - the TERRAIN COLORING (a world tile → its topmost material's color, with a
+///     height-relief shade for a 2.5D look).
 ///
-/// Terrain is sampled from the live <see cref="VoxelWorld"/> and baked into a
-/// small <see cref="Image"/> (one pixel per world tile) that is shown as an
-/// <see cref="ImageTexture"/>. This is the performance core of the feature:
-///   - the map is an N×N image, NOT per-tile mesh / quads (no thousands of
-///     draw calls);
-///   - sampling a tile is one <see cref="VoxelWorld.GetVoxel"/> + one
-///     <see cref="VoxelWorld.GetSurfaceHeight"/> — cheap;
-///   - chunks are generated in a RING around the player, so the map fills in
-///     outward naturally; and
-///   - we do NOT re-sample every frame. We keep a dirty set of chunks and, when
-///     it is non-empty, re-sample ONLY the affected tiles, spread over a small
-///     per-frame budget (a few hundred tiles) so the fill-in is smooth and never
-///     hitches.
-///
-/// The image is shared: the minimap and the map window both display the SAME
-/// <see cref="ImageTexture"/> (the minimap crops/rotates it around the player,
-/// the map window scrolls/zooms it). A single source of truth means the two
-/// views can never disagree about the terrain.
-///
-/// Waypoints live here too (the store is the same object both UIs draw). The
-/// <see cref="WaypointManager"/> node feeds the saved set in on load; the map
-/// window adds/removes live ones. Every change raises <see cref="WaypointsChanged"/>.
+/// It deliberately does NOT own a persistent terrain image. The minimap and the
+/// map window each sample their OWN visible region directly from the live
+/// <see cref="VoxelWorld"/> (via <see cref="SampleRegion"/>), spread over a
+/// per-frame budget. This is simpler and more robust than a shared image window:
+/// there is no "re-center" bookkeeping that can desync from the player and leave
+/// the visible area unsampled (which is exactly what made the map render empty).
+/// Sampling a tile is one <see cref="VoxelWorld.GetSurfaceHeight"/> + one
+/// <see cref="VoxelWorld.GetVoxel"/> (both cheap, chunk-backed), and the budget
+/// keeps the per-frame cost small and the fill-in smooth.
 /// </summary>
 public partial class MapRenderer : RefCounted
 {
-	// ------------------------------------------------------------------
-	// Image / world parameters
-	// ------------------------------------------------------------------
-
-	/// <summary>Image width/height in tiles (the map is square).</summary>
-	public int Size { get; }
-
-	/// <summary>World X of the tile the image's LEFT edge starts at.</summary>
-	public int MinX { get; }
-
-	/// <summary>World Z of the tile the image's TOP edge starts at.</summary>
-	public int MinZ { get; }
-
-	/// <summary>The shared terrain image (one RGBA8 pixel per world tile).</summary>
-	public Image Image { get; }
-
-	/// <summary>The live texture over the image (updated in place; swap on resize).</summary>
-	public ImageTexture Texture { get; private set; }
-
-	/// <summary>
-	/// Raised after a terrain re-sample (the image pixels changed). The minimap
-	/// / map window listen to push the new texture into their display nodes.
-	/// </summary>
-	public event System.Action TextureUpdated;
-
 	// ------------------------------------------------------------------
 	// Waypoints
 	// ------------------------------------------------------------------
@@ -102,200 +66,55 @@ public partial class MapRenderer : RefCounted
 	public event System.Action WaypointsChanged;
 
 	// ------------------------------------------------------------------
-	// Dirty-chunk tracking
+	// Terrain sampling
 	// ------------------------------------------------------------------
+
+	/// <summary>The color of an "unknown" tile (terrain not loaded / sampled yet).</summary>
+	public static readonly Color UnknownColor = new Color(0.07f, 0.08f, 0.10f, 1f);
 
 	/// <summary>
-	/// The world chunks whose tiles need (re)sampling. Keys are chunk coords
-	/// (Vector2I = (x / ChunkSizeXZ, z / ChunkSizeXZ)). The world marks a chunk
-	/// here when it generates / edits; the minimap drains it under a per-frame
-	/// budget.
-	/// </summary>
-	private readonly HashSet<Vector2I> _dirtyChunks = new();
-
-	/// <summary>
-	/// The world-chunk coords the renderer has ALREADY sampled at least once.
-	/// Used to know which chunks are "known" so an unloaded chunk that was once
-	/// seen can be cleared back to "unknown" (so the map doesn't show stale
-	/// terrain for a chunk the player has walked far from).
-	/// </summary>
-	private readonly HashSet<Vector2I> _sampledChunks = new();
-
-	// The color of an "unknown" tile (terrain not yet sampled). A dark, slightly
-	// blue-grey that reads as "off the map" and contrasts with terrain colors.
-	private static readonly Color UnknownColor = new Color(0.07f, 0.08f, 0.10f, 1f);
-
-	// ------------------------------------------------------------------
-	// Construction
-	// ------------------------------------------------------------------
-
-	/// <summary>
-	/// Builds the renderer for a world region centered on (centerX, centerZ):
-	/// the image spans [centerX - Size/2, centerX + Size/2) in X and the same in
-	/// Z. All tiles start as "unknown" (dark); the world's dirty-chunk marks
-	/// drive the fill-in.
-	/// </summary>
-	public MapRenderer(int size, int centerX, int centerZ)
-	{
-		Size = Mathf.Max(8, size);
-		MinX = centerX - Size / 2;
-		MinZ = centerZ - Size / 2;
-		Image = Image.CreateEmpty(Size, Size, false, Image.Format.Rgba8);
-		Image.Fill(UnknownColor);
-		Texture = ImageTexture.CreateFromImage(Image);
-	}
-
-	// ------------------------------------------------------------------
-	// Dirty-chunk API (called by the world / minimap)
-	// ------------------------------------------------------------------
-
-	/// <summary>
-	/// Marks a world chunk as needing (re)sampling. Called by the world when a
-	/// chunk generates or is edited, and by the minimap when it (re)discovers a
-	/// loaded chunk in range. Idempotent (a chunk already marked stays marked).
-	/// </summary>
-	public void MarkDirty(Vector2I chunkCoord)
-	{
-		_dirtyChunks.Add(chunkCoord);
-	}
-
-	/// <summary>
-	/// Marks EVERY world chunk in the [minC..maxC]×[minC..maxC] chunk range as
-	/// dirty (a bulk re-sample, e.g. on world load or after a world switch).
-	/// </summary>
-	public void MarkRegionDirty(Vector2I minC, Vector2I maxC)
-	{
-		for (int cx = minC.X; cx <= maxC.X; cx++)
-		{
-			for (int cz = minC.Y; cz <= maxC.Y; cz++)
-			{
-				_dirtyChunks.Add(new Vector2I(cx, cz));
-			}
-		}
-	}
-
-	/// <summary>True when any chunk is waiting to be sampled.</summary>
-	public bool HasDirtyChunks => _dirtyChunks.Count > 0;
-
-	/// <summary>The number of chunks currently waiting to be sampled.</summary>
-	public int DirtyChunkCount => _dirtyChunks.Count;
-
-	// ------------------------------------------------------------------
-	// Sampling (the per-frame work)
-	// ------------------------------------------------------------------
-
-	/// <summary>
-	/// Re-samples up to <paramref name="budget"/> tiles this frame, working
-	/// through the dirty chunks. Returns true when the dirty set is still
-	/// non-empty (the caller should keep calling next frame).
+	/// Samples a world XZ region directly from the live world, writing up to
+	/// <paramref name="budget"/> tiles this frame into <paramref name="dest"/>
+	/// (an image whose (0,0) corresponds to world (<paramref name="minX"/>,
+	/// <paramref name="minZ"/>)). Returns true when there are still unsampled
+	/// tiles in the region (the caller should keep calling next frame).
 	///
-	/// A tile is sampled by reading the topmost solid voxel in its column and
-	/// coloring it by that material's albedo (with a height-relief shade), or
-	/// "unknown" when the chunk isn't loaded yet. Only tiles whose chunk is
-	/// currently loaded are written; unloaded chunks in the dirty set are left
-	/// alone (they'll be re-marked once they generate).
+	/// A tile's color comes from its topmost solid voxel: the material's texture
+	/// (averaged) or albedo tint, darkened by a height-relief shade. A column with
+	/// no solid voxel (void / unloaded chunk) is written as "unknown".
 	/// </summary>
-	public bool SampleBudget(VoxelWorld world, int budget)
+	public bool SampleRegion(VoxelWorld world, Image dest, int minX, int minZ, int budget)
 	{
-		if (world == null || _dirtyChunks.Count == 0)
+		if (world == null || dest == null)
 		{
 			return false;
 		}
-
-		int chunkSize = world.ChunkSizeXZ;
+		int destW = dest.GetWidth();
+		int destH = dest.GetHeight();
 		int paletteCount = world.Palette?.MaterialCount ?? 0;
 		int sampled = 0;
-
-		// Take a snapshot of the dirty set so we can clear it as we go.
-		var toProcess = new List<Vector2I>(_dirtyChunks);
-		foreach (var c in toProcess)
+		for (int dz = 0; dz < destH && sampled < budget; dz++)
 		{
-			if (sampled >= budget)
+			for (int dx = 0; dx < destW && sampled < budget; dx++)
 			{
-				break;
-			}
-
-			int chunkMinX = c.X * chunkSize;
-			int chunkMinZ = c.Y * chunkSize;
-
-			// Is this chunk actually loaded right now? If not, skip it (leave it
-			// dirty — it will be re-marked when it generates).
-			if (world.GetChunkData(c) == null)
-			{
-				// Not loaded: don't clear the mark, don't sample. Keep it dirty.
-				continue;
-			}
-
-			_dirtyChunks.Remove(c);
-			_sampledChunks.Add(c);
-
-			for (int lx = 0; lx < chunkSize && sampled < budget; lx++)
-			{
-				for (int lz = 0; lz < chunkSize && sampled < budget; lz++)
-				{
-					int wx = chunkMinX + lx;
-					int wz = chunkMinZ + lz;
-
-					// Image tile coords: image (0,0) = world (MinX, MinZ).
-					int ix = wx - MinX;
-					int iz = wz - MinZ;
-					if (ix < 0 || ix >= Size || iz < 0 || iz >= Size)
-					{
-						continue; // outside the image
-					}
-
-					int surfaceY = world.GetSurfaceHeight(wx, wz);
-					Color color;
-					if (surfaceY < 0)
-					{
-						color = UnknownColor;
-					}
-					else
-					{
-						int mat = world.GetVoxel(wx, surfaceY, wz);
-						color = TerrainColor(mat, surfaceY, world, paletteCount);
-					}
-					Image.SetPixel(ix, iz, color);
-					sampled++;
-				}
-			}
-		}
-
-		if (sampled > 0)
-		{
-			TextureUpdated?.Invoke();
-		}
-		return _dirtyChunks.Count > 0;
-	}
-
-	/// <summary>
-	/// Forces an immediate full re-sample of every loaded chunk in the image
-	/// region (ignoring the dirty set). Used on world load / switch so the map
-	/// starts correct. Samples everything loaded; unloaded tiles stay unknown.
-	/// </summary>
-	public void ForceResampleAll(VoxelWorld world)
-	{
-		if (world == null)
-		{
-			return;
-		}
-		int chunkSize = world.ChunkSizeXZ;
-		int paletteCount = world.Palette?.MaterialCount ?? 0;
-		for (int wx = MinX; wx < MinX + Size; wx++)
-		{
-			for (int wz = MinZ; wz < MinZ + Size; wz++)
-			{
-				int ix = wx - MinX;
-				int iz = wz - MinZ;
+				int wx = minX + dx;
+				int wz = minZ + dz;
 				int surfaceY = world.GetSurfaceHeight(wx, wz);
-				Color color = surfaceY < 0
-					? UnknownColor
-					: TerrainColor(world.GetVoxel(wx, surfaceY, wz), surfaceY, world, paletteCount);
-				Image.SetPixel(ix, iz, color);
+				Color color;
+				if (surfaceY < 0)
+				{
+					color = UnknownColor;
+				}
+				else
+				{
+					int mat = world.GetVoxel(wx, surfaceY, wz);
+					color = TerrainColor(mat, surfaceY, world, paletteCount);
+				}
+				dest.SetPixel(dx, dz, color);
+				sampled++;
 			}
 		}
-		_dirtyChunks.Clear();
-		TextureUpdated?.Invoke();
+		return sampled < destW * destH;
 	}
 
 	// ------------------------------------------------------------------
