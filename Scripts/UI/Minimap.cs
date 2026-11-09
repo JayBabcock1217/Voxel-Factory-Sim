@@ -47,7 +47,7 @@ public partial class Minimap : Node
 	/// is (DiameterPx/2) / (DiameterPx/RadiusTiles) = RadiusTiles/2, so a value
 	/// ~50% larger than needed (RadiusTiles ≈ 1.5 × DiameterPx/tile) is safe.
 	/// </summary>
-	[Export] public int RadiusTiles { get; set; } = 96;
+	[Export] public int RadiusTiles { get; set; } = 64;
 
 	/// <summary>
 	/// How many terrain tiles to sample per frame (spread out so the fill-in is
@@ -75,7 +75,7 @@ public partial class Minimap : Node
 	private ImageTexture _displayTexture;
 
 	// The terrain slice (RadiusTiles × RadiusTiles world tiles), sampled directly
-	// from the world each frame (budget-limited).
+	// from the world. Filled fully on (re)creation, then topped up per-frame.
 	private Image _slice;
 
 	// Tracks the slice's world origin; when the player moves, the origin moves
@@ -83,6 +83,11 @@ public partial class Minimap : Node
 	private int _sliceMinX = int.MinValue;
 	private int _sliceMinZ = int.MinValue;
 	private bool _worldReady;
+	// True right after the slice is (re)created / cleared: the next SampleRegion
+	// call must fill the WHOLE slice at once (a one-time cost) instead of a small
+	// per-frame budget. Without this, the budget only fills a narrow center band
+	// before it runs out, so the map shows just a strip.
+	private bool _needsFullFill = true;
 
 	// ------------------------------------------------------------------
 	// Lifecycle
@@ -183,10 +188,11 @@ public partial class Minimap : Node
 		if (!_worldReady)
 		{
 			// First usable frame: position the slice origin on the player and
-			// start sampling. (The budget spreads the fill-in over a few frames.)
+			// fill the whole slice at once.
 			_sliceMinX = px - RadiusTiles / 2;
 			_sliceMinZ = pz - RadiusTiles / 2;
 			_slice.Fill(MapRenderer.UnknownColor);
+			_needsFullFill = true;
 			_worldReady = true;
 		}
 		else
@@ -195,9 +201,9 @@ public partial class Minimap : Node
 			// every tile of movement. Resetting to "unknown" on each tile would
 			// make the map perpetually re-fill (and look dark/covered) while the
 			// player walks. Instead, re-center (and clear) only when the player
-			// has drifted more than RecenterFraction of the slice width away from
-			// the current slice center — between re-centers we just keep the
-			// already-sampled terrain and top up any newly-revealed tiles.
+			// has drifted more than 1/4 of the slice width away from the current
+			// slice center — between re-centers we just keep the already-sampled
+			// terrain and top up any newly-revealed tiles.
 			int recenterDist = Mathf.Max(4, RadiusTiles / 4);
 			int sliceCenterX = _sliceMinX + RadiusTiles / 2;
 			int sliceCenterZ = _sliceMinZ + RadiusTiles / 2;
@@ -206,11 +212,20 @@ public partial class Minimap : Node
 				_sliceMinX = px - RadiusTiles / 2;
 				_sliceMinZ = pz - RadiusTiles / 2;
 				_slice.Fill(MapRenderer.UnknownColor);
+				_needsFullFill = true; // re-center: fill the whole slice again
 			}
 		}
 
-		// Sample the slice's region directly from the world (budget-limited).
-		_manager.Renderer.SampleRegion(_world, _slice, _sliceMinX, _sliceMinZ, SampleBudgetPerFrame);
+		// Sample the slice's region directly from the world. On (re)creation,
+		// fill the WHOLE slice in one call (a one-time cost) so the map is fully
+		// populated immediately; afterward, only top up within the per-frame
+		// budget (to refresh edited terrain / newly-generated chunks). The slice
+		// is small (RadiusTiles², ≤ 64² = 4096 tiles), so a full fill is cheap.
+		int budget = _needsFullFill
+			? RadiusTiles * RadiusTiles
+			: SampleBudgetPerFrame;
+		_manager.Renderer.SampleRegion(_world, _slice, _sliceMinX, _sliceMinZ, budget);
+		_needsFullFill = false;
 
 		// Rotate the slice into the circular display and draw the overlays.
 		UpdateDisplay(px, pz);

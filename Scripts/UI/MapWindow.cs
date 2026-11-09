@@ -57,6 +57,13 @@ public partial class MapWindow : Node
 	/// <summary>How many terrain tiles the map window re-samples per frame while open.</summary>
 	[Export] public int SampleBudgetPerFrame { get; set; } = 600;
 
+	/// <summary>
+	/// The largest one-time full-fill (in tiles) the map window will do on a view
+	/// change without causing a frame hitch. Views larger than this fall back to
+	/// the budgeted (center-out) fill. 4096 ≈ a 64×64 tile region (a few ms).
+	/// </summary>
+	private const int MaxFullFillTiles = 4096;
+
 	// ------------------------------------------------------------------
 	// State
 	// ------------------------------------------------------------------
@@ -878,11 +885,17 @@ public partial class MapWindow : Node
 	// ------------------------------------------------------------------
 
 	// The terrain cache: a tile image covering the visible world region (at the
-	// current zoom), filled incrementally from the live world (budget-limited).
+	// current zoom), filled from the live world. Filled fully on view change,
+	// then topped up per-frame.
 	private Image _terrainCache;
 	private int _terrainMinX;
 	private int _terrainMinZ;
 	private bool _terrainValid;
+	// True right after the cache is (re)created: the next SampleRegion call must
+	// fill the WHOLE cache at once (a one-time cost) instead of a small per-frame
+	// budget. Without this the budget only fills a narrow center band, so the
+	// map shows just a strip until many frames pass.
+	private bool _needsFullFill;
 
 	/// <summary>
 	/// Samples the visible world region into <see cref="_terrainCache"/>
@@ -907,16 +920,28 @@ public partial class MapWindow : Node
 		if (!sameView)
 		{
 			// View moved / zoomed / resized: (re)create the cache covering the new
-			// region and mark it invalid (it fills in over the next few frames).
+			// region and fill the WHOLE thing at once (a one-time cost) so the map
+			// is fully populated immediately instead of showing just a center strip.
 			_terrainCache = Image.CreateEmpty(tileW, tileH, false, Image.Format.Rgba8);
 			_terrainCache.Fill(MapRenderer.UnknownColor);
 			_terrainMinX = wantMinX;
 			_terrainMinZ = wantMinZ;
 			_terrainValid = true;
+			_needsFullFill = true;
 		}
 
-		// Fill the cache from the world, budget-limited.
-		renderer.SampleRegion(_world, _terrainCache, _terrainMinX, _terrainMinZ, SampleBudgetPerFrame);
+		// Fill the cache from the world. On (re)creation, fill the whole cache in
+		// one call so the map is fully populated immediately; afterward, only top
+		// up within the per-frame budget (to refresh edited terrain / newly-
+		// generated chunks as the view stays put). Cap the one-time full fill so
+		// a very large (zoomed-out) view doesn't cause a big frame hitch — if the
+		// region is too big, fall back to the budgeted (center-out) fill.
+		int fullFill = tileW * tileH;
+		int budget = (_needsFullFill && fullFill <= MaxFullFillTiles)
+			? fullFill
+			: SampleBudgetPerFrame;
+		renderer.SampleRegion(_world, _terrainCache, _terrainMinX, _terrainMinZ, budget);
+		_needsFullFill = false;
 	}
 
 	/// <summary>
