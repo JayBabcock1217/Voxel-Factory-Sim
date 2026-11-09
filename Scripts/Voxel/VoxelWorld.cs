@@ -987,8 +987,16 @@ public partial class VoxelWorld : Node3D
 
 	// The spawn ANCHOR: the player's scene position (the spawn point), frozen at
 	// _Ready so the progress bar and the spawn gate always agree on which 3x3
-	// is "the" neighbourhood, even before the first chunk loads.
+	// is "the" neighbourhood, even before the first chunk loads. When loading a
+	// save, the XZ is the SAVED position's XZ (the player is restored there); the
+	// Y is the scene Y (irrelevant to the XZ-based chunk neighbourhood).
 	private Vector3 _spawnAnchor = Vector3.Zero;
+
+	// The player's EXACT restore position (the saved position, with its saved Y)
+	// when loading a save; the scene position otherwise. The spawn gate verifies
+	// live collision at THIS spot (not the anchor, whose Y may differ) because the
+	// player is dropped here. Zero until the anchor is resolved.
+	private Vector3 _spawnRestorePos = Vector3.Zero;
 
 	// The chunk the player spawns in (Chebyshev reference for the hive spawn
 	// exclusion). Computed from _spawnAnchor on first use; -1,-1 until set.
@@ -1687,23 +1695,38 @@ public partial class VoxelWorld : Node3D
 				}
 				if (save.TryGetSavedPlayerPosition(out Vector3 savedPos))
 				{
-					// Keep the scene Y (the player's pre-physics height) but
-					// anchor the XZ on the saved spot. The chunk neighbourhood
-					// is XZ-only, so the Y is irrelevant to the gate.
+					// Anchor the XZ on the saved spot (the chunk neighbourhood is
+					// XZ-only, so the anchor Y is irrelevant to the gate). Record
+					// the EXACT saved position (with its saved Y) as the restore
+					// position: the gate verifies live collision at THIS spot,
+					// because the player is dropped here.
 					_spawnAnchor = new Vector3(savedPos.X, playerNode.GlobalPosition.Y, savedPos.Z);
+					_spawnRestorePos = savedPos;
 				}
 				else
 				{
 					_spawnAnchor = playerNode.GlobalPosition;
+					_spawnRestorePos = playerNode.GlobalPosition;
 				}
 			}
 			else
 			{
 				_spawnAnchor = playerNode.GlobalPosition;
+				_spawnRestorePos = playerNode.GlobalPosition;
 			}
 		}
 
-		Vector2I playerChunk = ChunkCoordOf(playerNode.GlobalPosition);
+		// The gate, the spiral load ring, and the collision check must all key off
+		// the SPAWN ANCHOR (the saved position when loading a save — see _spawnAnchor
+		// above), NOT the Player node's scene position. The player is RESTORED at
+		// the exact saved coordinates (RestorePlayerFromSave does no re-seating), so
+		// the chunk they land in is the saved chunk. Keying the gate on the scene
+		// position (usually the origin) meant the gate would open as soon as the
+		// ORIGIN's 3x3 was ready — then place the player at the saved chunk, whose
+		// collision may not be built yet, and they fall through. Anchoring on the
+		// saved spot keeps the gate honest: it waits for the 3x3 (and live collision)
+		// at the spot the player will actually be dropped.
+		Vector2I playerChunk = ChunkCoordOf(_spawnAnchor != Vector3.Zero ? _spawnAnchor : playerNode.GlobalPosition);
 
 		// Enqueue every in-range chunk that isn't already loaded or queued, in
 		// SPIRAL (ring) order around the player's CURRENT chunk, then pump the
@@ -1764,6 +1787,15 @@ public partial class VoxelWorld : Node3D
 			//
 			// Only AFTER both phases does SpawnOrRestorePlayer run, which places
 			// the player at the EXACT saved coordinates (no clamp / re-seat).
+			//
+			// Hide the player while the gate is closed: it is frozen (no physics)
+			// at its scene position until the gate opens, so without this it would
+			// be visible (floating at the spawn point) the whole time the loading
+			// screen is up. SpawnOrRestorePlayer / SetSpawned reveals it.
+			if (playerNode.Visible)
+			{
+				playerNode.Visible = false;
+			}
 			playerNode.SetPhysicsProcess(false);
 			// The spawn gate waits for the saved edits in the SPAWN NEIGHBOURHOOD
 			// (the 3x3 around the player chunk) to be applied — NOT for every
@@ -1808,12 +1840,24 @@ public partial class VoxelWorld : Node3D
 					// sub-cells have no BuiltShape (mesh not yet built), the body
 					// has no shape and the player falls through. Wait until the
 					// shape is actually attached (retry next frame).
-					if (HasLiveCollisionAt(playerNode.GlobalPosition))
+					//
+					// Check at the EXACT restore position (the saved position, with
+					// its saved Y), not the player's scene position: the player is
+					// dropped at the saved spot, so THAT voxel's collision must be
+					// live. (The anchor's Y is the scene Y, which can differ from
+					// the saved Y; the collision check is per-voxel, so we must use
+					// the exact saved Y.)
+					var collisionCheckPos = _spawnRestorePos != Vector3.Zero ? _spawnRestorePos : playerNode.GlobalPosition;
+					if (HasLiveCollisionAt(collisionCheckPos))
 					{
 						if (SpawnOrRestorePlayer(playerNode))
 						{
 							_playerSpawned = true;
 							playerNode.SetPhysicsProcess(true);
+							// Reveal the player now that it has been placed at the
+							// restored position and its collision is live (it was
+							// hidden while the spawn gate was closed).
+							playerNode.Visible = true;
 							if (playerNode is Player player)
 							{
 								player.SetSpawned();
