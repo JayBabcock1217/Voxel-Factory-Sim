@@ -3567,6 +3567,7 @@ public partial class VoxelWorld : Node3D
 				save.ApplyMachines(save.Snapshot);
 				save.ApplyEnemies(save.Snapshot);
 				ApplyHives(save.Snapshot.Hives);
+				RestoreWaypoints(save.Snapshot.Waypoints);
 				return SpawnPlayerOnTerrain(player);
 			}
 			RestoreInventoryFromSave(save.Snapshot);
@@ -3575,9 +3576,32 @@ public partial class VoxelWorld : Node3D
 			save.ApplyMachines(save.Snapshot);
 			save.ApplyEnemies(save.Snapshot);
 			ApplyHives(save.Snapshot.Hives);
+			RestoreWaypoints(save.Snapshot.Waypoints);
 			return true;
 		}
+		// No save: clear any stale waypoints from a previous world so the new
+		// world starts with an empty map (a fresh world has no saved markers).
+		RestoreWaypoints(null);
 		return SpawnPlayerOnTerrain(player);
+	}
+
+	/// <summary>
+	/// Restores the saved map waypoints into the <c>WaypointManager</c> (the
+	/// shared store the minimap / map window render). A null / empty list clears
+	/// the set — so switching between saves (or starting fresh) never leaves the
+	/// previous world's markers on the map. Called from
+	/// <see cref="SpawnOrRestorePlayer"/> once the player is placed.
+	/// </summary>
+	private void RestoreWaypoints(List<WorldSaveFile.WaypointRecord> saved)
+	{
+		if (!IsInsideTree())
+		{
+			return;
+		}
+		if (GetTree().GetFirstNodeInGroup("waypoint_manager") is UI.WaypointManager wpMgr)
+		{
+			wpMgr.RestoreWaypoints(saved);
+		}
 	}
 
 	/// <summary>

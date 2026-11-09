@@ -15,6 +15,9 @@
 [ext_resource type="Script" uid="uid://wbdkby8q2ljs" path="res://Scripts/UI/MachineUI.cs" id="10_machineui"]
 [ext_resource type="Script" uid="uid://xi257fbi8jkb" path="res://Scripts/UI/LoadingScreen.cs" id="12_loadingscreen"]
 [ext_resource type="PackedScene" path="res://Scenes/Zombie.tscn" id="13_zombie"]
+[ext_resource type="Script" path="res://Scripts/UI/WaypointManager.cs" id="17_waypointmgr"]
+[ext_resource type="Script" path="res://Scripts/UI/Minimap.cs" id="18_minimap"]
+[ext_resource type="Script" path="res://Scripts/UI/MapWindow.cs" id="19_mapwindow"]
 [ext_resource type="Sky" uid="uid://d3xbub3t7borr" path="res://Textures/SkiesFull/assets/BinbunSky/skies/basic/basic_sky_01.tres" id="14_skybinbun"]
 [ext_resource type="Resource" uid="uid://ehruevcxtx3t" path="res://Resources/SkyboxConfig.tres" id="15_skyboxconfig"]
 [ext_resource type="Script" uid="uid://cqhr0n3ajlk6v" path="res://Scripts/SkyCycle.cs" id="16_skycycle"]
@@ -117,3 +120,12 @@ script = ExtResource("8_worldsave")
 [node name="LoadingScreen" type="CanvasLayer" parent="." unique_id=82769132]
 layer = 100
 script = ExtResource("12_loadingscreen")
+
+[node name="WaypointManager" type="Node" parent="."]
+script = ExtResource("17_waypointmgr")
+
+[node name="Minimap" type="Node" parent="."]
+script = ExtResource("18_minimap")
+
+[node name="MapWindow" type="Node" parent="."]
+script = ExtResource("19_mapwindow")

@@ -66,6 +66,9 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
+	///   v9 — added the waypoint section (player-placed map markers: name +
+	///        world position + color), so the minimap / map window's waypoints
+	///        survive a restart.
 	///   v8 — added the hive section (functional foliage that spawns zombies:
 	///        center voxel + radius + depleted flag), so hives survive a
 	///        restart (the same hives come back, with their depletion state).
@@ -84,7 +87,7 @@ public static class WorldSaveFile
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 8;
+	public const int CurrentVersion = 9;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -95,7 +98,7 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
@@ -142,6 +145,14 @@ public static class WorldSaveFile
 	/// empty for them (the feature did not exist).
 	/// </summary>
 	private const int VersionWithHives = 8;
+
+	/// <summary>
+	/// The first version that carries the waypoint section (player-placed map
+	/// markers: name + world position + color). v8 and earlier files have no
+	/// waypoint section; the reader leaves <see cref="Data.Waypoints"/> empty for
+	/// them (the feature did not exist).
+	/// </summary>
+	private const int VersionWithWaypoints = 9;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -203,6 +214,11 @@ public static class WorldSaveFile
 		// v7 -> v8: the reader leaves data.Hives empty for v7 files (the hive
 		// section is absent), so a v7 world simply had no saved hives (the
 		// feature did not exist). Nothing to re-derive; return as-is.
+		//
+		// v8 -> v9: the reader leaves data.Waypoints empty for v8 files (the
+		// waypoint section is absent), so a v8 world simply had no saved
+		// waypoints (the feature did not exist). Nothing to re-derive; return
+		// as-is.
 		//
 		// Future version migrations go here.
 		return data;
@@ -399,6 +415,33 @@ public static class WorldSaveFile
 	}
 
 	/// <summary>
+	/// One player-placed map waypoint (v9+): a short name, a world position
+	/// (meters), and a display color. Waypoints are drawn on the minimap and the
+	/// map window, and (when "navigate" is enabled) surface as off-screen edge
+	/// arrows so the player can find them. The world position is stored in
+	/// floats (not voxel ints) so a waypoint can mark a precise spot, not just a
+	/// block corner.
+	/// </summary>
+	public readonly struct WaypointRecord
+	{
+		/// <summary>Player-given waypoint name (short; clamped on write).</summary>
+		public string Name { get; }
+
+		/// <summary>World position the waypoint marks (meters).</summary>
+		public Vector3 Position { get; }
+
+		/// <summary>Display color (RGBA, 0..1).</summary>
+		public Color Color { get; }
+
+		public WaypointRecord(string name, Vector3 position, Color color)
+		{
+			Name = name;
+			Position = position;
+			Color = color;
+		}
+	}
+
+	/// <summary>
 	/// A decoded save file: every section, plus the FNV-1a checksum of the
 	/// section bytes (everything between the version field and the trailing
 	/// checksum). The caller compares <see cref="Checksum"/> against the
@@ -449,6 +492,12 @@ public static class WorldSaveFile
 
 		/// <summary>Hives (functional foliage, v8+): center voxel + radius + depleted. Empty for v7-and-earlier saves.</summary>
 		public List<HiveRecord> Hives { get; set; } = new();
+
+		/// <summary>
+		/// Player-placed map waypoints (v9+): name + world position + color.
+		/// Empty for v8-and-earlier saves (the feature did not exist).
+		/// </summary>
+		public List<WaypointRecord> Waypoints { get; set; } = new();
 
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
@@ -618,6 +667,33 @@ public static class WorldSaveFile
 				w.Write((byte)0); // padding
 				w.Write((byte)0);
 				w.Write((byte)0);
+			}
+		}
+
+		// Waypoints (v9+). Written unconditionally (even when empty) so the
+		// reader can tell the layout apart by version. Each record is a UTF-8
+		// name (u16 length + bytes, length-prefixed so the name may contain
+		// spaces/unicode), the world position (f32 x3), and the color (f32 x4).
+		if (CurrentVersion >= VersionWithWaypoints)
+		{
+			w.Write(data.Waypoints.Count);
+			foreach (var wp in data.Waypoints)
+			{
+				string name = wp.Name ?? "";
+				byte[] nameBytes = System.Text.Encoding.UTF8.GetBytes(name);
+				if (nameBytes.Length > ushort.MaxValue)
+				{
+					nameBytes = System.Text.Encoding.UTF8.GetBytes(name.Substring(0, 16));
+				}
+				w.Write((ushort)nameBytes.Length);
+				w.Write(nameBytes);
+				w.Write(wp.Position.X);
+				w.Write(wp.Position.Y);
+				w.Write(wp.Position.Z);
+				w.Write(wp.Color.R);
+				w.Write(wp.Color.G);
+				w.Write(wp.Color.B);
+				w.Write(wp.Color.A);
 			}
 		}
 
@@ -878,6 +954,27 @@ public static class WorldSaveFile
 					byte depleted = r.ReadByte();
 					r.ReadBytes(3); // padding
 					data.Hives.Add(new HiveRecord(new Vector3I(x, y, z), radius, depleted != 0));
+				}
+			}
+
+			// Waypoints (v9+). v8-and-earlier files end right after the hive
+			// section (or earlier), so the waypoint section is read only for
+			// v9-and-later versions. For older versions the list stays empty
+			// (the feature did not exist).
+			if (version >= VersionWithWaypoints)
+			{
+				int waypointCount = ReadCount(r);
+				data.Waypoints = new List<WaypointRecord>(waypointCount);
+				for (int i = 0; i < waypointCount; i++)
+				{
+					ushort nameLen = r.ReadUInt16();
+					byte[] nameBytes = nameLen == 0
+						? System.Array.Empty<byte>()
+						: r.ReadBytes(nameLen);
+					string name = System.Text.Encoding.UTF8.GetString(nameBytes);
+					Vector3 pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+					Color color = new Color(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+					data.Waypoints.Add(new WaypointRecord(name, pos, color));
 				}
 			}
 

@@ -393,6 +393,14 @@ public partial class WorldSave : Node
 			}
 		}
 
+		// Player-placed map waypoints (v9+). The live list lives on the
+		// WaypointManager node (the minimap / map window share it); persist it so
+		// waypoints survive a restart.
+		if (GetTree()?.GetFirstNodeInGroup("waypoint_manager") is UI.WaypointManager wpMgr)
+		{
+			data.Waypoints = wpMgr.ToSaveRecords();
+		}
+
 		return data;
 	}
 
