@@ -55,7 +55,7 @@ public partial class MapWindow : Node
 	[Export] public float InitialZoom { get; set; } = 3f;
 
 	/// <summary>How many dirty tiles the map window re-samples per frame while open.</summary>
-	[Export] public int SampleBudgetPerFrame { get; set; } = 400;
+	[Export] public int SampleBudgetPerFrame { get; set; } = 600;
 
 	/// <summary>How often (seconds) the map window re-scans loaded chunks in view.</summary>
 	[Export] public float ChunkRescanIntervalSec { get; set; } = 0.5f;
@@ -105,6 +105,7 @@ public partial class MapWindow : Node
 	private int _displayW;
 	private int _displayH;
 	private Vector2 _lastVp;
+	private bool _mouseNotOurs;
 
 	// A row in the waypoint list panel: a name label + distance label + focus/remove.
 	private sealed class WaypointRow
@@ -433,33 +434,57 @@ public partial class MapWindow : Node
 		{
 			return;
 		}
-		// Toggle key (M) — handled here (the map window is a sibling of the
-		// player, so it sees the key before the player's capture handler). Mark
-		// the event handled so the player does NOT also recapture/release the
-		// mouse on the same press.
-		if (key.Keycode == ToggleKey && !_open)
+		// The map window only OWNS the keys while it is open and has the mouse
+		// (mouse visible = the map took over input). When closed, the player
+		// owns the mouse and the M key, so we do NOT touch the key here — doing
+		// so (with SetInputAsHandled) would race the player's capture handler and
+		// make M unreliable. Opening is handled by _Input (below), which runs
+		// BEFORE the player's handler and marks the event handled, so the player
+		// never recaptures the mouse on the open-press.
+		if (!_open || _mouseNotOurs)
 		{
-			Toggle();
-			GetViewport().SetInputAsHandled();
 			return;
 		}
+		if (key.Keycode == ToggleKey)
+		{
+			SetOpen(false);
+			GetViewport().SetInputAsHandled();
+		}
+		else if (key.Keycode == Key.Escape)
+		{
+			SetOpen(false);
+			GetViewport().SetInputAsHandled();
+		}
+		else if (key.Keycode == Key.Delete && _selectedWaypointId >= 0)
+		{
+			RemoveSelectedWaypoint();
+			GetViewport().SetInputAsHandled();
+		}
+		else if (key.Keycode == Key.F && _selectedWaypointId >= 0)
+		{
+			FocusSelectedWaypoint();
+			GetViewport().SetInputAsHandled();
+		}
+	}
+
+	/// <summary>
+	/// Opens the map with the M key. This runs in <c>_Input</c>, which fires
+	/// BEFORE the Player's <c>_Input</c> (the map window is earlier in the scene
+	/// tree), so we can consume the key here and stop the player from recapturing
+	/// the mouse on the same press. Only acts when the map is closed; when open,
+	/// the map window's <c>_UnhandledKeyInput</c> owns the keys instead.
+	/// </summary>
+	public override void _Input(InputEvent @event)
+	{
 		if (_open)
 		{
-			if (key.Keycode == Key.Escape)
-			{
-				SetOpen(false);
-				GetViewport().SetInputAsHandled();
-			}
-			else if (key.Keycode == Key.Delete && _selectedWaypointId >= 0)
-			{
-				RemoveSelectedWaypoint();
-				GetViewport().SetInputAsHandled();
-			}
-			else if (key.Keycode == Key.F && _selectedWaypointId >= 0)
-			{
-				FocusSelectedWaypoint();
-				GetViewport().SetInputAsHandled();
-			}
+			return;
+		}
+		if (@event is InputEventKey key && key.Pressed && !key.Echo && key.Keycode == ToggleKey)
+		{
+			SetOpen(true);
+			_mouseNotOurs = false;
+			GetViewport().SetInputAsHandled();
 		}
 	}
 

@@ -47,20 +47,21 @@ public partial class Minimap : Node
 	/// The display texture is this many tiles wide; each tile is (DiameterPx /
 	/// RadiusTiles) px on screen.
 	/// </summary>
-	[Export] public int RadiusTiles { get; set; } = 48;
+	[Export] public int RadiusTiles { get; set; } = 64;
 
 	/// <summary>
 	/// How many dirty tiles the minimap re-samples per frame (spread out so the
 	/// fill-in is smooth). Higher = faster fill-in, more per-frame cost.
 	/// </summary>
-	[Export] public int SampleBudgetPerFrame { get; set; } = 256;
+	[Export] public int SampleBudgetPerFrame { get; set; } = 512;
 
 	/// <summary>
 	/// How often (seconds) the minimap re-checks which world chunks are loaded
 	/// and marks new ones dirty. Chunks generate in a ring around the player,
 	/// so a modest cadence keeps the map filling without spamming the world.
+	/// Kept short so the map fills in quickly after a re-center.
 	/// </summary>
-	[Export] public float ChunkRescanIntervalSec { get; set; } = 0.4f;
+	[Export] public float ChunkRescanIntervalSec { get; set; } = 0.25f;
 
 	// ------------------------------------------------------------------
 	// State
@@ -86,8 +87,8 @@ public partial class Minimap : Node
 
 	private float _lastChunkRescanSec;
 	private bool _worldReady;
-	private long _playerLastX = int.MinValue;
-	private long _playerLastZ = int.MinValue;
+	private int _lastRendererCenterX = int.MinValue;
+	private int _lastRendererCenterZ = int.MinValue;
 
 	// ------------------------------------------------------------------
 	// Lifecycle
@@ -187,20 +188,37 @@ public partial class Minimap : Node
 			return;
 		}
 
-		// Make sure the shared renderer exists and is centered on the player's
-		// (re)spawn area. The renderer is created once; it is NOT re-centered as
-		// the player walks (that would reset the whole image and cause a
-		// full-resample flash). Instead the circle follows the player by
-		// sampling the slice around the player's CURRENT position.
+		// Make sure the shared renderer exists. It is centered on the PLAYER,
+		// and — crucially — RE-CENTERED as the player walks (below), so the
+		// image always covers the area around the player. Re-centering resets
+		// the image to "unknown" and triggers a fast re-sample; the radius is
+		// large enough that the visible circle is already sampled, so the map
+		// never appears empty (it just re-fills the fresh outer ring).
 		var px = (int)Mathf.Floor(_player.GlobalPosition.X);
 		var pz = (int)Mathf.Floor(_player.GlobalPosition.Z);
 
+		int desiredSize = Mathf.Max(RadiusTiles * 2 + 8, 64);
 		if (!_worldReady)
 		{
-			// First time the world is usable: create the renderer centered on the
-			// player and mark the whole visible chunk range dirty so it fills in.
-			_manager.EnsureRenderer(Mathf.Max(RadiusTiles * 2, 64), px, pz);
+			_manager.EnsureRenderer(desiredSize, px, pz);
 			_worldReady = true;
+			_lastRendererCenterX = px;
+			_lastRendererCenterZ = pz;
+		}
+		else
+		{
+			// Re-center the renderer when the player has moved far enough that
+			// they are near the image edge (so the circle always has terrain
+			// around the center). A ~half-image move threshold keeps re-centers
+			// infrequent (a few per long walk), not every frame.
+			int imgHalf = _manager.Renderer.Size / 2;
+			if (Mathf.Abs(px - _lastRendererCenterX) > imgHalf * 2
+				|| Mathf.Abs(pz - _lastRendererCenterZ) > imgHalf * 2)
+			{
+				_manager.EnsureRenderer(desiredSize, px, pz);
+				_lastRendererCenterX = px;
+				_lastRendererCenterZ = pz;
+			}
 		}
 
 		MapRenderer renderer = _manager.Renderer;
