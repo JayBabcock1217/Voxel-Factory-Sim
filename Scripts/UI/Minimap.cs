@@ -33,7 +33,7 @@ public partial class Minimap : Node
 	// ------------------------------------------------------------------
 
 	/// <summary>Diameter (px) of the circular minimap.</summary>
-	[Export] public int DiameterPx { get; set; } = 160;
+	[Export] public int DiameterPx { get; set; } = 320;
 
 	/// <summary>Screen margin from the top-left corner.</summary>
 	[Export] public int MarginPx { get; set; } = 12;
