@@ -75,6 +75,10 @@ public partial class Minimap : Node
 	private int _sliceMinX;
 	private int _sliceMinZ;
 
+	// Reusable managed buffer for the slice's pixel data (filled in ReadSlice,
+	// pushed into the Image via SetData). Avoids per-frame allocation.
+	private byte[] _sliceBuffer;
+
 	// ------------------------------------------------------------------
 	// Lifecycle
 	// ------------------------------------------------------------------
@@ -139,6 +143,15 @@ public partial class Minimap : Node
 		if (_manager != null)
 		{
 			_manager.WaypointsChanged += OnWaypointsChanged;
+			_manager.MapSystemToggled += OnMapSystemToggled;
+		}
+	}
+
+	private void OnMapSystemToggled()
+	{
+		if (_panel != null)
+		{
+			_panel.Visible = _manager?.IsMapSystemEnabled ?? true;
 		}
 	}
 
@@ -152,7 +165,14 @@ public partial class Minimap : Node
 			if (_manager != null)
 			{
 				_manager.WaypointsChanged += OnWaypointsChanged;
+				_manager.MapSystemToggled += OnMapSystemToggled;
 			}
+		}
+
+		// Skip all work when the map system is toggled off.
+		if (_manager != null && !_manager.IsMapSystemEnabled)
+		{
+			return;
 		}
 		if (_player == null)
 		{
@@ -194,6 +214,7 @@ public partial class Minimap : Node
 		if (_manager != null)
 		{
 			_manager.WaypointsChanged -= OnWaypointsChanged;
+			_manager.MapSystemToggled -= OnMapSystemToggled;
 		}
 	}
 
@@ -214,7 +235,14 @@ public partial class Minimap : Node
 	{
 		var palette = _world.Palette;
 		int size = RadiusTiles;
-		byte[] buf = _slice.GetData();
+		// Image.GetData() returns a COPY of the pixel data — writing to it does
+		// NOT modify the image. We must fill a managed buffer and push it into the
+		// Image via SetData (one bulk copy per frame, no per-pixel marshaling).
+		if (_sliceBuffer == null || _sliceBuffer.Length != size * size * 4)
+		{
+			_sliceBuffer = new byte[size * size * 4];
+		}
+		byte[] buf = _sliceBuffer;
 		int row = size * 4;
 		for (int dz = 0; dz < size; dz++)
 		{
@@ -231,6 +259,7 @@ public partial class Minimap : Node
 				buf[o + 3] = 255;
 			}
 		}
+		_slice.SetData(size, size, false, Image.Format.Rgba8, buf);
 	}
 
 	// ------------------------------------------------------------------

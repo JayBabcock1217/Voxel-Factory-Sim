@@ -112,6 +112,11 @@ public partial class MapWindow : Node
 	private Vector2 _lastVp;
 	private bool _mouseNotOurs;
 
+	// Reusable managed buffer for the display image's pixel data (filled in
+	// RebuildDisplay, pushed into the Image via SetData). Avoids per-frame
+	// allocation. Image.GetData() returns a copy, so we can't write to it.
+	private byte[] _displayBuf;
+
 	// A row in the waypoint list panel: a name label + distance label + focus/remove.
 	private sealed class WaypointRow
 	{
@@ -137,8 +142,22 @@ public partial class MapWindow : Node
 		_player = GetTree().GetFirstNodeInGroup("player") as Player;
 		_world = GetTree().GetFirstNodeInGroup("voxel_world") as VoxelWorld;
 
+		if (_manager != null)
+		{
+			_manager.MapSystemToggled += OnMapSystemToggled;
+		}
+
 		BuildUI();
 		SetOpen(false);
+	}
+
+	private void OnMapSystemToggled()
+	{
+		// If the map system was just disabled while the map is open, close it.
+		if (_open && _manager != null && !_manager.IsMapSystemEnabled)
+		{
+			SetOpen(false);
+		}
 	}
 
 	public override void _Process(double delta)
@@ -147,6 +166,10 @@ public partial class MapWindow : Node
 		if (_manager == null)
 		{
 			_manager = GetTree().GetFirstNodeInGroup("waypoint_manager") as WaypointManager;
+			if (_manager != null)
+			{
+				_manager.MapSystemToggled += OnMapSystemToggled;
+			}
 		}
 		if (_player == null)
 		{
@@ -190,6 +213,10 @@ public partial class MapWindow : Node
 		{
 			_player.SetInputEnabled(true);
 			Input.MouseMode = Input.MouseModeEnum.Captured;
+		}
+		if (_manager != null)
+		{
+			_manager.MapSystemToggled -= OnMapSystemToggled;
 		}
 	}
 
@@ -467,6 +494,11 @@ public partial class MapWindow : Node
 	public override void _Input(InputEvent @event)
 	{
 		if (_open)
+		{
+			return;
+		}
+		// Don't open if the map system is toggled off.
+		if (_manager != null && !_manager.IsMapSystemEnabled)
 		{
 			return;
 		}
@@ -903,8 +935,14 @@ public partial class MapWindow : Node
 		float cy = h * 0.5f;
 		float zoom = _zoom;
 
-		// Direct buffer access (fast; no per-pixel marshaling). Rgba8 = 4 bytes.
-		byte[] dstBuf = _displayImage.GetData();
+		// Image.GetData() returns a COPY — writing to it does not modify the
+		// image. We fill a managed buffer and push it in via SetData (one bulk
+		// copy; no per-pixel marshaling). Rgba8 = 4 bytes/pixel.
+		if (_displayBuf == null || _displayBuf.Length != w * h * 4)
+		{
+			_displayBuf = new byte[w * h * 4];
+		}
+		byte[] dstBuf = _displayBuf;
 
 		// Clear to "unknown" first so any sub-pixel gaps left by fractional-zoom
 		// tile blocks read as dark, not stale/garbage pixels.
@@ -960,6 +998,11 @@ public partial class MapWindow : Node
 				}
 			}
 		}
+
+		// Push the filled buffer into the image (one bulk copy). Overlays below
+		// use SetPixel directly on the image (which writes in place, unlike
+		// GetData, which returns a copy).
+		_displayImage.SetData(w, h, false, Image.Format.Rgba8, dstBuf);
 
 		// Overlays.
 		DrawEntityOverlays();
