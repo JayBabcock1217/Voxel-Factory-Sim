@@ -127,6 +127,10 @@ public partial class MapWindow : Node
 	private Vector2 _lastViewCenter;
 	private float _lastZoom;
 
+	// The player position the display was last built for (to detect movement
+	// for the player arrow overlay).
+	private Vector3 _lastPlayerPos = Vector3.Zero;
+
 	// A row in the waypoint list panel: a name label + distance label + focus/remove.
 	private sealed class WaypointRow
 	{
@@ -222,19 +226,19 @@ public partial class MapWindow : Node
 			return;
 		}
 
-		// Rebuild the terrain tiles ONLY when the terrain data changed, the view
-		// was panned, or the zoom changed. The map data is persistent — it only
-		// changes on chunk events, so we don't re-blit the tiles every frame.
-		if (_displayDirty)
+		// Rebuild the display when the terrain data changed, the view was panned,
+		// the zoom changed, OR the player moved (the player arrow needs to track
+		// the player). The terrain tile blit is the expensive part; the overlays
+		// are cheap. We rebuild the full display (terrain + overlays) only when
+		// something actually changed — the map data is persistent and only
+		// changes on chunk events.
+		bool playerMoved = _player != null && _lastPlayerPos != _player.GlobalPosition;
+		if (_displayDirty || playerMoved)
 		{
+			_lastPlayerPos = _player?.GlobalPosition ?? Vector3.Zero;
 			RebuildDisplay(renderer);
 			_displayDirty = false;
 		}
-
-		// Draw the dynamic overlays (player arrow, waypoint markers) every frame
-		// so the player arrow tracks the player smoothly. This is cheap (a few
-		// dozen SetPixel calls, no terrain tile blit).
-		DrawOverlays();
 	}
 
 	private void OnTerrainChanged() => _displayDirty = true;
@@ -1084,10 +1088,15 @@ public partial class MapWindow : Node
 			if (lz >= CS) { lz = 0; cz0++; }
 		}
 
-		// Push the filled buffer into the image (one bulk copy). Overlays are
-		// drawn separately (DrawOverlays) so they can update every frame (the
-		// player arrow tracks the player) without re-blitting the terrain tiles.
+		// Push the filled buffer into the image (one bulk copy).
 		_displayImage.SetData(w, h, false, Image.Format.Rgba8, dstBuf);
+
+		// Draw the dynamic overlays (player arrow, waypoint markers) on top.
+		DrawEntityOverlays();
+		DrawWaypointOverlays();
+
+		// Push the final image (terrain + overlays) to the texture.
+		_displayTexture.Update(_displayImage);
 
 		// Update the coordinate readout (the view center's world coords).
 		if (_coordsLabel != null)
@@ -1096,22 +1105,7 @@ public partial class MapWindow : Node
 		}
 	}
 
-	/// <summary>
-	/// Draws the dynamic overlays (player arrow, waypoint markers) onto the
-	/// display image and pushes it to the texture. This runs every frame while
-	/// the map is open (the player arrow tracks the player smoothly), but it's
-	/// cheap — only a few dozen SetPixel calls (no terrain tile blit).
-	/// </summary>
-	private void DrawOverlays()
-	{
-		if (_displayImage == null || _displayImage.GetWidth() != _displayW || _displayImage.GetHeight() != _displayH)
-		{
-			return;
-		}
-		DrawEntityOverlays();
-		DrawWaypointOverlays();
-		_displayTexture.Update(_displayImage);
-	}
+
 
 	/// <summary>Draws the player (arrow), nearby zombies (red dots), and hives (purple dots).</summary>
 	private void DrawEntityOverlays()
