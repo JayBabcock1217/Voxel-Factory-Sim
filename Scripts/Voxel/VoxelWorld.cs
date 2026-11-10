@@ -1716,35 +1716,36 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
-		// The gate, the spiral load ring, and the collision check must all key off
-		// the SPAWN ANCHOR (the saved position when loading a save — see _spawnAnchor
-		// above), NOT the Player node's scene position. The player is RESTORED at
-		// the exact saved coordinates (RestorePlayerFromSave does no re-seating), so
-		// the chunk they land in is the saved chunk. Keying the gate on the scene
-		// position (usually the origin) meant the gate would open as soon as the
-		// ORIGIN's 3x3 was ready — then place the player at the saved chunk, whose
-		// collision may not be built yet, and they fall through. Anchoring on the
-		// saved spot keeps the gate honest: it waits for the 3x3 (and live collision)
-		// at the spot the player will actually be dropped.
-		Vector2I playerChunk = ChunkCoordOf(_spawnAnchor != Vector3.Zero ? _spawnAnchor : playerNode.GlobalPosition);
+		// TWO DIFFERENT anchors, for two different purposes:
+		//
+		//  1. SPAWN GATE (the 3x3 neighbourhood check + collision check below)
+		//     keys off the SPAWN ANCHOR (_spawnAnchor — the saved position when
+		//     loading a save, the scene position for a fresh world). The gate
+		//     must verify the chunks around where the player will be DROPPED are
+		//     ready, not where the scene happens to place the Player node.
+		//
+		//  2. LOAD RING (EnqueueSpiralRing + PumpGenerationQueue) keys off the
+		//     LIVE PLAYER POSITION (playerNode.GlobalPosition). The load ring
+		//     must FOLLOW the player as they move, so that chunks ahead of them
+		//     generate before chunks behind them. Anchoring the load ring on the
+		//     fixed spawn position would freeze it: the player could fly to the
+		//     edge of the initial render distance and find nothing beyond,
+		//     because the ring never expanded to follow them.
+		Vector2I spawnChunk = ChunkCoordOf(_spawnAnchor != Vector3.Zero ? _spawnAnchor : playerNode.GlobalPosition);
+		Vector2I livePlayerChunk = ChunkCoordOf(playerNode.GlobalPosition);
 
 		// Enqueue every in-range chunk that isn't already loaded or queued, in
-		// SPIRAL (ring) order around the player's CURRENT chunk, then pump the
+		// SPIRAL (ring) order around the player's LIVE chunk, then pump the
 		// queue (which re-sorts by the live player position). The queue (not the
 		// thread pool) decides which chunk generates next, so the in-flight set
 		// is always the MaxConcurrentGenerations chunks nearest to where the
-		// player actually is — the load ring FOLLOWS the player: chunks ahead
-		// of them generate before chunks behind them, and a far chunk can never
-		// be mid-generation while a nearer one (relative to the player) waits.
-		//
-		// Anchoring on the live player chunk (not the fixed spawn origin) is what
-		// fixes the "distant full-res chunks generating while I walk" bug: the
-		// old origin-anchored spiral kept feeding chunks in the original
-		// spawn-ring order even after the player had moved, so chunks that were
-		// near AT SPAWN but now far got generated ahead of the chunks around the
-		// player's new position.
-		EnqueueSpiralRing(playerChunk, RenderDistanceChunks);
-		PumpGenerationQueue(playerChunk);
+		// player actually is RIGHT NOW — the load ring FOLLOWS the player:
+		// chunks ahead of them generate before chunks behind them, and a far
+		// chunk can never be mid-generation while a nearer one (relative to the
+		// player) waits. This is what lets the player fly in any direction and
+		// have chunks generate ahead of them.
+		EnqueueSpiralRing(livePlayerChunk, RenderDistanceChunks);
+		PumpGenerationQueue(livePlayerChunk);
 
 		// One-time spawn: voxel data is generated asynchronously, but mesh +
 		// collision are only built in Rebuild() under the ChunksPerFrame budget.
@@ -1804,7 +1805,7 @@ public partial class VoxelWorld : Node3D
 			// far chunk, written through the edit overlay); waiting on those would
 			// hang the gate forever and the player would never spawn. Edits
 			// outside the neighbourhood apply later, when their own chunk loads.
-			bool neighbourhoodReady = SpawnNeighbourhoodReady(playerChunk) && !HasPendingEditsInSpawnNeighbourhood(playerChunk);
+			bool neighbourhoodReady = SpawnNeighbourhoodReady(spawnChunk) && !HasPendingEditsInSpawnNeighbourhood(spawnChunk);
 			if (neighbourhoodReady)
 			{
 				// Latch the first frame the neighbourhood reported ready. The
@@ -1830,7 +1831,7 @@ public partial class VoxelWorld : Node3D
 					// here (right before enabling physics) attaches the spawn
 					// neighbourhood's bodies in the SAME frame, so the player's
 					// very first physics step collides with solid ground.
-					UpdateLocalCollision(playerChunk);
+					UpdateLocalCollision(livePlayerChunk);
 
 					// GROUND TRUTH: verify the spawn chunk's collision body is
 					// actually live in the physics server. SpawnNeighbourhoodReady
@@ -1876,7 +1877,7 @@ public partial class VoxelWorld : Node3D
 		int margin = RenderDistanceChunks + 1;
 		foreach (VoxelChunk chunk in _chunks.Values.ToList())
 		{
-			if (Mathf.Abs(chunk.Coord.X - playerChunk.X) > margin || Mathf.Abs(chunk.Coord.Y - playerChunk.Y) > margin)
+			if (Mathf.Abs(chunk.Coord.X - livePlayerChunk.X) > margin || Mathf.Abs(chunk.Coord.Y - livePlayerChunk.Y) > margin)
 			{
 				FreeChunk(chunk);
 			}
@@ -1954,7 +1955,7 @@ public partial class VoxelWorld : Node3D
 		// a deterministic total order over the edited area.
 		pending = pending
 			.OrderByDescending(c => c.EditPriority)
-			.ThenBy(c => DistanceSq(c.Coord, playerChunk))
+			.ThenBy(c => DistanceSq(c.Coord, livePlayerChunk))
 			.ToList();
 
 		for (int i = 0; i < pending.Count && i < ChunksPerFrame; i++)
@@ -1976,14 +1977,14 @@ public partial class VoxelWorld : Node3D
 		// Item drops from edited voxels only spawn once the chunk update for
 		// the edited chunk has finished (see PendingDrops) — otherwise the drop
 		// would visibly rest in mid-air until the surface re-meshes.
-		FlushPendingDrops(playerChunk);
+		FlushPendingDrops(livePlayerChunk);
 
 		// Enable per-chunk collision for the player's vicinity: chunks within
 		// CollisionRadiusChunks (plus any just-rebuilt chunk) keep their shape
 		// so the player never stands on invisible ground; the rest have theirs
 		// nulled so the broad phase only ever tests a small constant number of
 		// colliders.
-		UpdateLocalCollision(playerChunk);
+		UpdateLocalCollision(livePlayerChunk);
 
 		// INSTANT EDIT: the chunk the player most recently edited is rebuilt
 		// SYNCHRONOUSLY on the main thread and applied in THIS frame, so a
