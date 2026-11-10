@@ -49,6 +49,15 @@ public partial class Minimap : Node
 	/// </summary>
 	[Export] public int RadiusTiles { get; set; } = 96;
 
+	/// <summary>
+	/// Zoom factor applied to the terrain inside the circle. 1.0 shows the slice
+	/// at its native scale; a smaller value (e.g. 0.5) zooms OUT so the circle
+	/// reveals more of the surrounding world (each tile covers fewer pixels), and
+	/// a larger value (e.g. 2.0) zooms IN. Tune this in the editor to set how
+	/// much terrain the minimap shows.
+	/// </summary>
+	[Export] public float Zoom { get; set; } = 1f;
+
 	// ------------------------------------------------------------------
 	// State
 	// ------------------------------------------------------------------
@@ -326,6 +335,7 @@ public partial class Minimap : Node
 	private void UpdateDisplay(int px, int pz)
 	{
 		float yaw = _player.Rotation.Y;
+		float zoom = Mathf.Max(0.05f, Zoom); // guard against 0 / negative
 		int d = DiameterPx;
 
 		// Rotate the slice into the display buffer (raw byte[] — no SetPixel).
@@ -333,18 +343,18 @@ public partial class Minimap : Node
 		{
 			_displayBuf = new byte[d * d * 4];
 		}
-		// The terrain is rotated by +yaw so that the player's facing points up AND
-		// the map rotates the correct way: looking right (yaw decreases) turns the
-		// map counter-clockwise, so world-north sweeps to the LEFT — matching the
-		// compass and waypoint overlays (which are derived from the same yaw).
-		RotateBlit(_sliceBuffer, RadiusTiles, RadiusTiles, _displayBuf, yaw, d);
+		// The terrain is rotated by -yaw and scaled by Zoom. The rotation keeps
+		// the player's facing pointing up; the sign here (and in the compass /
+		// waypoint overlays below) is kept consistent so the N marker and
+		// waypoints always track the terrain as the player turns.
+		RotateBlit(_sliceBuffer, RadiusTiles, RadiusTiles, _displayBuf, -yaw, d, zoom);
 		_displayImage.SetData(d, d, false, Image.Format.Rgba8, _displayBuf);
 
 		// Overlays (drawn with SetPixel on the Image — only a few dozen calls).
-		OverlayWaypoints(px, pz, yaw);
+		OverlayWaypoints(px, pz, yaw, zoom);
 		OverlayPlayerCenter();
 
-		float northAngleScreen = -yaw; // "N" rotates with the map
+		float northAngleScreen = yaw; // "N" rotates with the map
 		PlaceCompass(_compassN, northAngleScreen, d);
 		PlaceArrow(_arrow, northAngleScreen, d);
 
@@ -353,25 +363,27 @@ public partial class Minimap : Node
 
 	/// <summary>
 	/// Rotates the source tile buffer by <paramref name="angle"/> (radians) and
-	/// scales it to <paramref name="destSize"/>×<paramref name="destSize"/>,
-	/// writing into <paramref name="destBuf"/> (a managed byte[] of size
-	/// destSize²×4, Rgba8). Bilinear sampling for a smooth (non-pixelated)
-	/// rotation. The result is CIRCULAR: pixels outside the inscribed circle
-	/// are transparent (with a ~2px soft edge).
+	/// scales it by <paramref name="zoom"/> into a <paramref name="destSize"/>×
+	/// <paramref name="destSize"/> display, writing into <paramref name="destBuf"/>
+	/// (a managed byte[] of size destSize²×4, Rgba8). Bilinear sampling for a
+	/// smooth (non-pixelated) rotation. A zoom < 1 spreads the slice out (zoom
+	/// OUT — more of the slice is visible), zoom > 1 shrinks it (zoom IN). The
+	/// result is CIRCULAR: pixels outside the inscribed circle are transparent
+	/// (with a ~2px soft edge).
 	///
 	/// PERFORMANCE: operates entirely on managed byte[] buffers (no Godot
 	/// SetPixel/GetPixel binding calls). The caller pushes destBuf into the
-	/// Image via SetData once after this returns. ~25,600 pixels at 160px
-	/// diameter, each doing 4 raw byte reads + 4 raw byte writes (no
-	/// marshaling), so the whole rotation is well under 1ms.
+	/// Image via SetData once after this returns.
 	/// </summary>
-	private static void RotateBlit(byte[] srcBuf, int srcW, int srcH, byte[] destBuf, float angle, int destSize)
+	private static void RotateBlit(byte[] srcBuf, int srcW, int srcH, byte[] destBuf, float angle, int destSize, float zoom)
 	{
 		float cosA = Mathf.Cos(angle);
 		float sinA = Mathf.Sin(angle);
 		float srcCx = srcW * 0.5f;
 		float srcCy = srcH * 0.5f;
-		float scale = destSize / (float)srcW;
+		// Base scale maps the whole slice into the display; zoom scales it further
+		// (zoom < 1 => slice spreads out / zoom out; zoom > 1 => shrinks / zoom in).
+		float scale = destSize / (float)srcW / zoom;
 		float destCx = destSize * 0.5f;
 		float radius = destSize * 0.5f;
 		float edge = 2f;
@@ -443,22 +455,24 @@ public partial class Minimap : Node
 	/// display image. A waypoint within the circle is a colored diamond; one
 	/// outside the circle becomes a small arrow on the rim pointing toward it.
 	/// </summary>
-	private void OverlayWaypoints(int px, int pz, float yaw)
+	private void OverlayWaypoints(int px, int pz, float yaw, float zoom)
 	{
 		if (_manager?.Renderer == null)
 		{
 			return;
 		}
 		var waypoints = _manager.Renderer.Waypoints;
-		float scale = DiameterPx / (float)RadiusTiles; // px per tile
+		// px per tile — matches the terrain's scale (base scale × zoom) so
+		// waypoints sit on the same spot as the terrain tile they mark.
+		float scale = (DiameterPx / (float)RadiusTiles) * zoom;
 		float radiusPx = DiameterPx * 0.5f;
 
 		foreach (var wp in waypoints)
 		{
 			float dx = wp.Position.X - px;
 			float dz = wp.Position.Z - pz;
-			float cosA = Mathf.Cos(-yaw);
-			float sinA = Mathf.Sin(-yaw);
+			float cosA = Mathf.Cos(yaw);
+			float sinA = Mathf.Sin(yaw);
 			float rx = cosA * dx - sinA * dz;
 			float ry = sinA * dx + cosA * dz;
 			float screenX = DiameterPx * 0.5f + rx * scale;
