@@ -548,14 +548,18 @@ public partial class SettingsPanel : Control
 		{
 			BgColor = new Color(0.16f, 0.16f, 0.16f, 1f),
 			BorderColor = new Color(0.4f, 0.4f, 0.4f, 1f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-			ContentMarginLeft = 16f,
-			ContentMarginTop = 8f,
-			ContentMarginRight = 16f,
-			ContentMarginBottom = 8f,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
+			ContentMarginLeft = 18f,
+			ContentMarginTop = 10f,
+			ContentMarginRight = 18f,
+			ContentMarginBottom = 10f,
 		};
 		var hover = normal.Duplicate() as StyleBoxFlat;
 		hover.BgColor = new Color(0.22f, 0.22f, 0.22f, 1f);

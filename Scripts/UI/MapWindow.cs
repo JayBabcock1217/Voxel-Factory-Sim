@@ -286,6 +286,24 @@ public partial class MapWindow : Node
 			Name = "MapPanel",
 			MouseFilter = Control.MouseFilterEnum.Stop,
 		};
+		var panelStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.08f, 0.08f, 0.08f, 0.97f),
+			BorderColor = new Color(0.4f, 0.4f, 0.4f, 1f),
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 12,
+			CornerRadiusTopRight = 12,
+			CornerRadiusBottomLeft = 12,
+			CornerRadiusBottomRight = 12,
+			ContentMarginLeft = 16f,
+			ContentMarginTop = 12f,
+			ContentMarginRight = 16f,
+			ContentMarginBottom = 12f,
+		};
+		_panel.AddThemeStyleboxOverride("panel", panelStyle);
 		_layer.AddChild(_panel);
 
 		// A header row: title + coordinate readout + place-mode toggle + close hint.

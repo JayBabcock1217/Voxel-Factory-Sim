@@ -576,10 +576,14 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0.12f, 0.12f, 0.12f, 0.95f),
 			BorderColor = new Color(0.35f, 0.35f, 0.35f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 10,
+			CornerRadiusTopRight = 10,
+			CornerRadiusBottomLeft = 10,
+			CornerRadiusBottomRight = 10,
 			ContentMarginLeft = pad,
 			ContentMarginTop = pad,
 			ContentMarginRight = pad,
@@ -646,10 +650,14 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0.1f, 0.1f, 0.1f, 0.9f),
 			BorderColor = new Color(0.35f, 0.35f, 0.35f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
 		};
 		_craftPanel.AddThemeStyleboxOverride("panel", craftStyle);
 		_hbox.AddChild(_craftPanel); // added first (renders behind, leftmost z)
@@ -668,10 +676,14 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0.1f, 0.1f, 0.1f, 0.9f),
 			BorderColor = new Color(0.35f, 0.35f, 0.35f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
 		};
 		_devPanel.AddThemeStyleboxOverride("panel", devStyle);
 		_hbox.AddChild(_devPanel);
@@ -719,10 +731,14 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.25f),
 			BorderColor = new Color(0.6f, 0.6f, 0.6f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+			CornerRadiusBottomLeft = 6,
+			CornerRadiusBottomRight = 6,
 		};
 		hotbarBorder.AddThemeStyleboxOverride("panel", hotbarBorderStyle);
 		gridSection.AddChild(hotbarBorder);
@@ -802,14 +818,18 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.85f),
 			BorderColor = new Color(0.6f, 0.6f, 0.6f, 0.8f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-			ContentMarginLeft = 8f,
-			ContentMarginTop = 4f,
-			ContentMarginRight = 8f,
-			ContentMarginBottom = 4f,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+			CornerRadiusBottomLeft = 6,
+			CornerRadiusBottomRight = 6,
+			ContentMarginLeft = 10f,
+			ContentMarginTop = 6f,
+			ContentMarginRight = 10f,
+			ContentMarginBottom = 6f,
 		};
 		_tooltip.AddThemeStyleboxOverride("panel", tooltipStyle);
 
@@ -890,10 +910,14 @@ public partial class InventoryUI : CanvasLayer
 			{
 				BgColor = new Color(0f, 0f, 0f, 0.45f),
 				BorderColor = new Color(0.5f, 0.5f, 0.5f, 0.6f),
-				BorderWidthLeft = 1,
-				BorderWidthTop = 1,
-				BorderWidthRight = 1,
-				BorderWidthBottom = 1,
+				BorderWidthLeft = 2,
+				BorderWidthTop = 2,
+				BorderWidthRight = 2,
+				BorderWidthBottom = 2,
+				CornerRadiusTopLeft = 4,
+				CornerRadiusTopRight = 4,
+				CornerRadiusBottomLeft = 4,
+				CornerRadiusBottomRight = 4,
 			};
 			slot.AddThemeStyleboxOverride("panel", slotStyle);
 			// A subtle tint over the standard slot background so the ammo slot
@@ -987,10 +1011,14 @@ public partial class InventoryUI : CanvasLayer
 		var hbStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.55f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
 			ContentMarginLeft = hbPad,
 			ContentMarginTop = hbPad,
 			ContentMarginRight = hbPad,
@@ -1421,10 +1449,14 @@ public partial class InventoryUI : CanvasLayer
 		{
 			BgColor = new Color(0f, 0f, 0f, 1f),
 			BorderColor = new Color(0.6f, 0.6f, 0.6f, 1f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+			CornerRadiusBottomLeft = 6,
+			CornerRadiusBottomRight = 6,
 		};
 		_devTooltip.AddThemeStyleboxOverride("panel", tipStyle);
 
@@ -1759,14 +1791,18 @@ public partial class InventoryUI : CanvasLayer
 			// through the tooltip.
 			BgColor = new Color(0f, 0f, 0f, 1f),
 			BorderColor = new Color(0.6f, 0.6f, 0.6f, 1f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-			ContentMarginLeft = 10f,
-			ContentMarginTop = 8f,
-			ContentMarginRight = 10f,
-			ContentMarginBottom = 8f,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+			CornerRadiusBottomLeft = 6,
+			CornerRadiusBottomRight = 6,
+			ContentMarginLeft = 12f,
+			ContentMarginTop = 10f,
+			ContentMarginRight = 12f,
+			ContentMarginBottom = 10f,
 		};
 		_recipeTooltip.AddThemeStyleboxOverride("panel", tipStyle);
 
@@ -1845,11 +1881,15 @@ public partial class InventoryUI : CanvasLayer
 		var slotStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.45f),
-			BorderColor = new Color(0.5f, 0.5f, 0.55f, 0.6f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
+			BorderColor = new Color(0.5f, 0.5f, 0.5f, 0.6f),
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 4,
+			CornerRadiusTopRight = 4,
+			CornerRadiusBottomLeft = 4,
+			CornerRadiusBottomRight = 4,
 		};
 		slot.AddThemeStyleboxOverride("panel", slotStyle);
 		// The slot body: a full-rect ColorRect (Control has no stylebox of its
@@ -1885,7 +1925,7 @@ public partial class InventoryUI : CanvasLayer
 			VerticalAlignment = VerticalAlignment.Bottom,
 		};
 		_slotCounts[slotIndex].SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-		_slotCounts[slotIndex].AddThemeColorOverride("font_color", Colors.White);
+		_slotCounts[slotIndex].AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_slotCounts[slotIndex].AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 		_slotCounts[slotIndex].AddThemeConstantOverride("outline_size", 3);
 		slot.AddChild(_slotCounts[slotIndex]);
@@ -2195,14 +2235,18 @@ public partial class InventoryUI : CanvasLayer
 			{
 				BgColor = active ? new Color(0.35f, 0.35f, 0.35f) : new Color(0.16f, 0.16f, 0.16f),
 				BorderColor = new Color(0.4f, 0.4f, 0.4f, active ? 1f : 0.6f),
-				BorderWidthLeft = 1,
-				BorderWidthTop = 1,
-				BorderWidthRight = 1,
-				BorderWidthBottom = 1,
-				ContentMarginLeft = 8f,
-				ContentMarginRight = 8f,
-				ContentMarginTop = 2f,
-				ContentMarginBottom = 2f,
+				BorderWidthLeft = 2,
+				BorderWidthTop = 2,
+				BorderWidthRight = 2,
+				BorderWidthBottom = 2,
+				CornerRadiusTopLeft = 6,
+				CornerRadiusTopRight = 6,
+				CornerRadiusBottomLeft = 6,
+				CornerRadiusBottomRight = 6,
+				ContentMarginLeft = 10f,
+				ContentMarginRight = 10f,
+				ContentMarginTop = 4f,
+				ContentMarginBottom = 4f,
 			};
 			tab.AddThemeStyleboxOverride("normal", style);
 			tab.AddThemeStyleboxOverride("hover", style);

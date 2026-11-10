@@ -207,14 +207,18 @@ public partial class PauseMenu : CanvasLayer
 		{
 			BgColor = new Color(0.14f, 0.14f, 0.14f, 0.95f),
 			BorderColor = new Color(0.35f, 0.35f, 0.35f, 1f),
-			BorderWidthLeft = 1,
-			BorderWidthTop = 1,
-			BorderWidthRight = 1,
-			BorderWidthBottom = 1,
-			ContentMarginLeft = 24f,
-			ContentMarginTop = 10f,
-			ContentMarginRight = 24f,
-			ContentMarginBottom = 10f,
+			BorderWidthLeft = 2,
+			BorderWidthTop = 2,
+			BorderWidthRight = 2,
+			BorderWidthBottom = 2,
+			CornerRadiusTopLeft = 8,
+			CornerRadiusTopRight = 8,
+			CornerRadiusBottomLeft = 8,
+			CornerRadiusBottomRight = 8,
+			ContentMarginLeft = 26f,
+			ContentMarginTop = 12f,
+			ContentMarginRight = 26f,
+			ContentMarginBottom = 12f,
 		};
 		var hover = (StyleBoxFlat)normal.Duplicate();
 		hover.BgColor = new Color(0.2f, 0.2f, 0.2f, 0.95f);
