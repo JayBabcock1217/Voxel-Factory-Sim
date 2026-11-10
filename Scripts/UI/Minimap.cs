@@ -84,6 +84,16 @@ public partial class Minimap : Node
 	// allocation and eliminates the per-pixel SetPixel binding calls.
 	private byte[] _displayBuf;
 
+	// Dirty flag: set when the terrain data changes (a chunk generates, gets
+	// edited, or is removed) OR the player moves to a new tile. The slice is
+	// only re-read when this is true — the map data is persistent and only
+	// changes on chunk events, so we don't re-read it every frame.
+	private bool _sliceDirty = true;
+
+	// The player tile the slice was last read for (to detect movement).
+	private int _lastSlicePx;
+	private int _lastSlicePz;
+
 	// ------------------------------------------------------------------
 	// Lifecycle
 	// ------------------------------------------------------------------
@@ -149,8 +159,11 @@ public partial class Minimap : Node
 		{
 			_manager.WaypointsChanged += OnWaypointsChanged;
 			_manager.MapSystemToggled += OnMapSystemToggled;
+			_manager.Renderer.TerrainChanged += OnTerrainChanged;
 		}
 	}
+
+	private void OnTerrainChanged() => _sliceDirty = true;
 
 	private void OnMapSystemToggled()
 	{
@@ -171,6 +184,7 @@ public partial class Minimap : Node
 			{
 				_manager.WaypointsChanged += OnWaypointsChanged;
 				_manager.MapSystemToggled += OnMapSystemToggled;
+				_manager.Renderer.TerrainChanged += OnTerrainChanged;
 			}
 		}
 
@@ -196,21 +210,29 @@ public partial class Minimap : Node
 		var px = (int)Mathf.Floor(_player.GlobalPosition.X);
 		var pz = (int)Mathf.Floor(_player.GlobalPosition.Z);
 
-		// Re-center the slice on the player (the circle always shows the player's
-		// surroundings). The slice origin moves with the player; because the map
-		// data is PUSHED by the world (chunks push their 2D height data when they
-		// generate / get edited), reading a tile is an O(1) lookup — so we simply
-		// read the WHOLE slice fresh every frame. There is no budget, no
-		// dirty-chunk tracking, and no "re-fill" — the map is a pure display of
-		// the data the world handed it. Unpushed chunks (not yet generated) read
-		// as "unknown".
-		_sliceMinX = px - RadiusTiles / 2;
-		_sliceMinZ = pz - RadiusTiles / 2;
+		// Detect player movement to a new tile (the slice window shifts).
+		if (px != _lastSlicePx || pz != _lastSlicePz)
+		{
+			_sliceDirty = true;
+			_lastSlicePx = px;
+			_lastSlicePz = pz;
+		}
 
-		// Read the slice's tiles from the shared map data (O(1) per tile).
-		ReadSlice(_manager.Renderer);
+		// Re-read the slice ONLY when the terrain data changed (a chunk
+		// generated / edited / removed) or the player moved to a new tile.
+		// The map data is persistent — it only changes on chunk events, so we
+		// don't re-read it every frame.
+		if (_sliceDirty)
+		{
+			_sliceMinX = px - RadiusTiles / 2;
+			_sliceMinZ = pz - RadiusTiles / 2;
+			ReadSlice(_manager.Renderer);
+			_sliceDirty = false;
+		}
 
 		// Rotate the slice into the circular display and draw the overlays.
+		// This runs every frame (the yaw changes continuously), but it's cheap
+		// now (raw buffer ops, no Godot bindings).
 		UpdateDisplay(px, pz);
 	}
 
@@ -220,6 +242,10 @@ public partial class Minimap : Node
 		{
 			_manager.WaypointsChanged -= OnWaypointsChanged;
 			_manager.MapSystemToggled -= OnMapSystemToggled;
+			if (_manager.Renderer != null)
+			{
+				_manager.Renderer.TerrainChanged -= OnTerrainChanged;
+			}
 		}
 	}
 

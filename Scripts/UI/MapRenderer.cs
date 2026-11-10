@@ -132,6 +132,14 @@ public partial class MapRenderer : RefCounted
 	/// <summary>The color of an "unknown" tile (chunk not yet generated / pushed).</summary>
 	public static readonly Color UnknownColor = new Color(0.07f, 0.08f, 0.10f, 1f);
 
+	/// <summary>
+	/// Raised whenever the terrain data changes (a chunk is pushed, a tile is
+	/// edited, a chunk is removed, or all terrain is cleared). The minimap and
+	/// map window subscribe to this to know when they need to re-read the data
+	/// (instead of re-reading every frame).
+	/// </summary>
+	public event System.Action TerrainChanged;
+
 	/// <summary>Per-chunk 2D height+material data, keyed by chunk coord. Sparse (only pushed chunks).</summary>
 	private readonly Dictionary<Vector2I, ChunkMapData> _chunks = new();
 
@@ -154,6 +162,7 @@ public partial class MapRenderer : RefCounted
 		// Bulk-copy the pushed arrays into the stored tile data.
 		System.Array.Copy(heights, data.Heights, size * size);
 		System.Array.Copy(materials, data.Materials, size * size);
+		TerrainChanged?.Invoke();
 	}
 
 	/// <summary>
@@ -167,6 +176,7 @@ public partial class MapRenderer : RefCounted
 		if (_chunks.TryGetValue(coord, out ChunkMapData data))
 		{
 			data.SetTile(localX, localZ, height, material);
+			TerrainChanged?.Invoke();
 		}
 	}
 
@@ -176,13 +186,20 @@ public partial class MapRenderer : RefCounted
 	/// </summary>
 	public void RemoveChunk(Vector2I coord)
 	{
-		_chunks.Remove(coord);
+		if (_chunks.Remove(coord))
+		{
+			TerrainChanged?.Invoke();
+		}
 	}
 
 	/// <summary>Drops ALL terrain data (world switch / new world). Waypoints are kept.</summary>
 	public void ClearTerrain()
 	{
-		_chunks.Clear();
+		if (_chunks.Count > 0)
+		{
+			_chunks.Clear();
+			TerrainChanged?.Invoke();
+		}
 	}
 
 	/// <summary>

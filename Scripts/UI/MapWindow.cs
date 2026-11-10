@@ -117,6 +117,16 @@ public partial class MapWindow : Node
 	// allocation. Image.GetData() returns a copy, so we can't write to it.
 	private byte[] _displayBuf;
 
+	// Dirty flag: set when the terrain data changes (a chunk generates, gets
+	// edited, or is removed), the view is panned, or the zoom changes. The
+	// display is only rebuilt when this is true — the map data is persistent
+	// and only changes on chunk events, so we don't rebuild every frame.
+	private bool _displayDirty = true;
+
+	// The view state the display was last built for (to detect pan/zoom changes).
+	private Vector2 _lastViewCenter;
+	private float _lastZoom;
+
 	// A row in the waypoint list panel: a name label + distance label + focus/remove.
 	private sealed class WaypointRow
 	{
@@ -169,6 +179,10 @@ public partial class MapWindow : Node
 			if (_manager != null)
 			{
 				_manager.MapSystemToggled += OnMapSystemToggled;
+				if (_manager.Renderer != null)
+				{
+					_manager.Renderer.TerrainChanged += OnTerrainChanged;
+				}
 			}
 		}
 		if (_player == null)
@@ -191,6 +205,15 @@ public partial class MapWindow : Node
 		{
 			_lastVp = vp;
 			LayoutPanel();
+			_displayDirty = true;
+		}
+
+		// Detect pan/zoom changes (the view state the display was built for).
+		if (_viewCenter != _lastViewCenter || _zoom != _lastZoom)
+		{
+			_lastViewCenter = _viewCenter;
+			_lastZoom = _zoom;
+			_displayDirty = true;
 		}
 
 		var renderer = _manager.Renderer;
@@ -199,11 +222,22 @@ public partial class MapWindow : Node
 			return;
 		}
 
-		// Read the visible region from the shared map data (the same data the
-		// minimap shows) and blit it at the current zoom (see RebuildDisplay).
-		// No scanning of the world — the world pushed the data when it generated.
-		RebuildDisplay(renderer);
+		// Rebuild the terrain tiles ONLY when the terrain data changed, the view
+		// was panned, or the zoom changed. The map data is persistent — it only
+		// changes on chunk events, so we don't re-blit the tiles every frame.
+		if (_displayDirty)
+		{
+			RebuildDisplay(renderer);
+			_displayDirty = false;
+		}
+
+		// Draw the dynamic overlays (player arrow, waypoint markers) every frame
+		// so the player arrow tracks the player smoothly. This is cheap (a few
+		// dozen SetPixel calls, no terrain tile blit).
+		DrawOverlays();
 	}
+
+	private void OnTerrainChanged() => _displayDirty = true;
 
 	public override void _ExitTree()
 	{
@@ -217,6 +251,10 @@ public partial class MapWindow : Node
 		if (_manager != null)
 		{
 			_manager.MapSystemToggled -= OnMapSystemToggled;
+			if (_manager.Renderer != null)
+			{
+				_manager.Renderer.TerrainChanged -= OnTerrainChanged;
+			}
 		}
 	}
 
@@ -420,6 +458,10 @@ public partial class MapWindow : Node
 				_viewCenter = new Vector2(_player.GlobalPosition.X, _player.GlobalPosition.Z);
 			}
 			_zoom = InitialZoom;
+			// Force a rebuild on the next frame (the view just changed).
+			_lastViewCenter = Vector2.Zero;
+			_lastZoom = -1f;
+			_displayDirty = true;
 			SetPlaceMode(false);
 			_selectedWaypointId = -1;
 			// Release the mouse so the user can click / drag the map.
@@ -1042,22 +1084,33 @@ public partial class MapWindow : Node
 			if (lz >= CS) { lz = 0; cz0++; }
 		}
 
-		// Push the filled buffer into the image (one bulk copy). Overlays below
-		// use SetPixel directly on the image (which writes in place, unlike
-		// GetData, which returns a copy).
+		// Push the filled buffer into the image (one bulk copy). Overlays are
+		// drawn separately (DrawOverlays) so they can update every frame (the
+		// player arrow tracks the player) without re-blitting the terrain tiles.
 		_displayImage.SetData(w, h, false, Image.Format.Rgba8, dstBuf);
-
-		// Overlays.
-		DrawEntityOverlays();
-		DrawWaypointOverlays();
-
-		_displayTexture.Update(_displayImage);
 
 		// Update the coordinate readout (the view center's world coords).
 		if (_coordsLabel != null)
 		{
 			_coordsLabel.Text = $"X {(int)_viewCenter.X}   Z {(int)_viewCenter.Y}   zoom {zoom:0.0}";
 		}
+	}
+
+	/// <summary>
+	/// Draws the dynamic overlays (player arrow, waypoint markers) onto the
+	/// display image and pushes it to the texture. This runs every frame while
+	/// the map is open (the player arrow tracks the player smoothly), but it's
+	/// cheap — only a few dozen SetPixel calls (no terrain tile blit).
+	/// </summary>
+	private void DrawOverlays()
+	{
+		if (_displayImage == null || _displayImage.GetWidth() != _displayW || _displayImage.GetHeight() != _displayH)
+		{
+			return;
+		}
+		DrawEntityOverlays();
+		DrawWaypointOverlays();
+		_displayTexture.Update(_displayImage);
 	}
 
 	/// <summary>Draws the player (arrow), nearby zombies (red dots), and hives (purple dots).</summary>
