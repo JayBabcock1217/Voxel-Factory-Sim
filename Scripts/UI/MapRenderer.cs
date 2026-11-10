@@ -194,7 +194,6 @@ public partial class MapRenderer : RefCounted
 	public Color GetTileColor(int wx, int wz, VoxelMaterialPalette palette)
 	{
 		int size = ChunkMapData.Size;
-		// Floor-divide into the chunk coord (matches VoxelWorld.ChunkCoordOf).
 		int cx = FloorDiv(wx, size);
 		int cz = FloorDiv(wz, size);
 		if (!_chunks.TryGetValue(new Vector2I(cx, cz), out ChunkMapData data))
@@ -212,8 +211,36 @@ public partial class MapRenderer : RefCounted
 		return TileColor(data.Materials[i], h, palette);
 	}
 
+	/// <summary>
+	/// Non-allocating tile color lookup for the hot path (the minimap / map
+	/// window call this per-tile, per-frame — a <see cref="Vector2I"/> allocation
+	/// per call is pure GC churn). The caller computes the chunk coord and
+	/// passes it in; this method only does the dictionary lookup + array reads.
+	/// Returns the packed RGBA as a single <see cref="uint"/> (0xAABBGGRR) to
+	/// avoid a <see cref="Color"/> allocation, plus an "is known" flag.
+	/// </summary>
+	public bool TryGetTileColorPacked(int cx, int cz, int lx, int lz, VoxelMaterialPalette palette, out uint packed)
+	{
+		packed = 0;
+		if (!_chunks.TryGetValue(new Vector2I(cx, cz), out ChunkMapData data))
+		{
+			return false;
+		}
+		int i = lz * ChunkMapData.Size + lx;
+		int h = data.Heights[i];
+		if (h < 0)
+		{
+			return false;
+		}
+		Color c = TileColor(data.Materials[i], h, palette);
+		packed = ((uint)(c.A * 255f) << 24) | ((uint)(c.B * 255f) << 16) | ((uint)(c.G * 255f) << 8) | (uint)(c.R * 255f);
+		return true;
+	}
+
 	// Floor division (matches the world's chunk-coord convention for negatives).
-	private static int FloorDiv(int a, int b)
+	// Public so the minimap / map window can compute chunk coords incrementally
+	// in their hot paths without a per-tile FloorDiv call.
+	public static int FloorDiv(int a, int b)
 	{
 		int q = a / b;
 		if (a < 0 && a % b != 0)

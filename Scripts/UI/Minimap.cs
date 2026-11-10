@@ -79,6 +79,11 @@ public partial class Minimap : Node
 	// pushed into the Image via SetData). Avoids per-frame allocation.
 	private byte[] _sliceBuffer;
 
+	// Reusable managed buffer for the display (rotated) pixel data (filled in
+	// RotateBlit, pushed into the Image via SetData). Avoids per-frame
+	// allocation and eliminates the per-pixel SetPixel binding calls.
+	private byte[] _displayBuf;
+
 	// ------------------------------------------------------------------
 	// Lifecycle
 	// ------------------------------------------------------------------
@@ -235,6 +240,7 @@ public partial class Minimap : Node
 	{
 		var palette = _world.Palette;
 		int size = RadiusTiles;
+		const int CS = UI.ChunkMapData.Size; // 16
 		// Image.GetData() returns a COPY of the pixel data — writing to it does
 		// NOT modify the image. We must fill a managed buffer and push it into the
 		// Image via SetData (one bulk copy per frame, no per-pixel marshaling).
@@ -244,20 +250,43 @@ public partial class Minimap : Node
 		}
 		byte[] buf = _sliceBuffer;
 		int row = size * 4;
+
+		// Walk the slice tile-by-tile but use the non-allocating packed color
+		// path (no Vector2I allocation per tile, no Color allocation). The chunk
+		// coord changes every 16 tiles in each axis; we compute it incrementally.
+		int cx = MapRenderer.FloorDiv(_sliceMinX, CS);
+		int cz = MapRenderer.FloorDiv(_sliceMinZ, CS);
+		int lx = _sliceMinX - cx * CS;
+		int lz = _sliceMinZ - cz * CS;
+
 		for (int dz = 0; dz < size; dz++)
 		{
-			int wz = _sliceMinZ + dz;
 			int ro = dz * row;
 			for (int dx = 0; dx < size; dx++)
 			{
-				int wx = _sliceMinX + dx;
-				var c = renderer.GetTileColor(wx, wz, palette);
+				uint packed;
+				bool known = renderer.TryGetTileColorPacked(cx, cz, lx, lz, palette, out packed);
 				int o = ro + dx * 4;
-				buf[o] = (byte)(c.R * 255f);
-				buf[o + 1] = (byte)(c.G * 255f);
-				buf[o + 2] = (byte)(c.B * 255f);
-				buf[o + 3] = 255;
+				if (known)
+				{
+					buf[o] = (byte)(packed & 0xFF);         // R
+					buf[o + 1] = (byte)((packed >> 8) & 0xFF);   // G
+					buf[o + 2] = (byte)((packed >> 16) & 0xFF);  // B
+					buf[o + 3] = (byte)((packed >> 24) & 0xFF);  // A
+				}
+				else
+				{
+					buf[o] = 18;   // UnknownColor: (0.07, 0.08, 0.10, 1)
+					buf[o + 1] = 20;
+					buf[o + 2] = 26;
+					buf[o + 3] = 255;
+				}
+				// Advance the local/chunk coords.
+				lx++;
+				if (lx >= CS) { lx = 0; cx++; }
 			}
+			lz++;
+			if (lz >= CS) { lz = 0; cz++; }
 		}
 		_slice.SetData(size, size, false, Image.Format.Rgba8, buf);
 	}
@@ -268,88 +297,117 @@ public partial class Minimap : Node
 
 	/// <summary>
 	/// Rotates the terrain slice by the player's yaw into the circular display
-	/// image and draws the waypoint / player overlays.
+	/// buffer, pushes it into the display Image, and draws the waypoint / player
+	/// overlays.
 	/// </summary>
 	private void UpdateDisplay(int px, int pz)
 	{
 		float yaw = _player.Rotation.Y;
 		float angle = -yaw; // rotate so the player's facing points up
+		int d = DiameterPx;
 
-		RotateBlit(_slice, _displayImage, angle, DiameterPx);
+		// Rotate the slice into the display buffer (raw byte[] — no SetPixel).
+		if (_displayBuf == null || _displayBuf.Length != d * d * 4)
+		{
+			_displayBuf = new byte[d * d * 4];
+		}
+		RotateBlit(_sliceBuffer, RadiusTiles, RadiusTiles, _displayBuf, angle, d);
+		_displayImage.SetData(d, d, false, Image.Format.Rgba8, _displayBuf);
 
+		// Overlays (drawn with SetPixel on the Image — only a few dozen calls).
 		OverlayWaypoints(px, pz, yaw);
 		OverlayPlayerCenter();
 
 		float northAngleScreen = -yaw; // "N" rotates with the map
-		PlaceCompass(_compassN, northAngleScreen, DiameterPx);
-		PlaceArrow(_arrow, northAngleScreen, DiameterPx);
+		PlaceCompass(_compassN, northAngleScreen, d);
+		PlaceArrow(_arrow, northAngleScreen, d);
 
 		_displayTexture.Update(_displayImage);
 	}
 
 	/// <summary>
-	/// Rotates the source tile image by <paramref name="angle"/> (radians) and
+	/// Rotates the source tile buffer by <paramref name="angle"/> (radians) and
 	/// scales it to <paramref name="destSize"/>×<paramref name="destSize"/>,
-	/// writing into <paramref name="dest"/>. Bilinear sampling for a smooth
-	/// (non-pixelated) rotation. The result is CIRCULAR: pixels outside the
-	/// inscribed circle are transparent (with a ~2px soft edge).
+	/// writing into <paramref name="destBuf"/> (a managed byte[] of size
+	/// destSize²×4, Rgba8). Bilinear sampling for a smooth (non-pixelated)
+	/// rotation. The result is CIRCULAR: pixels outside the inscribed circle
+	/// are transparent (with a ~2px soft edge).
+	///
+	/// PERFORMANCE: operates entirely on managed byte[] buffers (no Godot
+	/// SetPixel/GetPixel binding calls). The caller pushes destBuf into the
+	/// Image via SetData once after this returns. ~25,600 pixels at 160px
+	/// diameter, each doing 4 raw byte reads + 4 raw byte writes (no
+	/// marshaling), so the whole rotation is well under 1ms.
 	/// </summary>
-	private static void RotateBlit(Image src, Image dest, float angle, int destSize)
+	private static void RotateBlit(byte[] srcBuf, int srcW, int srcH, byte[] destBuf, float angle, int destSize)
 	{
 		float cosA = Mathf.Cos(angle);
 		float sinA = Mathf.Sin(angle);
-		int srcW = src.GetWidth();
-		int srcH = src.GetHeight();
 		float srcCx = srcW * 0.5f;
 		float srcCy = srcH * 0.5f;
 		float scale = destSize / (float)srcW;
 		float destCx = destSize * 0.5f;
 		float radius = destSize * 0.5f;
 		float edge = 2f;
+		int srcRow = srcW * 4;
 
 		for (int dy = 0; dy < destSize; dy++)
 		{
+			float py = dy + 0.5f - destCx;
+			float dys = (dy + 0.5f - destSize * 0.5f) / scale;
+			float cosTerm = -sinA * dys;
+			float sinTerm = cosA * dys;
+			int destRow = dy * destSize * 4;
+
 			for (int dx = 0; dx < destSize; dx++)
 			{
+				int po = destRow + dx * 4;
 				float px = dx + 0.5f - destCx;
-				float py = dy + 0.5f - destCx;
 				float dist = Mathf.Sqrt(px * px + py * py);
 				if (dist >= radius - edge)
 				{
 					float a = Mathf.Clamp((radius - edge - dist) / edge, 0f, 1f);
-					dest.SetPixel(dx, dy, new Color(0, 0, 0, a));
+					destBuf[po] = 0;
+					destBuf[po + 1] = 0;
+					destBuf[po + 2] = 0;
+					destBuf[po + 3] = (byte)(a * 255f);
 					continue;
 				}
 				float dxs = (dx + 0.5f - destSize * 0.5f) / scale;
-				float dys = (dy + 0.5f - destSize * 0.5f) / scale;
-				float rx = cosA * dxs - sinA * dys;
-				float ry = sinA * dxs + cosA * dys;
+				float rx = cosA * dxs + cosTerm;
+				float ry = sinA * dxs + sinTerm;
 				float sx = rx + srcCx;
 				float sy = ry + srcCy;
 				if (sx < 0 || sy < 0 || sx >= srcW - 1 || sy >= srcH - 1)
 				{
-					dest.SetPixel(dx, dy, new Color(0.07f, 0.08f, 0.10f, 1f));
+					destBuf[po] = 18;
+					destBuf[po + 1] = 20;
+					destBuf[po + 2] = 26;
+					destBuf[po + 3] = 255;
 					continue;
 				}
 				int x0 = (int)sx;
 				int y0 = (int)sy;
 				float fx = sx - x0;
 				float fy = sy - y0;
-				var c00 = src.GetPixel(x0, y0);
-				var c10 = src.GetPixel(x0 + 1, y0);
-				var c01 = src.GetPixel(x0, y0 + 1);
-				var c11 = src.GetPixel(x0 + 1, y0 + 1);
-				float top = c00.R + (c10.R - c00.R) * fx;
-				float topG = c00.G + (c10.G - c00.G) * fx;
-				float topB = c00.B + (c10.B - c00.B) * fx;
-				float bot = c01.R + (c11.R - c01.R) * fx;
-				float botG = c01.G + (c11.G - c01.G) * fx;
-				float botB = c01.B + (c11.B - c01.B) * fx;
-				dest.SetPixel(dx, dy, new Color(
-					top + (bot - top) * fy,
-					topG + (botG - topG) * fy,
-					topB + (botB - topB) * fy,
-					1f));
+
+				// Bilinear sample from the raw src buffer (4 bytes per pixel).
+				int i00 = (y0 * srcW + x0) * 4;
+				int i10 = (y0 * srcW + x0 + 1) * 4;
+				int i01 = ((y0 + 1) * srcW + x0) * 4;
+				int i11 = ((y0 + 1) * srcW + x0 + 1) * 4;
+
+				float topR = (srcBuf[i00] + (srcBuf[i10] - srcBuf[i00]) * fx);
+				float topG = (srcBuf[i00 + 1] + (srcBuf[i10 + 1] - srcBuf[i00 + 1]) * fx);
+				float topB = (srcBuf[i00 + 2] + (srcBuf[i10 + 2] - srcBuf[i00 + 2]) * fx);
+				float botR = (srcBuf[i01] + (srcBuf[i11] - srcBuf[i01]) * fx);
+				float botG = (srcBuf[i01 + 1] + (srcBuf[i11 + 1] - srcBuf[i01 + 1]) * fx);
+				float botB = (srcBuf[i01 + 2] + (srcBuf[i11 + 2] - srcBuf[i01 + 2]) * fx);
+
+				destBuf[po] = (byte)(topR + (botR - topR) * fy);
+				destBuf[po + 1] = (byte)(topG + (botG - topG) * fy);
+				destBuf[po + 2] = (byte)(topB + (botB - topB) * fy);
+				destBuf[po + 3] = 255;
 			}
 		}
 	}

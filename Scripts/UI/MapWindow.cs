@@ -934,6 +934,7 @@ public partial class MapWindow : Node
 		float cx = w * 0.5f;
 		float cy = h * 0.5f;
 		float zoom = _zoom;
+		const int CS = UI.ChunkMapData.Size; // 16
 
 		// Image.GetData() returns a COPY — writing to it does not modify the
 		// image. We fill a managed buffer and push it in via SetData (one bulk
@@ -944,16 +945,6 @@ public partial class MapWindow : Node
 		}
 		byte[] dstBuf = _displayBuf;
 
-		// Clear to "unknown" first so any sub-pixel gaps left by fractional-zoom
-		// tile blocks read as dark, not stale/garbage pixels.
-		for (int i = 0; i < dstBuf.Length; i += 4)
-		{
-			dstBuf[i] = 18;
-			dstBuf[i + 1] = 20;
-			dstBuf[i + 2] = 26;
-			dstBuf[i + 3] = 255;
-		}
-
 		// The visible world-tile range at the current zoom (the view center ±
 		// half the display, in tiles).
 		int tileMinX = (int)Mathf.Floor(_viewCenter.X - cx / zoom);
@@ -961,20 +952,67 @@ public partial class MapWindow : Node
 		int tileMinZ = (int)Mathf.Floor(_viewCenter.Y - cy / zoom);
 		int tileMaxZ = (int)Mathf.Ceil(_viewCenter.Y + cy / zoom);
 
-		// For each visible world tile, compute its color (O(1)) and blit it to the
-		// screen-pixel block it occupies. A tile spans zoom pixels; we clamp to
-		// the display bounds. (Integer zoom is exact; fractional zoom may leave a
-		// 1px seam at tile edges, which is invisible at the map's scale.)
+		// CAP the tile range to prevent the low-zoom blowup. At zoom=1 on a
+		// 800×600 display, the raw range is 800×600 = 480K tiles. Cap the
+		// rendered tile count to MaxRenderedTiles (default 256×256 = 65K) by
+		// centering the range on the view center and shrinking it if needed.
+		// The visual difference is negligible at low zoom (each tile is 1px).
+		const int MaxRenderedTiles = 256;
+		int tileW = tileMaxX - tileMinX + 1;
+		int tileH = tileMaxZ - tileMinZ + 1;
+		if (tileW > MaxRenderedTiles || tileH > MaxRenderedTiles)
+		{
+			int centerX = (tileMinX + tileMaxX) / 2;
+			int centerZ = (tileMinZ + tileMaxZ) / 2;
+			tileMinX = centerX - MaxRenderedTiles / 2;
+			tileMaxX = centerX + MaxRenderedTiles / 2;
+			tileMinZ = centerZ - MaxRenderedTiles / 2;
+			tileMaxZ = centerZ + MaxRenderedTiles / 2;
+			tileW = tileMaxX - tileMinX + 1;
+			tileH = tileMaxZ - tileMinZ + 1;
+		}
+
+		// Clear to "unknown" first so any sub-pixel gaps left by fractional-zoom
+		// tile blocks read as dark, not stale/garbage pixels. Use Array.Fill for
+		// speed (a single tight loop, no per-pixel Color allocation).
+		System.Array.Fill(dstBuf, (byte)0, 0, dstBuf.Length);
+		// Re-stamp the unknown color (0x1A, 0x14, 0x1C, 0xFF) — the fill above
+		// zeroed everything, so we just need to set the alpha channel.
+		for (int i = 3; i < dstBuf.Length; i += 4)
+		{
+			dstBuf[i] = 255;
+		}
+
+		// For each visible world tile, compute its color via the non-allocating
+		// packed path (no Vector2I, no Color allocation) and blit it to the
+		// screen-pixel block it occupies. The chunk coord is computed
+		// incrementally (it changes every 16 tiles) to avoid the FloorDiv per
+		// tile. A single reusable 4-byte pixel pattern avoids per-tile
+		// allocation.
 		int zInt = Mathf.Max(1, (int)zoom);
+		int cx0 = MapRenderer.FloorDiv(tileMinX, CS);
+		int cz0 = MapRenderer.FloorDiv(tileMinZ, CS);
+		int lx = tileMinX - cx0 * CS;
+		int lz = tileMinZ - cz0 * CS;
+		byte[] px = new byte[4]; // reusable pixel pattern
+
 		for (int tz = tileMinZ; tz <= tileMaxZ; tz++)
 		{
 			for (int tx = tileMinX; tx <= tileMaxX; tx++)
 			{
-				var col = renderer.GetTileColor(tx, tz, palette);
-				byte cr = (byte)(col.R * 255f);
-				byte cg = (byte)(col.G * 255f);
-				byte cb = (byte)(col.B * 255f);
-				byte ca = (byte)(col.A * 255f);
+				uint packed;
+				bool known = renderer.TryGetTileColorPacked(cx0, cz0, lx, lz, palette, out packed);
+				if (known)
+				{
+					px[0] = (byte)(packed & 0xFF);
+					px[1] = (byte)((packed >> 8) & 0xFF);
+					px[2] = (byte)((packed >> 16) & 0xFF);
+					px[3] = (byte)((packed >> 24) & 0xFF);
+				}
+				else
+				{
+					px[0] = 18; px[1] = 20; px[2] = 26; px[3] = 255;
+				}
 
 				// Screen rect for this tile: its top-left world corner maps to a
 				// screen point; the tile spans zoom pixels from there.
@@ -984,19 +1022,24 @@ public partial class MapWindow : Node
 				int sy1 = Mathf.Min(h, sy0 + zInt);
 				int sxStart = Mathf.Max(0, sx0);
 				int syStart = Mathf.Max(0, sy0);
-				for (int sy = syStart; sy < sy1; sy++)
+				if (sxStart < sx1 && syStart < sy1)
 				{
-					int ro = sy * w * 4;
-					for (int sx = sxStart; sx < sx1; sx++)
+					int bw = sx1 - sxStart;
+					for (int sy = syStart; sy < sy1; sy++)
 					{
-						int o = ro + sx * 4;
-						dstBuf[o] = cr;
-						dstBuf[o + 1] = cg;
-						dstBuf[o + 2] = cb;
-						dstBuf[o + 3] = ca;
+						int destOff = (sy * w + sxStart) * 4;
+						for (int b = 0; b < bw; b++)
+						{
+							System.Buffer.BlockCopy(px, 0, dstBuf, destOff + b * 4, 4);
+						}
 					}
 				}
+				// Advance the local/chunk coords.
+				lx++;
+				if (lx >= CS) { lx = 0; cx0++; }
 			}
+			lz++;
+			if (lz >= CS) { lz = 0; cz0++; }
 		}
 
 		// Push the filled buffer into the image (one bulk copy). Overlays below
