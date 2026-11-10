@@ -47,7 +47,7 @@ public partial class Minimap : Node
 	/// is (DiameterPx/2) / (DiameterPx/RadiusTiles) = RadiusTiles/2, so a value
 	/// ~50% larger than needed (RadiusTiles ≈ 1.5 × DiameterPx/tile) is safe.
 	/// </summary>
-	[Export] public int RadiusTiles { get; set; } = 64;
+	[Export] public int RadiusTiles { get; set; } = 96;
 
 	// ------------------------------------------------------------------
 	// State
@@ -326,7 +326,6 @@ public partial class Minimap : Node
 	private void UpdateDisplay(int px, int pz)
 	{
 		float yaw = _player.Rotation.Y;
-		float angle = -yaw; // rotate so the player's facing points up
 		int d = DiameterPx;
 
 		// Rotate the slice into the display buffer (raw byte[] — no SetPixel).
@@ -334,7 +333,11 @@ public partial class Minimap : Node
 		{
 			_displayBuf = new byte[d * d * 4];
 		}
-		RotateBlit(_sliceBuffer, RadiusTiles, RadiusTiles, _displayBuf, angle, d);
+		// The terrain is rotated by +yaw so that the player's facing points up AND
+		// the map rotates the correct way: looking right (yaw decreases) turns the
+		// map counter-clockwise, so world-north sweeps to the LEFT — matching the
+		// compass and waypoint overlays (which are derived from the same yaw).
+		RotateBlit(_sliceBuffer, RadiusTiles, RadiusTiles, _displayBuf, yaw, d);
 		_displayImage.SetData(d, d, false, Image.Format.Rgba8, _displayBuf);
 
 		// Overlays (drawn with SetPixel on the Image — only a few dozen calls).
