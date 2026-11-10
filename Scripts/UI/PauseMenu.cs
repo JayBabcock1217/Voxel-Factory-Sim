@@ -121,7 +121,7 @@ public partial class PauseMenu : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		title.AddThemeFontSizeOverride("font_size", 56);
-		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		title.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 		title.AddThemeConstantOverride("outline_size", 6);
 		_home.AddChild(title);
@@ -205,8 +205,8 @@ public partial class PauseMenu : CanvasLayer
 		button.AddThemeFontSizeOverride("font_size", 24);
 		var normal = new StyleBoxFlat
 		{
-			BgColor = new Color(0.14f, 0.18f, 0.28f, 0.95f),
-			BorderColor = new Color(0.35f, 0.45f, 0.65f, 1f),
+			BgColor = new Color(0.14f, 0.14f, 0.14f, 0.95f),
+			BorderColor = new Color(0.35f, 0.35f, 0.35f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -217,14 +217,14 @@ public partial class PauseMenu : CanvasLayer
 			ContentMarginBottom = 10f,
 		};
 		var hover = (StyleBoxFlat)normal.Duplicate();
-		hover.BgColor = new Color(0.2f, 0.27f, 0.42f, 0.95f);
+		hover.BgColor = new Color(0.2f, 0.2f, 0.2f, 0.95f);
 		var pressedStyle = (StyleBoxFlat)normal.Duplicate();
-		pressedStyle.BgColor = new Color(0.1f, 0.13f, 0.2f, 0.95f);
+		pressedStyle.BgColor = new Color(0.1f, 0.1f, 0.1f, 0.95f);
 		button.AddThemeStyleboxOverride("normal", normal);
 		button.AddThemeStyleboxOverride("hover", hover);
 		button.AddThemeStyleboxOverride("pressed", pressedStyle);
-		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
-		button.AddThemeColorOverride("font_hover_color", Colors.White);
+		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
+		button.AddThemeColorOverride("font_hover_color", new Color(1f, 1f, 1f));
 		button.Pressed += pressed;
 		return button;
 	}

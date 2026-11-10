@@ -88,7 +88,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		title.AddThemeFontSizeOverride("font_size", 40);
-		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		vbox.AddChild(title);
 
 		_hint = new Label
@@ -100,7 +100,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_hint.AddThemeFontSizeOverride("font_size", 18);
-		_hint.AddThemeColorOverride("font_color", new Color(0.6f, 0.7f, 0.85f));
+		_hint.AddThemeColorOverride("font_color", new Color(0.65f, 0.65f, 0.65f));
 		vbox.AddChild(_hint);
 
 		// Scrollable slot list.
@@ -243,7 +243,7 @@ public partial class SlotPicker : Control
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
 			empty.AddThemeFontSizeOverride("font_size", 22);
-			empty.AddThemeColorOverride("font_color", new Color(0.6f, 0.7f, 0.85f));
+			empty.AddThemeColorOverride("font_color", new Color(0.65f, 0.65f, 0.65f));
 			_rows.AddChild(empty);
 			return;
 		}
@@ -285,7 +285,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		name.AddThemeFontSizeOverride("font_size", 24);
-		name.AddThemeColorOverride("font_color", new Color(0.92f, 0.93f, 0.97f));
+		name.AddThemeColorOverride("font_color", new Color(0.92f, 0.92f, 0.92f));
 		info.AddChild(name);
 
 		var meta = new Label
@@ -295,7 +295,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		meta.AddThemeFontSizeOverride("font_size", 16);
-		meta.AddThemeColorOverride("font_color", new Color(0.55f, 0.63f, 0.78f));
+		meta.AddThemeColorOverride("font_color", new Color(0.6f, 0.6f, 0.6f));
 		info.AddChild(meta);
 		hbox.AddChild(info);
 
@@ -473,7 +473,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		titleLabel.AddThemeFontSizeOverride("font_size", 28);
-		titleLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		titleLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		vbox.AddChild(titleLabel);
 
 		var messageLabel = new Label
@@ -483,7 +483,7 @@ public partial class SlotPicker : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		messageLabel.AddThemeFontSizeOverride("font_size", 18);
-		messageLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.78f, 0.9f));
+		messageLabel.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 		vbox.AddChild(messageLabel);
 
 		var field = new LineEdit
@@ -505,7 +505,7 @@ public partial class SlotPicker : Control
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
 			secondLabel.AddThemeFontSizeOverride("font_size", 16);
-			secondLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.78f, 0.9f));
+			secondLabel.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 			vbox.AddChild(secondLabel);
 
 			secondField = new LineEdit
@@ -646,8 +646,8 @@ public partial class SlotPicker : Control
 		var theme = new Theme();
 		var panel = new StyleBoxFlat
 		{
-			BgColor = new Color(0.09f, 0.11f, 0.17f, 0.98f),
-			BorderColor = new Color(0.35f, 0.45f, 0.65f, 1f),
+			BgColor = new Color(0.09f, 0.09f, 0.09f, 0.98f),
+			BorderColor = new Color(0.35f, 0.35f, 0.35f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -664,8 +664,8 @@ public partial class SlotPicker : Control
 
 		var rowBox = new StyleBoxFlat
 		{
-			BgColor = new Color(0.14f, 0.18f, 0.28f, 1f),
-			BorderColor = new Color(0.3f, 0.4f, 0.6f, 1f),
+			BgColor = new Color(0.14f, 0.14f, 0.14f, 1f),
+			BorderColor = new Color(0.3f, 0.3f, 0.3f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -693,11 +693,11 @@ public partial class SlotPicker : Control
 		var normal = new StyleBoxFlat
 		{
 			BgColor = primary
-				? new Color(0.16f, 0.3f, 0.42f, 1f)
-				: new Color(0.14f, 0.18f, 0.28f, 1f),
+				? new Color(0.22f, 0.22f, 0.22f, 1f)
+				: new Color(0.14f, 0.14f, 0.14f, 1f),
 			BorderColor = primary
-				? new Color(0.4f, 0.65f, 0.8f, 1f)
-				: new Color(0.35f, 0.45f, 0.65f, 1f),
+				? new Color(0.5f, 0.5f, 0.5f, 1f)
+				: new Color(0.35f, 0.35f, 0.35f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -709,16 +709,16 @@ public partial class SlotPicker : Control
 		};
 		var hover = (StyleBoxFlat)normal.Duplicate();
 		hover.BgColor = primary
-			? new Color(0.22f, 0.4f, 0.55f, 1f)
-			: new Color(0.2f, 0.27f, 0.42f, 1f);
-		hover.BorderColor = new Color(0.55f, 0.68f, 0.9f, 1f);
+			? new Color(0.3f, 0.3f, 0.3f, 1f)
+			: new Color(0.2f, 0.2f, 0.2f, 1f);
+		hover.BorderColor = new Color(0.65f, 0.65f, 0.65f, 1f);
 		var pressedStyle = (StyleBoxFlat)normal.Duplicate();
-		pressedStyle.BgColor = new Color(0.1f, 0.13f, 0.2f, 1f);
+		pressedStyle.BgColor = new Color(0.1f, 0.1f, 0.1f, 1f);
 		button.AddThemeStyleboxOverride("normal", normal);
 		button.AddThemeStyleboxOverride("hover", hover);
 		button.AddThemeStyleboxOverride("pressed", pressedStyle);
-		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
-		button.AddThemeColorOverride("font_hover_color", Colors.White);
+		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
+		button.AddThemeColorOverride("font_hover_color", new Color(1f, 1f, 1f));
 		button.Pressed += pressed;
 		return button;
 	}
@@ -734,8 +734,8 @@ public partial class SlotPicker : Control
 		button.AddThemeFontSizeOverride("font_size", 16);
 		var normal = new StyleBoxFlat
 		{
-			BgColor = new Color(0.18f, 0.23f, 0.36f, 1f),
-			BorderColor = new Color(0.4f, 0.5f, 0.7f, 1f),
+			BgColor = new Color(0.18f, 0.18f, 0.18f, 1f),
+			BorderColor = new Color(0.4f, 0.4f, 0.4f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -746,14 +746,14 @@ public partial class SlotPicker : Control
 			ContentMarginBottom = 4f,
 		};
 		var hover = (StyleBoxFlat)normal.Duplicate();
-		hover.BgColor = new Color(0.26f, 0.34f, 0.5f, 1f);
+		hover.BgColor = new Color(0.26f, 0.26f, 0.26f, 1f);
 		var pressedStyle = (StyleBoxFlat)normal.Duplicate();
-		pressedStyle.BgColor = new Color(0.1f, 0.13f, 0.2f, 1f);
+		pressedStyle.BgColor = new Color(0.1f, 0.1f, 0.1f, 1f);
 		button.AddThemeStyleboxOverride("normal", normal);
 		button.AddThemeStyleboxOverride("hover", hover);
 		button.AddThemeStyleboxOverride("pressed", pressedStyle);
-		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
-		button.AddThemeColorOverride("font_hover_color", Colors.White);
+		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
+		button.AddThemeColorOverride("font_hover_color", new Color(1f, 1f, 1f));
 		button.Pressed += pressed;
 		return button;
 	}

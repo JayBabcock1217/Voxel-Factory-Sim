@@ -125,8 +125,8 @@ public partial class InventoryUI : CanvasLayer
 	// selected slot's background is tinted greenish; the rest use the dark base.
 	private readonly ColorRect[] _hotbarSlotBg = new ColorRect[Inventory.HotbarSize];
 	// The two background colors used for the selection tint (unselected vs. selected).
-	private static readonly Color HotbarBgUnselected = new Color(0.1f, 0.1f, 0.12f, 0.7f);
-	private static readonly Color HotbarBgSelected = new Color(0.22f, 0.55f, 0.28f, 0.85f);
+	private static readonly Color HotbarBgUnselected = new Color(0.08f, 0.08f, 0.08f, 0.7f);
+	private static readonly Color HotbarBgSelected = new Color(0.28f, 0.28f, 0.28f, 0.85f);
 	private int _selectedHotbarSlot;
 
 	// The weapon AMMO SLOTS: one per hotbar slot, living in the INVENTORY PANE
@@ -148,7 +148,7 @@ public partial class InventoryUI : CanvasLayer
 	// is a weapon (and the inventory is closed); it shows how much ammo is loaded
 	// in that weapon (the at-a-glance readout without opening the inventory).
 	private Label _hotbarAmmoCount;
-	private static readonly Color HotbarAmmoCountColor = new Color(0.85f, 0.9f, 1f);
+	private static readonly Color HotbarAmmoCountColor = new Color(0.92f, 0.92f, 0.92f);
 
 	// The slot-grid section (the Control that holds the storage grid + hotbar
 	// row). Kept so the ammo slots (children of it) can be positioned relative to
@@ -574,8 +574,8 @@ public partial class InventoryUI : CanvasLayer
 		};
 		var panelStyle = new StyleBoxFlat
 		{
-			BgColor = new Color(0.12f, 0.12f, 0.16f, 0.95f),
-			BorderColor = new Color(0.35f, 0.35f, 0.4f),
+			BgColor = new Color(0.12f, 0.12f, 0.12f, 0.95f),
+			BorderColor = new Color(0.35f, 0.35f, 0.35f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -598,7 +598,7 @@ public partial class InventoryUI : CanvasLayer
 			HorizontalAlignment = HorizontalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		title.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_panel.AddChild(title);
 
 		// The SECTIONS container: a plain (non-layout) Control that fills the
@@ -644,8 +644,8 @@ public partial class InventoryUI : CanvasLayer
 		};
 		var craftStyle = new StyleBoxFlat
 		{
-			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
-			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BgColor = new Color(0.1f, 0.1f, 0.1f, 0.9f),
+			BorderColor = new Color(0.35f, 0.35f, 0.35f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -666,8 +666,8 @@ public partial class InventoryUI : CanvasLayer
 		};
 		var devStyle = new StyleBoxFlat
 		{
-			BgColor = new Color(0.1f, 0.11f, 0.14f, 0.9f),
-			BorderColor = new Color(0.35f, 0.4f, 0.5f, 0.8f),
+			BgColor = new Color(0.1f, 0.1f, 0.1f, 0.9f),
+			BorderColor = new Color(0.35f, 0.35f, 0.35f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -718,7 +718,7 @@ public partial class InventoryUI : CanvasLayer
 		var hotbarBorderStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.25f),
-			BorderColor = new Color(0.6f, 0.6f, 0.65f, 0.8f),
+			BorderColor = new Color(0.6f, 0.6f, 0.6f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -774,7 +774,7 @@ public partial class InventoryUI : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_cursorCount.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-		_cursorCount.AddThemeColorOverride("font_color", Colors.White);
+		_cursorCount.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_cursorCount.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 		_cursorCount.AddThemeConstantOverride("outline_size", 3);
 		_cursor.AddChild(_cursorCount);
@@ -801,7 +801,7 @@ public partial class InventoryUI : CanvasLayer
 		var tooltipStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.85f),
-			BorderColor = new Color(0.6f, 0.6f, 0.65f, 0.8f),
+			BorderColor = new Color(0.6f, 0.6f, 0.6f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -820,7 +820,7 @@ public partial class InventoryUI : CanvasLayer
 			Position = new Vector2(8f, 4f),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_tooltipName.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		_tooltipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_tooltip.AddChild(_tooltipName);
 
 		_tooltipCount = new Label
@@ -830,7 +830,7 @@ public partial class InventoryUI : CanvasLayer
 			Position = new Vector2(8f, 24f),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_tooltipCount.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.75f));
+		_tooltipCount.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
 		_tooltip.AddChild(_tooltipCount);
 
 		_root.AddChild(_tooltip);
@@ -889,7 +889,7 @@ public partial class InventoryUI : CanvasLayer
 			var slotStyle = new StyleBoxFlat
 			{
 				BgColor = new Color(0f, 0f, 0f, 0.45f),
-				BorderColor = new Color(0.5f, 0.5f, 0.55f, 0.6f),
+				BorderColor = new Color(0.5f, 0.5f, 0.5f, 0.6f),
 				BorderWidthLeft = 1,
 				BorderWidthTop = 1,
 				BorderWidthRight = 1,
@@ -901,7 +901,7 @@ public partial class InventoryUI : CanvasLayer
 			// still reading as the same kind of slot.
 			var bg = new ColorRect
 			{
-				Color = new Color(0.08f, 0.08f, 0.1f, 0.85f),
+				Color = new Color(0.08f, 0.08f, 0.08f, 0.85f),
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
 			bg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -926,7 +926,7 @@ public partial class InventoryUI : CanvasLayer
 				VerticalAlignment = VerticalAlignment.Bottom,
 			};
 			count.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-			count.AddThemeColorOverride("font_color", Colors.White);
+			count.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 			count.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 			count.AddThemeConstantOverride("outline_size", 3);
 			slot.AddChild(count);
@@ -1040,7 +1040,7 @@ public partial class InventoryUI : CanvasLayer
 				VerticalAlignment = VerticalAlignment.Bottom,
 			};
 			_hotbarCounts[i].SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-			_hotbarCounts[i].AddThemeColorOverride("font_color", Colors.White);
+			_hotbarCounts[i].AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 			_hotbarCounts[i].AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 			_hotbarCounts[i].AddThemeConstantOverride("outline_size", 3);
 			slot.AddChild(_hotbarCounts[i]);
@@ -1076,7 +1076,7 @@ public partial class InventoryUI : CanvasLayer
 			ContentMarginRight = 8f,
 		};
 		_hotbarTooltip.AddThemeStyleboxOverride("normal", tipStyle);
-		_hotbarTooltip.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_hotbarTooltip.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_hotbarTooltip.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
 		_hotbarTooltip.AddThemeConstantOverride("outline_size", 4);
 		_root.AddChild(_hotbarTooltip);
@@ -1128,7 +1128,7 @@ public partial class InventoryUI : CanvasLayer
 			HorizontalAlignment = HorizontalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		craftTitle.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		craftTitle.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_craftPanel.AddChild(craftTitle);
 
 		// Category tabs in a horizontal ScrollContainer so many categories can't
@@ -1187,7 +1187,7 @@ public partial class InventoryUI : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_queueLabel.AddThemeFontSizeOverride("font_size", 12);
-		_queueLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.85f));
+		_queueLabel.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
 		_craftPanel.AddChild(_queueLabel);
 
 		_queueProgressBg = new ColorRect
@@ -1207,7 +1207,7 @@ public partial class InventoryUI : CanvasLayer
 			LayoutMode = 3, // Position
 			Position = Vector2.Zero,
 			Size = new Vector2(0f, barH),
-			Color = new Color(0.4f, 0.8f, 0.4f),
+			Color = new Color(0.6f, 0.6f, 0.6f),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_queueProgressBg.AddChild(_queueProgressFill);
@@ -1250,7 +1250,7 @@ public partial class InventoryUI : CanvasLayer
 			HorizontalAlignment = HorizontalAlignment.Center,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		devTitle.AddThemeColorOverride("font_color", new Color(0.95f, 0.85f, 0.4f));
+		devTitle.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_devPanel.AddChild(devTitle);
 
 		// Collect every item, then bucket it by category (the TabContainer pages).
@@ -1356,7 +1356,7 @@ public partial class InventoryUI : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		hint.AddThemeFontSizeOverride("font_size", 11);
-		hint.AddThemeColorOverride("font_color", new Color(0.6f, 0.65f, 0.75f));
+		hint.AddThemeColorOverride("font_color", new Color(0.65f, 0.65f, 0.65f));
 		content.AddChild(hint);
 
 		var scroll = new ScrollContainer
@@ -1388,7 +1388,7 @@ public partial class InventoryUI : CanvasLayer
 				HorizontalAlignment = HorizontalAlignment.Center,
 				MouseFilter = Control.MouseFilterEnum.Ignore,
 			};
-			empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.5f, 0.55f));
+			empty.AddThemeColorOverride("font_color", new Color(0.5f, 0.5f, 0.5f));
 			list.AddChild(empty);
 		}
 		else
@@ -1420,7 +1420,7 @@ public partial class InventoryUI : CanvasLayer
 		var tipStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 1f),
-			BorderColor = new Color(0.6f, 0.6f, 0.65f, 1f),
+			BorderColor = new Color(0.6f, 0.6f, 0.6f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -1447,7 +1447,7 @@ public partial class InventoryUI : CanvasLayer
 			LayoutMode = 2,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_devTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_devTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_devTipName.AddThemeFontSizeOverride("font_size", 15);
 		_devTipContent.AddChild(_devTipName);
 
@@ -1457,7 +1457,7 @@ public partial class InventoryUI : CanvasLayer
 			LayoutMode = 2,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_devTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+		_devTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 		_devTipContent.AddChild(_devTipDesc);
 
 		_root.AddChild(_devTooltip);
@@ -1646,7 +1646,7 @@ public partial class InventoryUI : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		labelCtl.AddThemeFontSizeOverride("font_size", 13);
-		labelCtl.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		labelCtl.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		button.AddChild(labelCtl);
 
 		// Clicking grants the item (a full material stack, or a single tool).
@@ -1758,7 +1758,7 @@ public partial class InventoryUI : CanvasLayer
 			// Fully opaque background (alpha 1.0) so the 3D scene never shows
 			// through the tooltip.
 			BgColor = new Color(0f, 0f, 0f, 1f),
-			BorderColor = new Color(0.6f, 0.6f, 0.65f, 1f),
+			BorderColor = new Color(0.6f, 0.6f, 0.6f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -1802,7 +1802,7 @@ public partial class InventoryUI : CanvasLayer
 			LayoutMode = 2,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_recipeTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_recipeTipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_recipeTipContent.AddChild(_recipeTipName);
 
 		// No autowrap and no custom width: the label is as wide as its text, so
@@ -1815,7 +1815,7 @@ public partial class InventoryUI : CanvasLayer
 			LayoutMode = 2,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
-		_recipeTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.8f, 0.9f));
+		_recipeTipDesc.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 		_recipeTipContent.AddChild(_recipeTipDesc);
 
 		_recipeTipIngredients = new VBoxContainer
@@ -1858,7 +1858,7 @@ public partial class InventoryUI : CanvasLayer
 		{
 			Name = "SlotBg",
 			LayoutMode = 3, // Position
-			Color = new Color(0.08f, 0.08f, 0.1f, 0.85f),
+			Color = new Color(0.08f, 0.08f, 0.08f, 0.85f),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		background.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -2193,8 +2193,8 @@ public partial class InventoryUI : CanvasLayer
 			tab.AddThemeFontSizeOverride("font_size", 14);
 			var style = new StyleBoxFlat
 			{
-				BgColor = active ? new Color(0.3f, 0.4f, 0.6f) : new Color(0.16f, 0.18f, 0.24f),
-				BorderColor = new Color(0.4f, 0.5f, 0.7f, active ? 1f : 0.6f),
+				BgColor = active ? new Color(0.35f, 0.35f, 0.35f) : new Color(0.16f, 0.16f, 0.16f),
+				BorderColor = new Color(0.4f, 0.4f, 0.4f, active ? 1f : 0.6f),
 				BorderWidthLeft = 1,
 				BorderWidthTop = 1,
 				BorderWidthRight = 1,
@@ -2208,7 +2208,7 @@ public partial class InventoryUI : CanvasLayer
 			tab.AddThemeStyleboxOverride("hover", style);
 			tab.AddThemeStyleboxOverride("pressed", style);
 			tab.AddThemeStyleboxOverride("focus", new StyleBoxEmpty());
-			tab.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+			tab.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 			string captured = category;
 			tab.Pressed += () =>
 			{

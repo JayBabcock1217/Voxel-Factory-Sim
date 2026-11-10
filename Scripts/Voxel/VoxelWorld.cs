@@ -4566,6 +4566,11 @@ public partial class VoxelWorld : Node3D
 		// Map: drop this chunk's 2D data so stale terrain doesn't linger on the
 		// minimap / map window once the chunk is gone.
 		MapRenderer?.RemoveChunk(coord);
+		// Despawn any enemies standing on this chunk — they have no ground
+		// (collision) once the chunk is gone, and would otherwise float or
+		// fall through the world. Free them so they can be re-spawned by the
+		// spawner if the chunk is re-loaded.
+		DespawnEntitiesInChunk(coord);
 		// Drop any pending generation-queue entry for this coord so it can be
 		// re-enqueued if it is still in range. The next EnqueueSpiralRing /
 		// PumpGenerationQueue pass (which sorts by the live player position)
@@ -4580,6 +4585,38 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 		chunk.QueueFree();
+	}
+
+	/// <summary>
+	/// Frees any enemies (zombies) whose world position falls inside the given
+	/// chunk's XZ bounds. Called from <see cref="FreeChunk"/> so that enemies
+	/// don't persist on unloaded terrain (they would float/fall through the
+	/// world). The spawner will re-create them if the chunk is re-loaded.
+	/// </summary>
+	private void DespawnEntitiesInChunk(Vector2I coord)
+	{
+		if (GetTree() == null)
+		{
+			return;
+		}
+		const int CS = 16; // ChunkSizeXZ
+		float minX = coord.X * CS;
+		float maxZ = (coord.Y + 1) * CS;
+		float maxZ_ = maxZ; // (avoid shadow)
+		float maxX = (coord.X + 1) * CS;
+		float minZ = coord.Y * CS;
+		foreach (Node n in GetTree().GetNodesInGroup("zombie"))
+		{
+			if (!(n is Node3D n3d) || !GodotObject.IsInstanceValid(n3d))
+			{
+				continue;
+			}
+			Vector3 p = n3d.GlobalPosition;
+			if (p.X >= minX && p.X < maxX && p.Z >= minZ && p.Z < maxZ_)
+			{
+				n3d.QueueFree();
+			}
+		}
 	}
 
 	/// <summary>

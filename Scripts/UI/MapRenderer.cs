@@ -130,7 +130,7 @@ public partial class MapRenderer : RefCounted
 	// ------------------------------------------------------------------
 
 	/// <summary>The color of an "unknown" tile (chunk not yet generated / pushed).</summary>
-	public static readonly Color UnknownColor = new Color(0.07f, 0.08f, 0.10f, 1f);
+	public static readonly Color UnknownColor = new Color(0.08f, 0.08f, 0.08f, 1f);
 
 	/// <summary>
 	/// Raised whenever the terrain data changes (a chunk is pushed, a tile is

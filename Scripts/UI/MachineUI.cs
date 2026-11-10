@@ -134,8 +134,8 @@ public partial class MachineUI : CanvasLayer
 		};
 		var style = new StyleBoxFlat
 		{
-			BgColor = new Color(0.08f, 0.09f, 0.12f, 0.95f),
-			BorderColor = new Color(0.4f, 0.6f, 0.8f, 0.9f),
+			BgColor = new Color(0.08f, 0.08f, 0.08f, 0.95f),
+			BorderColor = new Color(0.4f, 0.4f, 0.4f, 0.9f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -183,7 +183,7 @@ public partial class MachineUI : CanvasLayer
 			LayoutMode = 2,
 		};
 		_titleLabel.AddThemeFontSizeOverride("font_size", 18);
-		_titleLabel.AddThemeColorOverride("font_color", new Color(0.6f, 0.9f, 1.0f));
+		_titleLabel.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
 		_contentBox.AddChild(_titleLabel);
 
 		_statusLabel = new Label
@@ -193,7 +193,7 @@ public partial class MachineUI : CanvasLayer
 			LayoutMode = 2,
 		};
 		_statusLabel.AddThemeFontSizeOverride("font_size", 13);
-		_statusLabel.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.9f));
+		_statusLabel.AddThemeColorOverride("font_color", new Color(0.85f, 0.85f, 0.85f));
 		_contentBox.AddChild(_statusLabel);
 
 		// Recipe picker (visible only for a crafter / smelter).
@@ -211,14 +211,14 @@ public partial class MachineUI : CanvasLayer
 		// Progress bar (visible only for a crafter / smelter with a recipe).
 		_progressBg = new ColorRect
 		{
-			Color = new Color(0.1f, 0.1f, 0.12f, 0.9f),
+			Color = new Color(0.1f, 0.1f, 0.1f, 0.9f),
 			CustomMinimumSize = new Vector2(0f, 8f),
 			LayoutMode = 2,
 			Visible = false,
 		};
 		_progressFill = new ColorRect
 		{
-			Color = new Color(0.3f, 0.8f, 0.4f, 1f),
+			Color = new Color(0.6f, 0.6f, 0.6f, 1f),
 			LayoutMode = 3, // Position,
 			Position = Vector2.Zero,
 		};
@@ -241,7 +241,7 @@ public partial class MachineUI : CanvasLayer
 			LayoutMode = 2,
 		};
 		_inputHeading.AddThemeFontSizeOverride("font_size", 13);
-		_inputHeading.AddThemeColorOverride("font_color", new Color(0.85f, 0.7f, 0.5f));
+		_inputHeading.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 		_contentBox.AddChild(_inputHeading);
 		_inputGrid = new Control
 		{
@@ -257,7 +257,7 @@ public partial class MachineUI : CanvasLayer
 			LayoutMode = 2,
 		};
 		_outputHeading.AddThemeFontSizeOverride("font_size", 13);
-		_outputHeading.AddThemeColorOverride("font_color", new Color(0.6f, 0.9f, 0.7f));
+		_outputHeading.AddThemeColorOverride("font_color", new Color(0.75f, 0.75f, 0.75f));
 		_contentBox.AddChild(_outputHeading);
 		_outputGrid = new Control
 		{
@@ -303,8 +303,8 @@ public partial class MachineUI : CanvasLayer
 		};
 		var tipStyle = new StyleBoxFlat
 		{
-			BgColor = new Color(0.06f, 0.07f, 0.1f, 0.95f),
-			BorderColor = new Color(0.5f, 0.7f, 0.9f, 0.8f),
+			BgColor = new Color(0.06f, 0.06f, 0.06f, 0.95f),
+			BorderColor = new Color(0.5f, 0.5f, 0.5f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -318,7 +318,7 @@ public partial class MachineUI : CanvasLayer
 			LayoutMode = 3, // Position
 			Position = new Vector2(8f, 4f),
 		};
-		_tooltipName.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
+		_tooltipName.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_tooltip.AddChild(_tooltipName);
 
 		_tooltipCount = new Label
@@ -326,7 +326,7 @@ public partial class MachineUI : CanvasLayer
 			Name = "TooltipCount",
 			LayoutMode = 3, // Position
 		};
-		_tooltipCount.AddThemeColorOverride("font_color", new Color(0.7f, 0.75f, 0.8f));
+		_tooltipCount.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
 		_tooltip.AddChild(_tooltipCount);
 
 		_root.AddChild(_tooltip);

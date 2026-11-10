@@ -147,7 +147,7 @@ public partial class SettingsPanel : Control
 		background.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
 		var bgStyle = new StyleBoxFlat
 		{
-			BgColor = new Color(0.08f, 0.09f, 0.12f, 0.98f),
+			BgColor = new Color(0.08f, 0.08f, 0.08f, 0.98f),
 		};
 		background.AddThemeStyleboxOverride("panel", bgStyle);
 		AddChild(background);
@@ -175,7 +175,7 @@ public partial class SettingsPanel : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_title.AddThemeFontSizeOverride("font_size", 32);
-		_title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 1f));
+		_title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		_root.AddChild(_title);
 
 		// Back button.
@@ -305,7 +305,7 @@ public partial class SettingsPanel : Control
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		label.AddThemeFontSizeOverride("font_size", 20);
-		label.AddThemeColorOverride("font_color", new Color(0.6f, 0.75f, 1f));
+		label.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.7f));
 		return label;
 	}
 
@@ -546,8 +546,8 @@ public partial class SettingsPanel : Control
 		button.AddThemeFontSizeOverride("font_size", 20);
 		var normal = new StyleBoxFlat
 		{
-			BgColor = new Color(0.16f, 0.2f, 0.3f, 1f),
-			BorderColor = new Color(0.4f, 0.5f, 0.7f, 1f),
+			BgColor = new Color(0.16f, 0.16f, 0.16f, 1f),
+			BorderColor = new Color(0.4f, 0.4f, 0.4f, 1f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -558,14 +558,14 @@ public partial class SettingsPanel : Control
 			ContentMarginBottom = 8f,
 		};
 		var hover = normal.Duplicate() as StyleBoxFlat;
-		hover.BgColor = new Color(0.22f, 0.28f, 0.42f, 1f);
+		hover.BgColor = new Color(0.22f, 0.22f, 0.22f, 1f);
 		var pressed = normal.Duplicate() as StyleBoxFlat;
-		pressed.BgColor = new Color(0.12f, 0.15f, 0.24f, 1f);
+		pressed.BgColor = new Color(0.12f, 0.12f, 0.12f, 1f);
 		button.AddThemeStyleboxOverride("normal", normal);
 		button.AddThemeStyleboxOverride("hover", hover);
 		button.AddThemeStyleboxOverride("pressed", pressed);
-		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.95f));
-		button.AddThemeColorOverride("font_hover_color", Colors.White);
+		button.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
+		button.AddThemeColorOverride("font_hover_color", new Color(1f, 1f, 1f));
 		return button;
 	}
 }

@@ -149,7 +149,7 @@ public static class InventorySlotGrid
 		{
 			Name = "SlotBg",
 			LayoutMode = 3,
-			Color = new Color(0.08f, 0.08f, 0.1f, 0.85f),
+			Color = new Color(0.08f, 0.08f, 0.08f, 0.85f),
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		bg.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -176,7 +176,7 @@ public static class InventorySlotGrid
 			VerticalAlignment = VerticalAlignment.Bottom,
 		};
 		count.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
-		count.AddThemeColorOverride("font_color", Colors.White);
+		count.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
 		count.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.9f));
 		count.AddThemeConstantOverride("outline_size", 3);
 		slot.AddChild(count);

@@ -291,7 +291,7 @@ public partial class LoadingScreen : CanvasLayer
 		_root = new ColorRect
 		{
 			Name = "Root",
-			Color = new Color(0.03f, 0.04f, 0.07f, 0.92f),
+			Color = new Color(0.03f, 0.03f, 0.03f, 0.92f),
 			MouseFilter = Control.MouseFilterEnum.Stop,
 		};
 		_root.SetAnchorsPreset(Control.LayoutPreset.FullRect, keepOffsets: false);
@@ -321,8 +321,8 @@ public partial class LoadingScreen : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		title.AddThemeFontSizeOverride("font_size", 48);
-		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.96f, 1f));
-		title.AddThemeColorOverride("font_outline_color", new Color(0.1f, 0.15f, 0.3f, 1f));
+		title.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
+		title.AddThemeColorOverride("font_outline_color", new Color(0.1f, 0.1f, 0.1f, 1f));
 		title.AddThemeConstantOverride("outline_size", 8);
 		center.AddChild(title);
 
@@ -333,7 +333,7 @@ public partial class LoadingScreen : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_worldName.AddThemeFontSizeOverride("font_size", 28);
-		_worldName.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.95f));
+		_worldName.AddThemeColorOverride("font_color", new Color(0.85f, 0.85f, 0.85f));
 		center.AddChild(_worldName);
 
 		_seedLabel = new Label
@@ -343,7 +343,7 @@ public partial class LoadingScreen : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_seedLabel.AddThemeFontSizeOverride("font_size", 18);
-		_seedLabel.AddThemeColorOverride("font_color", new Color(0.55f, 0.6f, 0.75f));
+		_seedLabel.AddThemeColorOverride("font_color", new Color(0.6f, 0.6f, 0.6f));
 		center.AddChild(_seedLabel);
 
 		_statsLabel = new Label
@@ -353,7 +353,7 @@ public partial class LoadingScreen : CanvasLayer
 			MouseFilter = Control.MouseFilterEnum.Ignore,
 		};
 		_statsLabel.AddThemeFontSizeOverride("font_size", 15);
-		_statsLabel.AddThemeColorOverride("font_color", new Color(0.45f, 0.5f, 0.65f));
+		_statsLabel.AddThemeColorOverride("font_color", new Color(0.5f, 0.5f, 0.5f));
 		center.AddChild(_statsLabel);
 
 		// Spacer between the info block and the bar.
@@ -388,7 +388,7 @@ public partial class LoadingScreen : CanvasLayer
 			CustomMinimumSize = new Vector2(64, 0),
 		};
 		_percent.AddThemeFontSizeOverride("font_size", 22);
-		_percent.AddThemeColorOverride("font_color", new Color(0.85f, 0.9f, 1f));
+		_percent.AddThemeColorOverride("font_color", new Color(0.9f, 0.9f, 0.9f));
 		barRow.AddChild(_percent);
 	}
 

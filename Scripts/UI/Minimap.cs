@@ -532,14 +532,15 @@ public partial class Minimap : Node
 
 	private static void DrawTriangle(Image img, float cx, float cy, float r, float angle, Color color)
 	{
-		var v0 = Rotate(new Vector2(0, -r), angle);
-		var v1 = Rotate(new Vector2(r * 0.87f, r * 0.5f), angle);
-		var v2 = Rotate(new Vector2(-r * 0.87f, r * 0.5f), angle);
-		var c = new Vector2(cx, cy);
-		float minX = Mathf.Min(c.X, Mathf.Min(v0.X, Mathf.Min(v1.X, v2.X))) - 1;
-		float maxX = Mathf.Max(c.X, Mathf.Max(v0.X, Mathf.Max(v1.X, v2.X))) + 1;
-		float minY = Mathf.Min(c.Y, Mathf.Min(v0.Y, Mathf.Min(v1.Y, v2.Y))) - 1;
-		float maxY = Mathf.Max(c.Y, Mathf.Max(v0.Y, Mathf.Max(v1.Y, v2.Y))) + 1;
+		// The three corners of the triangle, offset from the center and rotated
+		// by the given angle. (v0 is the "tip", v1 and v2 are the base.)
+		var v0 = new Vector2(cx + Rotate(new Vector2(0, -r), angle).X, cy + Rotate(new Vector2(0, -r), angle).Y);
+		var v1 = new Vector2(cx + Rotate(new Vector2(r * 0.87f, r * 0.5f), angle).X, cy + Rotate(new Vector2(r * 0.87f, r * 0.5f), angle).Y);
+		var v2 = new Vector2(cx + Rotate(new Vector2(-r * 0.87f, r * 0.5f), angle).X, cy + Rotate(new Vector2(-r * 0.87f, r * 0.5f), angle).Y);
+		float minX = Mathf.Min(v0.X, Mathf.Min(v1.X, v2.X)) - 1;
+		float maxX = Mathf.Max(v0.X, Mathf.Max(v1.X, v2.X)) + 1;
+		float minY = Mathf.Min(v0.Y, Mathf.Min(v1.Y, v2.Y)) - 1;
+		float maxY = Mathf.Max(v0.Y, Mathf.Max(v1.Y, v2.Y)) + 1;
 		int x0 = Mathf.Max(0, (int)minX);
 		int x1 = Mathf.Min(img.GetWidth() - 1, (int)maxX);
 		int y0 = Mathf.Max(0, (int)minY);
@@ -548,7 +549,7 @@ public partial class Minimap : Node
 		{
 			for (int x = x0; x <= x1; x++)
 			{
-				if (PointInTriangle(new Vector2(x, y), c, v0, v1))
+				if (PointInTriangle(new Vector2(x, y), v0, v1, v2))
 				{
 					img.SetPixel(x, y, color);
 				}

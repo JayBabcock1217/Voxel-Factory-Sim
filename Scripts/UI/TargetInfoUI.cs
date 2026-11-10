@@ -144,7 +144,7 @@ public partial class TargetInfoUI : Node
 		var panelStyle = new StyleBoxFlat
 		{
 			BgColor = new Color(0f, 0f, 0f, 0.55f),
-			BorderColor = new Color(0.4f, 0.6f, 0.8f, 0.8f),
+			BorderColor = new Color(0.4f, 0.4f, 0.4f, 0.8f),
 			BorderWidthLeft = 1,
 			BorderWidthTop = 1,
 			BorderWidthRight = 1,
@@ -184,19 +184,19 @@ public partial class TargetInfoUI : Node
 		_panel.AddChild(vbox);
 		_rows = vbox;
 
-		_nameLabel = MakeLabel("No target", 16, new Color(0.98f, 0.98f, 1f));
+		_nameLabel = MakeLabel("No target", 16, new Color(0.98f, 0.98f, 0.98f));
 		_nameLabel.AddThemeColorOverride("font_outline_color", new Color(0, 0, 0, 0.85f));
 		_nameLabel.AddThemeConstantOverride("outline_size", 4);
 		vbox.AddChild(_nameLabel);
 
-		_healthLabel = MakeLabel("Health: —", 13, new Color(0.85f, 0.9f, 0.95f));
+		_healthLabel = MakeLabel("Health: —", 13, new Color(0.85f, 0.85f, 0.85f));
 		vbox.AddChild(_healthLabel);
 
 		// A slim health bar under the percentage: a dark track with a green fill
 		// whose width tracks current health.
 		_healthBarBg = new ColorRect
 		{
-			Color = new Color(0.1f, 0.1f, 0.12f, 0.9f),
+			Color = new Color(0.1f, 0.1f, 0.1f, 0.9f),
 			CustomMinimumSize = new Vector2(0f, 6f),
 			SizeFlagsVertical = Control.SizeFlags.ShrinkEnd,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
@@ -204,7 +204,7 @@ public partial class TargetInfoUI : Node
 		vbox.AddChild(_healthBarBg);
 		_healthBarFill = new ColorRect
 		{
-			Color = new Color(0.3f, 0.8f, 0.4f, 1f),
+			Color = new Color(0.6f, 0.6f, 0.6f, 1f),
 			CustomMinimumSize = new Vector2(0f, 6f),
 			SizeFlagsVertical = Control.SizeFlags.ShrinkEnd,
 			MouseFilter = Control.MouseFilterEnum.Ignore,
@@ -215,19 +215,19 @@ public partial class TargetInfoUI : Node
 		// pinned to the track's top-left, and its width is driven by Update().
 		_healthBarFill.Position = Vector2.Zero;
 
-		_bestToolLabel = MakeLabel("Best tool: —", 13, new Color(0.85f, 0.9f, 0.95f));
+		_bestToolLabel = MakeLabel("Best tool: —", 13, new Color(0.85f, 0.85f, 0.85f));
 		vbox.AddChild(_bestToolLabel);
 
-		_breakTimeLabel = MakeLabel("Break time: —", 13, new Color(0.85f, 0.9f, 0.95f));
+		_breakTimeLabel = MakeLabel("Break time: —", 13, new Color(0.85f, 0.85f, 0.85f));
 		vbox.AddChild(_breakTimeLabel);
 
-		_categoryLabel = MakeLabel("Category: —", 13, new Color(0.7f, 0.75f, 0.82f));
+		_categoryLabel = MakeLabel("Category: —", 13, new Color(0.7f, 0.7f, 0.7f));
 		vbox.AddChild(_categoryLabel);
 
-		_distanceLabel = MakeLabel("Distance: —", 13, new Color(0.7f, 0.75f, 0.82f));
+		_distanceLabel = MakeLabel("Distance: —", 13, new Color(0.7f, 0.7f, 0.7f));
 		vbox.AddChild(_distanceLabel);
 
-		_unbreakableLabel = MakeLabel("Unbreakable", 13, new Color(0.95f, 0.5f, 0.45f));
+		_unbreakableLabel = MakeLabel("Unbreakable", 13, new Color(0.7f, 0.7f, 0.7f));
 		_unbreakableLabel.Visible = false;
 		vbox.AddChild(_unbreakableLabel);
 
@@ -240,7 +240,7 @@ public partial class TargetInfoUI : Node
 		_machineDetailLabels = new Label[MaxMachineDetailLines];
 		for (int i = 0; i < MaxMachineDetailLines; i++)
 		{
-			var lbl = MakeLabel("", 13, new Color(0.85f, 0.9f, 0.95f));
+			var lbl = MakeLabel("", 13, new Color(0.85f, 0.85f, 0.85f));
 			lbl.Visible = false;
 			vbox.AddChild(lbl);
 			_machineDetailLabels[i] = lbl;
@@ -249,7 +249,7 @@ public partial class TargetInfoUI : Node
 		// The placement-rotation readout: only visible while the player holds a
 		// machine item (the VoxelTool fills RotationLine then), showing the
 		// current orientation + the keys that change it.
-		_rotationLabel = MakeLabel("", 12, new Color(0.55f, 0.95f, 0.7f));
+		_rotationLabel = MakeLabel("", 12, new Color(0.7f, 0.7f, 0.7f));
 		_rotationLabel.Visible = false;
 		vbox.AddChild(_rotationLabel);
 
@@ -407,15 +407,11 @@ public partial class TargetInfoUI : Node
 			contentH);
 	}
 
-	/// <summary>A green→yellow→red color for a 0..100 health percentage.</summary>
+	/// <summary>A dark→light gray color for a 0..100 health percentage (monochrome).</summary>
 	private static Color HealthColor(float percent)
 	{
 		float t = Mathf.Clamp(percent / 100f, 0f, 1f);
-		// Red at 0, yellow at 0.5, green at 1.0 (simple two-segment lerp).
-		if (t < 0.5f)
-		{
-			return new Color(0.9f, 0.3f, 0.3f).Lerp(new Color(0.95f, 0.85f, 0.3f), t / 0.5f);
-		}
-		return new Color(0.95f, 0.85f, 0.3f).Lerp(new Color(0.3f, 0.8f, 0.4f), (t - 0.5f) / 0.5f);
+		// Dark gray at 0, light gray at 1.0.
+		return new Color(0.3f, 0.3f, 0.3f).Lerp(new Color(0.85f, 0.85f, 0.85f), t);
 	}
 }

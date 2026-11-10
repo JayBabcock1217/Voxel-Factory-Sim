@@ -289,7 +289,7 @@ public partial class MachineConfigPanel : CanvasLayer
 		{
 			Text = hasMesh ? "Mesh: ✓" : hasScene ? "Scene: ✓" : "No mesh",
 			CustomMinimumSize = new Vector2(100f, 0f),
-			Modulate = (hasMesh || hasScene) ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 0.5f, 0.5f),
+			Modulate = (hasMesh || hasScene) ? new Color(0.8f, 0.8f, 0.8f) : new Color(0.5f, 0.5f, 0.5f),
 		};
 		hbox.AddChild(meshLabel);
 
@@ -308,7 +308,7 @@ public partial class MachineConfigPanel : CanvasLayer
 				? $"Box: {def.CollisionBoxSize.X:F2}x{def.CollisionBoxSize.Y:F2}x{def.CollisionBoxSize.Z:F2}"
 				: "Box: auto",
 			CustomMinimumSize = new Vector2(150f, 0f),
-			Modulate = def.HasCollisionBox ? new Color(0.5f, 1f, 0.5f) : new Color(1f, 1f, 1f, 0.5f),
+			Modulate = def.HasCollisionBox ? new Color(0.8f, 0.8f, 0.8f) : new Color(0.5f, 0.5f, 0.5f),
 		};
 		hbox.AddChild(boxLabel);
 
@@ -316,7 +316,7 @@ public partial class MachineConfigPanel : CanvasLayer
 		{
 			Text = $"Power out: {def.PowerOutput:F1}",
 			CustomMinimumSize = new Vector2(100f, 0f),
-			Modulate = def.PowerOutput > 0 ? new Color(1f, 0.9f, 0.3f) : new Color(1f, 1f, 1f, 0.5f),
+			Modulate = def.PowerOutput > 0 ? new Color(0.8f, 0.8f, 0.8f) : new Color(0.5f, 0.5f, 0.5f),
 		};
 		hbox.AddChild(powerLabel);
 
