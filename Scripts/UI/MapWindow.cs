@@ -131,6 +131,8 @@ public partial class MapWindow : Node
 	// for the player arrow overlay).
 	private Vector3 _lastPlayerPos = Vector3.Zero;
 
+
+
 	// A row in the waypoint list panel: a name label + distance label + focus/remove.
 	private sealed class WaypointRow
 	{
@@ -1031,23 +1033,23 @@ public partial class MapWindow : Node
 
 		// For each visible world tile, compute its color via the non-allocating
 		// packed path (no Vector2I, no Color allocation) and blit it to the
-		// screen-pixel block it occupies. The chunk coord is computed
-		// incrementally (it changes every 16 tiles) to avoid the FloorDiv per
-		// tile. A single reusable 4-byte pixel pattern avoids per-tile
-		// allocation.
+		// screen-pixel block it occupies. The chunk coord is computed per-tile
+		// (FloorDiv is cheap — just an int div + branch). A single reusable
+		// 4-byte pixel pattern avoids per-tile allocation.
 		int zInt = Mathf.Max(1, (int)zoom);
-		int cx0 = MapRenderer.FloorDiv(tileMinX, CS);
-		int cz0 = MapRenderer.FloorDiv(tileMinZ, CS);
-		int lx = tileMinX - cx0 * CS;
-		int lz = tileMinZ - cz0 * CS;
 		byte[] px = new byte[4]; // reusable pixel pattern
 
 		for (int tz = tileMinZ; tz <= tileMaxZ; tz++)
 		{
+			int tcz = MapRenderer.FloorDiv(tz, CS);
+			int lz = tz - tcz * CS;
 			for (int tx = tileMinX; tx <= tileMaxX; tx++)
 			{
+				int tcx = MapRenderer.FloorDiv(tx, CS);
+				int lx = tx - tcx * CS;
+
 				uint packed;
-				bool known = renderer.TryGetTileColorPacked(cx0, cz0, lx, lz, palette, out packed);
+				bool known = renderer.TryGetTileColorPacked(tcx, tcz, lx, lz, palette, out packed);
 				if (known)
 				{
 					px[0] = (byte)(packed & 0xFF);
@@ -1080,12 +1082,7 @@ public partial class MapWindow : Node
 						}
 					}
 				}
-				// Advance the local/chunk coords.
-				lx++;
-				if (lx >= CS) { lx = 0; cx0++; }
 			}
-			lz++;
-			if (lz >= CS) { lz = 0; cz0++; }
 		}
 
 		// Push the filled buffer into the image (one bulk copy).

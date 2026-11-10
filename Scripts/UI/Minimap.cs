@@ -277,19 +277,21 @@ public partial class Minimap : Node
 		byte[] buf = _sliceBuffer;
 		int row = size * 4;
 
-		// Walk the slice tile-by-tile but use the non-allocating packed color
-		// path (no Vector2I allocation per tile, no Color allocation). The chunk
-		// coord changes every 16 tiles in each axis; we compute it incrementally.
-		int cx = MapRenderer.FloorDiv(_sliceMinX, CS);
-		int cz = MapRenderer.FloorDiv(_sliceMinZ, CS);
-		int lx = _sliceMinX - cx * CS;
-		int lz = _sliceMinZ - cz * CS;
-
+		// Walk the slice tile-by-tile using the non-allocating packed color path
+		// (no Vector2I allocation per tile, no Color allocation). The chunk coord
+		// is computed per-tile via FloorDiv (a cheap int div + branch).
 		for (int dz = 0; dz < size; dz++)
 		{
+			int wz = _sliceMinZ + dz;
+			int cz = MapRenderer.FloorDiv(wz, CS);
+			int lz = wz - cz * CS;
 			int ro = dz * row;
 			for (int dx = 0; dx < size; dx++)
 			{
+				int wx = _sliceMinX + dx;
+				int cx = MapRenderer.FloorDiv(wx, CS);
+				int lx = wx - cx * CS;
+
 				uint packed;
 				bool known = renderer.TryGetTileColorPacked(cx, cz, lx, lz, palette, out packed);
 				int o = ro + dx * 4;
@@ -307,12 +309,7 @@ public partial class Minimap : Node
 					buf[o + 2] = 26;
 					buf[o + 3] = 255;
 				}
-				// Advance the local/chunk coords.
-				lx++;
-				if (lx >= CS) { lx = 0; cx++; }
 			}
-			lz++;
-			if (lz >= CS) { lz = 0; cz++; }
 		}
 		_slice.SetData(size, size, false, Image.Format.Rgba8, buf);
 	}
