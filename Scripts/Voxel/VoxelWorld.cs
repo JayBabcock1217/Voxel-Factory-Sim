@@ -1919,23 +1919,23 @@ public partial class VoxelWorld : Node3D
 					UpdateLocalCollision(livePlayerChunk);
 
 					// GROUND TRUTH: verify the collision body at the player's
-					// DROP position is actually live in the physics server.
+					// SEED position is actually live in the physics server.
 					// SpawnNeighbourhoodReady only checks a 3×3, but the player's
-					// drop position may be near a chunk edge — the chunk they land
+					// seed position may be near a chunk edge — the chunk they land
 					// in could be outside the 3×3 (yet inside CollisionRadiusChunks).
 					// If that chunk's sub-cells have no BuiltShape (mesh not yet
 					// built), the body has no shape and the player falls through.
 					// Wait until the shape is actually attached (retry next frame).
 					//
-					// CRITICAL: check at the EXACT DROP position — the terrain
-					// surface + SpawnOffset + settle lift, the same place
-					// SpawnPlayerOnTerrain places the player. NOT the stale saved
+					// CRITICAL: check at the EXACT SEED position — the terrain
+					// surface + capsule half-height + settle lift, the same place
+					// SpawnPlayerOnTerrain seats the player. NOT the stale saved
 					// Y (_spawnRestorePos) or the scene Y (playerNode.GlobalPosition):
 					// those can sit far from the actual surface (a fresh world's
 					// scene Y=0 is below BaseHeight; a save's Y may be stale), so
 					// checking them tested a voxel with no live body and the gate
 					// waited forever even though the bar reached 100%.
-					var collisionCheckPos = SpawnDropPosition(playerNode.GlobalPosition);
+					var collisionCheckPos = SpawnSeedPosition(playerNode.GlobalPosition);
 					if (HasLiveCollisionAt(collisionCheckPos))
 					{
 						if (SpawnOrRestorePlayer(playerNode))
@@ -3263,14 +3263,20 @@ public partial class VoxelWorld : Node3D
 	private bool SpawnPlayerOnTerrain(Node3D player)
 	{
 		Vector3 pos = player.GlobalPosition;
-		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
-		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
-		int surfaceY = ResolveSurfaceY(vx, vz);
 
-		// A small extra lift (0.25) above the surface so the player's capsule
-		// settles cleanly onto the ground rather than starting in contact.
-		player.GlobalPosition = new Vector3(pos.X, (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f, pos.Z);
-		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition} (surface voxel y={surfaceY}).");
+		// SEAT the player on the terrain at the SAME position the spawn gate
+		// verified (see SpawnSeedPosition): the terrain surface + capsule
+		// half-height + a tiny settle lift. The capsule starts a hair above the
+		// ground, never inside the solid and never dropped from above — so the
+		// first physics step can't tunnel the capsule through the floor (the
+		// old SpawnOffset + 0.25 drop let the first step sink the capsule into
+		// a block, and a concave shape can't push a body out from inside). The
+		// gate already verified the collision body is live at this exact
+		// position and the 0.5s settle delay has registered it, so the first
+		// step lands cleanly.
+		player.GlobalPosition = SpawnSeedPosition(pos);
+		player.GlobalRotation = Vector3.Zero; // face a clean direction on fresh spawn
+		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition}.");
 		return true;
 	}
 
@@ -3306,26 +3312,84 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// The exact world position the player is DROPPED at when the spawn gate
-	/// opens, for the live player's XZ: the terrain surface (scanning the
-	/// loaded chunk top-down, so caves lower it and rocks/trees raise it) plus
-	/// one voxel, plus <see cref="SpawnOffset"/>, plus the 0.25 settle lift.
-	/// This is the SAME formula <see cref="SpawnPlayerOnTerrain"/> uses to place
-	/// the player, so the spawn gate's live-collision check and the actual
-	/// spawn always agree on WHERE the player lands. The gate must verify a
-	/// live collision body at THIS position (not the stale saved/scene Y) —
-	/// otherwise, when the saved Y or scene Y differs from the terrain surface
-	/// (a fresh world's scene Y=0 sits far below BaseHeight; a save's Y may
-	/// be stale), the gate checks a voxel with no body and waits forever even
-	/// though the 3x3 is fully meshed and the bar reached 100%.
+	/// Half the height of the player's collision capsule, in world units. The
+	/// player's capsule (Player.tscn) is 1.8 tall with its origin at the CENTER,
+	/// so the top of the capsule sits 0.9 above the body origin. Used by
+	/// <see cref="SpawnSeedPosition"/> to seat the capsule ON the terrain surface
+	/// (top touching the ground) rather than dropping it from above.
 	/// </summary>
-	private Vector3 SpawnDropPosition(Vector3 playerPos)
+	private const float SpawnCapsuleHalfHeight = 0.9f;
+
+	/// <summary>
+	/// A tiny lift above the terrain surface the player is SEATED at when the
+	/// spawn gate opens. The player's capsule top is placed at
+	/// <c>surfaceTop + SpawnSettleLift</c>, so the capsule starts a hair ABOVE
+	/// the ground (not inside the solid, not far above it). Starting right at
+	/// the surface is what makes the spawn tunnel-proof: the first physics step
+	/// only has to move a fraction of a unit before the capsule registers the
+	/// floor, so it can never sink into the solid (a concave shape can't push
+	/// out a body that starts INSIDE it — that is the "falls through the
+	/// terrain" failure). The old drop-from-above (surface + SpawnOffset + 0.25,
+	/// ~7 voxels up) let the first step tunnel; even a small 0.1 drop could
+	/// land the capsule bottom inside a block if the surface is sloped. Seating
+	/// the capsule at the surface removes the drop entirely.
+	/// </summary>
+	private const float SpawnSettleLift = 0.02f;
+
+	/// <summary>
+	/// The exact world position the player's BODY ORIGIN is placed at when the
+	/// spawn gate opens, for the live player's XZ: the terrain surface (scanning
+	/// the loaded chunk top-down, so caves lower it and rocks/trees raise it)
+	/// plus the capsule half-height, plus <see cref="SpawnSettleLift"/>. This
+	/// SEATS the player's capsule on the ground (capsule top = surfaceTop +
+	/// lift, capsule bottom just below the surface top — i.e. standing on it).
+	/// It is the SAME formula <see cref="SpawnPlayerOnTerrain"/> and the spawn
+	/// gate's live-collision check use, so the gate and the actual spawn always
+	/// agree on WHERE the player lands.
+	///
+	/// The gate verifies a live collision body at this position (not the stale
+	/// saved/scene Y) — otherwise, when the saved Y or scene Y differs from the
+	/// terrain surface (a fresh world's scene Y=0 sits far below BaseHeight; a
+	/// save's Y may be stale), the gate checks a voxel with no body and waits
+	/// forever even though the 3x3 is fully meshed and the bar reached 100%.
+	/// </summary>
+	private Vector3 SpawnSeedPosition(Vector3 playerPos)
 	{
 		int vx = Mathf.FloorToInt(playerPos.X / VoxelSize);
 		int vz = Mathf.FloorToInt(playerPos.Z / VoxelSize);
 		int surfaceY = ResolveSurfaceY(vx, vz);
-		float dropY = (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f;
-		return new Vector3(playerPos.X, dropY, playerPos.Z);
+		float surfaceTop = (surfaceY + 1) * VoxelSize;
+		float seedY = surfaceTop + SpawnCapsuleHalfHeight + SpawnSettleLift;
+		return new Vector3(playerPos.X, seedY, playerPos.Z);
+	}
+
+	/// <summary>
+	/// Reseats a player that has ALREADY been restored from a save at the exact
+	/// saved transform, but whose saved position now overlaps the regenerated
+	/// terrain (the saved Y was captured on old terrain, or the column's surface
+	/// changed). The player's body origin is moved UP to sit ON the highest
+	/// solid surface under their XZ, keeping their XZ and YAW unchanged — the
+	/// capsule is never placed INSIDE a block, so the first physics step can't
+	/// tunnel them through the floor. A no-op when the saved position is already
+	/// clear of the ground (saved standing on a ledge, mid-air, or on top of a
+	/// structure taller than the fresh surface).
+	/// </summary>
+	private void ReseedPlayerOntoSurface(Node3D player)
+	{
+		Vector3 pos = player.GlobalPosition;
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		int surfaceY = ResolveSurfaceY(vx, vz);
+		// The Y the capsule-top-sitting-on-the-ground would have.
+		float seatedY = (surfaceY + 1) * VoxelSize + SpawnCapsuleHalfHeight + SpawnSettleLift;
+		// Only lift if the restored origin is BELOW the seated line (i.e. it
+		// overlaps or buries into the surface). Never push a player UP if they
+		// are already above the ground (saved mid-air or on a tall structure).
+		if (pos.Y < seatedY)
+		{
+			player.GlobalPosition = new Vector3(pos.X, seatedY, pos.Z);
+			GD.Print($"[VoxelWorld] Reseeded restored player onto surface (surface voxel y={surfaceY}).");
+		}
 	}
 
 	/// <summary>
@@ -3913,6 +3977,20 @@ public partial class VoxelWorld : Node3D
 			// ConsumePendingPlayer's guard) — in that case we MUST terrain-spawn,
 			// not report success (which would leave the player unplaced).
 			bool restored = RestorePlayerFromSave(player);
+			if (restored)
+			{
+				// The save restored the player at their EXACT saved transform.
+				// But the saved Y was captured on the terrain as it was at save
+				// time; the regenerated terrain may now bury that position (the
+				// player saved standing on ground that has since changed, or the
+				// column's surface is higher than when they saved). If the
+				// restored origin overlaps the fresh surface, reseat them on top
+				// of it (same XZ, same yaw) so their capsule starts OUTSIDE the
+				// solid — otherwise the first physics step would start the
+				// capsule inside a block and it would tunnel through the floor
+				// (the "falls through the terrain" failure on save load).
+				ReseedPlayerOntoSurface(player);
+			}
 			if (!restored)
 			{
 				// The save had no usable player position: terrain-spawn instead.
