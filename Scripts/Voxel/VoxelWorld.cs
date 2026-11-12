@@ -1178,6 +1178,18 @@ public partial class VoxelWorld : Node3D
 	/// <summary>Maximum LOD region meshes to build concurrently on the thread pool.</summary>
 	private const int MaxConcurrentLodBuilds = 4;
 
+	/// <summary>
+	/// Connector-strip state: the root node holding every <see cref="LodConnector"/>
+	/// and the (side, edge) -> connector map. Managed by <see cref="UpdateConnectors"/>
+	/// (called from <see cref="UpdateLod"/>); the strips bridge the gap between the
+	/// full-res square's outer edge and the LOD inner boundary. Visual-only.
+	/// </summary>
+	private Node3D _connectorRoot;
+	private readonly Dictionary<(int, int), LodConnector> _connectors = new();
+
+	/// <summary>Maximum connector strip meshes to build concurrently on the thread pool.</summary>
+	private const int MaxConcurrentConnectorBuilds = 4;
+
 	public override void _ExitTree()
 	{
 		// Clear the static handle so a stale world never outlives the scene.
@@ -1292,6 +1304,9 @@ public partial class VoxelWorld : Node3D
 
 		_lodRoot = new Node3D { Name = "LodChunks" };
 		AddChild(_lodRoot);
+
+		_connectorRoot = new Node3D { Name = "Connectors" };
+		AddChild(_connectorRoot);
 
 		// Backfill any known "special" materials (e.g. the torch) that a saved
 		// .tres created before they existed would be missing. Without this, a
@@ -1653,6 +1668,12 @@ public partial class VoxelWorld : Node3D
 			foreach (LodChunk lod in _lodChunks.Values)
 			{
 				lod.Invalidate();
+			}
+			// The connector strips share the same per-material tiling, so they
+			// invalidate too.
+			foreach (LodConnector connector in _connectors.Values)
+			{
+				connector.Invalidate();
 			}
 		}
 	}
@@ -2437,10 +2458,15 @@ public partial class VoxelWorld : Node3D
 		if (LodEnabled)
 		{
 			UpdateLod(playerNode.GlobalPosition);
+			// The connector strips bridge the gap between the full-res square's
+			// outer edge and the LOD inner boundary. They only make sense when
+			// LOD is on (they meet the LOD); when LOD is off, free them too.
+			UpdateConnectors(playerNode.GlobalPosition);
 		}
-		else if (_lodChunks.Count > 0)
+		else if (_lodChunks.Count > 0 || _connectors.Count > 0)
 		{
 			FreeAllLod();
+			FreeAllConnectors();
 		}
 	}
 
@@ -3977,6 +4003,12 @@ public partial class VoxelWorld : Node3D
 		{
 			lod.Invalidate();
 		}
+		// The connector strips sample the same terrain functions, so they are
+		// stale too — invalidate them so they rebuild from the new config.
+		foreach (LodConnector connector in _connectors.Values)
+		{
+			connector.Invalidate();
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -5323,6 +5355,95 @@ public partial class VoxelWorld : Node3D
 		foreach (LodChunk lod in all)
 		{
 			lod.QueueFree();
+		}
+	}
+
+	/// <summary>
+	/// Removes and frees every connector strip. Called when LOD is disabled (the
+	/// connectors only make sense against the LOD they bridge to).
+	/// </summary>
+	private void FreeAllConnectors()
+	{
+		if (_connectors.Count == 0)
+		{
+			return;
+		}
+
+		var all = _connectors.Values.ToList();
+		_connectors.Clear();
+		foreach (LodConnector connector in all)
+		{
+			connector.QueueFree();
+		}
+	}
+
+	/// <summary>
+	/// Maintains the four connector strips that bridge the gap between the
+	/// full-res chunk square's outer edge (distance R) and the LOD inner
+	/// boundary (distance R*sqrt(2)). Each strip covers ONE side of the square
+	/// (N/E/S/W). The strips are deterministic (same terrain functions as the
+	/// full-res chunks and LOD), so they are stable across frames — once built,
+	/// a strip is cached on its node and only rebuilt when invalidated (F-key
+	/// regenerate or a material-tiling change).
+	///
+	/// The strip's INNER edge sits on the full-res square's outer edge (so it
+	/// meets the full-res top layer column-for-column), and its OUTER edge sits
+	/// on the LOD inner boundary (so it meets the LOD heightfield). A skirt
+	/// drops from the inner edge to a base height, closing the open rim of the
+	/// full-res outer chunks. Visual-only — no collision.
+	///
+	/// Called every frame from <see cref="_Process"/> (when LOD is enabled). The
+	/// work is tiny (4 strips, each a small heightfield), and the build is
+	/// budget-capped + deferred to the thread pool, so the per-frame cost is
+	/// just a dictionary check + a budget count.
+	/// </summary>
+	private void UpdateConnectors(Vector3 playerPos)
+	{
+		// The connector geometry is anchored on the full-res square's outer edge,
+		// which is fixed in WORLD space (the square is centred on the player's
+		// spawn / current chunk, but the edge is at a fixed world offset). The
+		// strips don't move with the player — they are part of the world's
+		// boundary, not the player's view. So we don't re-position them; we just
+		// make sure the 4 strips exist and are built.
+		int cs = ChunkSizeXZ;
+		int R = RenderDistanceChunks;
+		int edge = R * cs; // the square's outer edge in world voxels
+		float lodInner = LodInnerBoundary; // = R * sqrt(2)
+
+		for (int side = 0; side < 4; side++)
+		{
+			var key = (side, edge);
+			if (!_connectors.TryGetValue(key, out LodConnector connector))
+			{
+				// First time this side is needed: create the strip node.
+				connector = new LodConnector { Name = $"Connector_{side}_{edge}" };
+				connector.Initialize(side, edge);
+				connector.Visible = true;
+				_connectorRoot.AddChild(connector);
+				_connectors[key] = connector;
+			}
+
+			// (Re)build if needed, within the concurrent-build budget. The
+			// budget counts builds in flight across all 4 strips; the build is
+			// deferred to the thread pool (LodConnector.Rebuild), so this is
+			// cheap.
+			if (!connector.Built && !connector.BuildInFlight)
+			{
+				int inFlight = 0;
+				foreach (LodConnector c in _connectors.Values)
+				{
+					if (c.BuildInFlight)
+					{
+						inFlight++;
+					}
+				}
+				if (inFlight >= MaxConcurrentConnectorBuilds)
+				{
+					break;
+				}
+				connector.Rebuild(cs, _config, Palette, VoxelSize, LodMeshResolution,
+					R, lodInner, _chunks);
+			}
 		}
 	}
 
