@@ -1918,22 +1918,24 @@ public partial class VoxelWorld : Node3D
 					// very first physics step collides with solid ground.
 					UpdateLocalCollision(livePlayerChunk);
 
-					// GROUND TRUTH: verify the spawn chunk's collision body is
-					// actually live in the physics server. SpawnNeighbourhoodReady
-					// only checks a 3×3, but the player's saved position may be
-					// near a chunk edge — the chunk they land in could be outside
-					// the 3×3 (yet inside CollisionRadiusChunks). If that chunk's
-					// sub-cells have no BuiltShape (mesh not yet built), the body
-					// has no shape and the player falls through. Wait until the
-					// shape is actually attached (retry next frame).
+					// GROUND TRUTH: verify the collision body at the player's
+					// DROP position is actually live in the physics server.
+					// SpawnNeighbourhoodReady only checks a 3×3, but the player's
+					// drop position may be near a chunk edge — the chunk they land
+					// in could be outside the 3×3 (yet inside CollisionRadiusChunks).
+					// If that chunk's sub-cells have no BuiltShape (mesh not yet
+					// built), the body has no shape and the player falls through.
+					// Wait until the shape is actually attached (retry next frame).
 					//
-					// Check at the EXACT restore position (the saved position, with
-					// its saved Y), not the player's scene position: the player is
-					// dropped at the saved spot, so THAT voxel's collision must be
-					// live. (The anchor's Y is the scene Y, which can differ from
-					// the saved Y; the collision check is per-voxel, so we must use
-					// the exact saved Y.)
-					var collisionCheckPos = _spawnRestorePos != Vector3.Zero ? _spawnRestorePos : playerNode.GlobalPosition;
+					// CRITICAL: check at the EXACT DROP position — the terrain
+					// surface + SpawnOffset + settle lift, the same place
+					// SpawnPlayerOnTerrain places the player. NOT the stale saved
+					// Y (_spawnRestorePos) or the scene Y (playerNode.GlobalPosition):
+					// those can sit far from the actual surface (a fresh world's
+					// scene Y=0 is below BaseHeight; a save's Y may be stale), so
+					// checking them tested a voxel with no live body and the gate
+					// waited forever even though the bar reached 100%.
+					var collisionCheckPos = SpawnDropPosition(playerNode.GlobalPosition);
 					if (HasLiveCollisionAt(collisionCheckPos))
 					{
 						if (SpawnOrRestorePlayer(playerNode))
@@ -3301,6 +3303,29 @@ public partial class VoxelWorld : Node3D
 			surfaceY = TerrainGenerator.SurfaceHeight(vx, vz, _config);
 		}
 		return surfaceY;
+	}
+
+	/// <summary>
+	/// The exact world position the player is DROPPED at when the spawn gate
+	/// opens, for the live player's XZ: the terrain surface (scanning the
+	/// loaded chunk top-down, so caves lower it and rocks/trees raise it) plus
+	/// one voxel, plus <see cref="SpawnOffset"/>, plus the 0.25 settle lift.
+	/// This is the SAME formula <see cref="SpawnPlayerOnTerrain"/> uses to place
+	/// the player, so the spawn gate's live-collision check and the actual
+	/// spawn always agree on WHERE the player lands. The gate must verify a
+	/// live collision body at THIS position (not the stale saved/scene Y) —
+	/// otherwise, when the saved Y or scene Y differs from the terrain surface
+	/// (a fresh world's scene Y=0 sits far below BaseHeight; a save's Y may
+	/// be stale), the gate checks a voxel with no body and waits forever even
+	/// though the 3x3 is fully meshed and the bar reached 100%.
+	/// </summary>
+	private Vector3 SpawnDropPosition(Vector3 playerPos)
+	{
+		int vx = Mathf.FloorToInt(playerPos.X / VoxelSize);
+		int vz = Mathf.FloorToInt(playerPos.Z / VoxelSize);
+		int surfaceY = ResolveSurfaceY(vx, vz);
+		float dropY = (surfaceY + 1) * VoxelSize + SpawnOffset + 0.25f;
+		return new Vector3(playerPos.X, dropY, playerPos.Z);
 	}
 
 	/// <summary>
