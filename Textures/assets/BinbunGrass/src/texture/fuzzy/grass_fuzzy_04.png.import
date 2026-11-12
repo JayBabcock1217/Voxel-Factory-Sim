@@ -15,7 +15,7 @@ dest_files=["res://.godot/imported/grass_fuzzy_04.png-76e70414601cbf161598730952
 
 [params]
 
-compress/mode=0
+compress/mode=1
 compress/high_quality=false
 compress/high_quality_mode=0
 compress/lossy_quality=0.7

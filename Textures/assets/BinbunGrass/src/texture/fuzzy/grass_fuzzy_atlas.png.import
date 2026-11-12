@@ -3,20 +3,19 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://bhpw23w1qwcjc"
-path.s3tc="res://.godot/imported/grass_fuzzy_atlas.png-1947bacf235da272fc85eb30da00c9cc.s3tc.ctex"
+path="res://.godot/imported/grass_fuzzy_atlas.png-1947bacf235da272fc85eb30da00c9cc.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
 source_file="res://Textures/assets/BinbunGrass/src/texture/fuzzy/grass_fuzzy_atlas.png"
-dest_files=["res://.godot/imported/grass_fuzzy_atlas.png-1947bacf235da272fc85eb30da00c9cc.s3tc.ctex"]
+dest_files=["res://.godot/imported/grass_fuzzy_atlas.png-1947bacf235da272fc85eb30da00c9cc.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=1
 compress/high_quality=false
 compress/high_quality_mode=0
 compress/lossy_quality=0.7

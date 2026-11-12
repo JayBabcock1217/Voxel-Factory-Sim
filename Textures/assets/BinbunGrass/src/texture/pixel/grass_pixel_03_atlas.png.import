@@ -3,20 +3,19 @@
 importer="texture"
 type="CompressedTexture2D"
 uid="uid://dhrppltxibdb1"
-path.s3tc="res://.godot/imported/grass_pixel_03_atlas.png-260b5d86b00c289016bfef2bf316c870.s3tc.ctex"
+path="res://.godot/imported/grass_pixel_03_atlas.png-260b5d86b00c289016bfef2bf316c870.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
+"vram_texture": false
 }
 
 [deps]
 
 source_file="res://Textures/assets/BinbunGrass/src/texture/pixel/grass_pixel_03_atlas.png"
-dest_files=["res://.godot/imported/grass_pixel_03_atlas.png-260b5d86b00c289016bfef2bf316c870.s3tc.ctex"]
+dest_files=["res://.godot/imported/grass_pixel_03_atlas.png-260b5d86b00c289016bfef2bf316c870.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=1
 compress/high_quality=false
 compress/high_quality_mode=0
 compress/lossy_quality=0.7
