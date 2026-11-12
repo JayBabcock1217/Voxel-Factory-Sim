@@ -446,10 +446,61 @@ public static class TerrainGenerator
 	/// generating, the main-thread <see cref="ReDrainOverhangsUntilStable"/>
 	/// applies the queued voxels to its now-ready buffer. This is the "queue a
 	/// modification for when that chunk gets generated" half of the
-	/// border-overhang fix.
+	/// border-overhang fix. Hive border-overhangs live in their own queue (see
+	/// <see cref="_pendingHiveOverhangs"/>).
 	/// </summary>
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<
 		Vector2I, System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>> _pendingOverhangs = new();
+
+	/// <summary>
+	/// The material id a hive sphere is made of. Mirrors
+	/// <see cref="VoxelMaterialIds.Hive"/> (kept as a local constant so the
+	/// queued-write API does not take a material parameter — every voxel in the
+	/// hive queue is a hive voxel by construction).
+	/// </summary>
+	private const int HiveMaterial = VoxelMaterialIds.Hive;
+
+	/// <summary>
+	/// A queued HIVE-overhang voxel: a hive sphere voxel that overhangs a chunk
+	/// border. Hives are placed on the MAIN thread (see
+	/// <c>VoxelWorld.TryPlaceHiveInChunk</c>), so unlike canopy overhangs (which
+	/// the gen threads append) these are appended only by the main thread. The
+	/// target chunk is not data-ready yet, so the voxel is queued here and
+	/// applied by the main-thread <see cref="ReDrainHiveOverhangs"/> pass the
+	/// moment that chunk becomes data-ready — exactly the "queue a modification
+	/// for when that chunk gets generated" mechanism the canopy overhangs use.
+	///
+	/// <see cref="Health"/> is the health the write should carry (full health for
+	/// a fresh hive; a RESTORED hive's broken voxels were never written, so its
+	/// remaining voxels are written at full health — the save records which
+	/// voxels were broken, not which are whole).
+	/// </summary>
+	private readonly struct HiveOverhangVoxel
+	{
+		public readonly int X;
+		public readonly int Y;
+		public readonly int Z;
+		public readonly float Health;
+
+		public HiveOverhangVoxel(int x, int y, int z, float health)
+		{
+			X = x;
+			Y = y;
+			Z = z;
+			Health = health;
+		}
+	}
+
+	/// <summary>
+	/// Pending hive-overhang writes, keyed by the chunk coord they belong to.
+	/// Appended by the main thread when a hive is placed; drained by the main
+	/// thread when the target chunk becomes data-ready (see
+	/// <see cref="ReDrainHiveOverhangs"/>). Separate from
+	/// <see cref="_pendingOverhangs"/> (canopy overhangs, appended by gen
+	/// threads) so the drains stay independent.
+	/// </summary>
+	private static readonly System.Collections.Concurrent.ConcurrentDictionary<
+		Vector2I, System.Collections.Concurrent.ConcurrentBag<HiveOverhangVoxel>> _pendingHiveOverhangs = new();
 
 	/// <summary>
 	/// Per-chunk serial lock guarding a chunk's overhang DRAIN. The drain runs on
@@ -646,6 +697,76 @@ public static class TerrainGenerator
 			// re-creates the entry and is caught by a later rebuild, per the
 			// method summary.)
 			_pendingOverhangs.TryRemove(coord, out _);
+			return any;
+		}
+	}
+
+	/// <summary>
+	/// Queues a hive-overhang voxel for <paramref name="coord"/>: a hive sphere
+	/// voxel that belongs to a chunk that is loaded but not data-ready yet.
+	/// Applied by <see cref="ReDrainHiveOverhangs"/> the moment that chunk's
+	/// data becomes ready. Main-thread only (hive placement is a main-thread
+	/// operation).
+	/// </summary>
+	public static void PendingHiveOverhang(Vector2I coord, int x, int y, int z, float health)
+	{
+		_pendingHiveOverhangs.AddOrUpdate(coord,
+			_ => new System.Collections.Concurrent.ConcurrentBag<HiveOverhangVoxel>(
+				new HiveOverhangVoxel[] { new HiveOverhangVoxel(x, y, z, health) }),
+			(_, existing) =>
+			{
+				existing.Add(new HiveOverhangVoxel(x, y, z, health));
+				return existing;
+			});
+	}
+
+	/// <summary>
+	/// AUTHORITATIVE hive-overhang drain: run on the MAIN thread the moment a
+	/// chunk's data becomes ready (see <c>VoxelWorld.OnGenerationComplete</c>).
+	/// Applies every queued hive voxel for <paramref name="coord"/> into
+	/// <paramref name="chunk"/> — into ANY cell (hive voxels are a structure,
+	/// like the trees' trunks, not a canopy that must not replace terrain; a
+	/// cell the sphere overlaps becomes hive material, mirroring the sphere's
+	/// own-chunk write which the save path does unconditionally) — and removes
+	/// the queue entry.
+	///
+	/// Unlike <see cref="ReDrainOverhangsUntilStable"/> this is a single
+	/// destructive pass under the per-chunk drain lock: hive voxels are appended
+	/// ONLY by the main thread (hive placement is a main-thread operation in
+	/// <c>VoxelWorld.TryPlaceHiveInChunk</c>), so no concurrent gen-thread append
+	/// can race this drain and a re-drain-until-stable loop is unnecessary. The
+	/// lock is still held so the drain is atomic with the canopy drain of the
+	/// same chunk (they touch the same buffer, and the main thread is the only
+	/// writer that finalises a chunk's data).
+	///
+	/// Returns <c>true</c> when at least one voxel was applied (so the caller
+	/// knows the chunk needs a mesh rebuild).
+	/// </summary>
+	public static bool ReDrainHiveOverhangs(Vector2I coord, ChunkData chunk)
+	{
+		object lockObj = OverhangDrainLock(coord);
+		lock (lockObj)
+		{
+			if (!_pendingHiveOverhangs.TryGetValue(coord, out var bag))
+			{
+				return false; // nothing queued for this chunk
+			}
+			bool any = false;
+			foreach (var v in bag)
+			{
+				if (v.Y < 0 || v.Y >= chunk.SizeY) continue;
+				int lx = v.X - coord.X * chunk.SizeX;
+				int lz = v.Z - coord.Y * chunk.SizeZ;
+				if (lx < 0 || lx >= chunk.SizeX || lz < 0 || lz >= chunk.SizeZ) continue;
+				chunk.Set(lx, v.Y, lz, (byte)HiveMaterial);
+				chunk.SetHealth(lx, v.Y, lz, v.Health);
+				any = true;
+			}
+			// Every queued voxel for this chunk has now been applied (the bag is
+			// fully consumed above); remove the entry so it can't be re-applied to
+			// a later regeneration of the same chunk. Safe: the only appender is
+			// the main thread, which is holding this lock right now.
+			_pendingHiveOverhangs.TryRemove(coord, out _);
 			return any;
 		}
 	}

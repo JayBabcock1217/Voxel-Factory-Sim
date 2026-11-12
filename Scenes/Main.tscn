@@ -43,7 +43,7 @@ shadow_caster_mask = 1
 [node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
 script = ExtResource("2_voxelworld")
 ChunkHeight = 256
-RenderDistanceChunks = 12
+RenderDistanceChunks = 32
 Seed = 123123
 SpawnOffset = 5.0
 BaseHeight = 128.0
@@ -130,3 +130,5 @@ Resolution = 4
 
 [node name="MapWindow" type="Node" parent="." unique_id=173899896]
 script = ExtResource("19_mapwindow")
+MinZoom = 1.0
+MaxZoom = 16.0

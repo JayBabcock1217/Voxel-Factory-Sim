@@ -451,7 +451,15 @@ public partial class VoxelWorld : Node3D
 	[Export(PropertyHint.Range, "1,8,1")]
 	public int LodLevels { get; set; } = 4;
 
-	/// <summary>Farthest LOD render distance, in base-chunk units.</summary>
+	/// <summary>
+	/// Farthest LOD render distance, in base-chunk units. Kept deliberately
+	/// modest: the per-frame LOD scan + the resident region count scale
+	/// quadratically with this value, and the old 48 (scene: 128) + settings
+	/// default of 256 kept thousands of regions alive and sampled ~1M terrain
+	/// columns per frame during a load-in — a main-thread cost that grew as
+	/// more chunks generated (the FPS-drop-below-60 complaint). 48 ≈ 4× the
+	/// full-res radius, still a proper skyline.
+	/// </summary>
 	[Export(PropertyHint.Range, "1,256,1")]
 	public int LodRenderDistanceChunks { get; set; } = 48;
 
@@ -1727,6 +1735,19 @@ public partial class VoxelWorld : Node3D
 		// have chunks generate ahead of them.
 		EnqueueSpiralRing(livePlayerChunk, RenderDistanceChunks);
 		PumpGenerationQueue(livePlayerChunk);
+
+		// PERIODIC DIAGNOSTIC (one log per second): dump the generation state so
+		// we can see EXACTLY what's happening when chunks stop generating. This
+		// catches the case the stall log misses — the queue being EMPTY (nothing
+		// to pump) rather than the budget being full. Remove once the bug is found.
+		{
+			float now = (float)Time.GetTicksMsec() * 0.001f;
+			if (now - _lastGenDiag >= 1.0f)
+			{
+				_lastGenDiag = now;
+				GD.PushWarning($"[GenDiag] budget={_generatingBudget}/{MaxConcurrentGenerations} queue={_genQueue.Count} loaded={_chunks.Count} renderDist={RenderDistanceChunks} playerChunk={livePlayerChunk} playerPos={playerNode.GlobalPosition}");
+			}
+		}
 
 		// One-time spawn: voxel data is generated asynchronously, but mesh +
 		// collision are only built in Rebuild() under the ChunksPerFrame budget.
@@ -3408,12 +3429,15 @@ public partial class VoxelWorld : Node3D
 	/// and spawn its functional node. A no-op when hives are disabled, the
 	/// chunk already got a hive, or the column has no surface.
 	///
-	/// The hive's voxels are written DIRECTLY into the chunk data (bypassing
+	/// The hive's voxels are written DIRECTLY into chunk data (bypassing
 	/// <see cref="SetVoxel"/>) to avoid corrupting the Starlight engine's
-	/// section state (which would leave the chunk and its neighbours black).
-	/// Persistence is handled by the v8 hive section (center + radius +
-	/// depleted) — NOT the edit overlay. On save load, <c>ApplyHives</c> and
-	/// this method re-write the voxels directly.
+	/// section state (which would leave the chunk and its neighbours black),
+	/// and they SPILL ACROSS CHUNK BORDERS like the foliage's canopy overhangs
+	/// (see <see cref="WriteHiveVoxelsDirect"/>): each voxel is written into
+	/// the chunk that owns it, and a neighbour that is still generating has its
+	/// voxels queued until it finishes. Persistence is handled by the v8 hive
+	/// section (center + radius + depleted) — NOT the edit overlay. On save
+	/// load, <c>ApplyHives</c> and this method re-write the voxels directly.
 	/// </summary>
 	private void TryPlaceHiveInChunk(Vector2I coord, VoxelChunk chunk)
 	{
@@ -3470,21 +3494,41 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
-	/// Writes a hive sphere's voxels DIRECTLY into <paramref name="chunk"/>'s
-	/// data (bypassing <see cref="SetVoxel"/>, which would funnel through the
-	/// instant-rebuild path and corrupt the Starlight engine's section state —
-	/// the wide light field's flood fill never sees the new solids, leaving the
-	/// chunk and its neighbours with zero light = black). Only fills air cells
-	/// (never overwrites existing solid terrain). Voxels that overhang into a
-	/// neighbour chunk are skipped (that neighbour's own hive roll handles it).
-	/// The caller is responsible for marking the chunk + neighbours for a full
-	/// budget rebuild (which runs a proper wide light flood fill).
+	/// Writes a hive sphere's voxels DIRECTLY into chunk data (bypassing
+	/// <see cref="SetVoxel"/>, which would funnel through the instant-rebuild
+	/// path and corrupt the Starlight engine's section state — the wide light
+	/// field's flood fill never sees the new solids, leaving the chunk and its
+	/// neighbours with zero light = black).
+	///
+	/// Each voxel is written into the CHUNK THAT OWNS IT (the same per-voxel
+	/// chunk resolution the foliage stage uses for canopy overhangs), so a
+	/// sphere that crosses a chunk border is written in FULL, not clipped at
+	/// the border:
+	/// - the own chunk (always present + data-ready here) is written
+	///   immediately, into ANY cell — a hive is a structure, not a canopy, so a
+	///   cell the sphere overlaps becomes hive material (a restored hive's
+	///   partially-broken sphere must be re-stamped exactly as the save
+	///   describes it, which the air-only fill the own-chunk path used to do
+	///   could not do once the save's voxels no longer matched the fresh
+	///   terrain);
+	/// - a LOADED, DATA-READY neighbour is written immediately the same way
+	///   (that neighbour is marked for a budget rebuild by the caller's
+	///   <see cref="MarkNeighboursForRebuild"/>);
+	/// - a LOADED but NOT-YET-DATA-READY neighbour (still generating) can't be
+	///   written into yet, so the voxel is QUEUED
+	///   (<see cref="TerrainGenerator.ReDrainHiveOverhangs"/>) and applied the
+	///   moment that neighbour's data becomes ready — the "queue a modification
+	///   for when that chunk gets generated" half of the same border-overhang
+	///   mechanism the canopy uses;
+	/// - an UNLOADED neighbour is skipped: the world re-generates it
+	///   deterministically from the same seed + placement roll, so its own
+	///   hive-placement pass writes the shared border voxels itself (the
+	///   sphere is a pure function of (chunk, seed), so both sides write the
+	///   identical voxels — no double-write conflict).
 	/// </summary>
 	private void WriteHiveVoxelsDirect(Vector3I center, int radius, Vector2I coord, VoxelChunk chunk)
 	{
 		int r2 = radius * radius;
-		int wx0 = coord.X * ChunkSizeXZ;
-		int wz0 = coord.Y * ChunkSizeXZ;
 		for (int dx = -radius; dx <= radius; dx++)
 		{
 			for (int dy = -radius; dy <= radius; dy++)
@@ -3502,17 +3546,40 @@ public partial class VoxelWorld : Node3D
 					{
 						continue;
 					}
-					int lx = vx - wx0;
-					int lz = vz - wz0;
-					if (lx < 0 || lx >= ChunkSizeXZ || lz < 0 || lz >= ChunkSizeXZ)
+					Vector2I owner = ChunkCoordOf(vx, vz);
+					if (owner == coord)
 					{
-						continue;
-					}
-					if (chunk.Data.Get(lx, vy, lz) == VoxelMaterialIds.Air)
-					{
+						// The own chunk: always present + data-ready here.
+						int lx = vx - coord.X * ChunkSizeXZ;
+						int lz = vz - coord.Y * ChunkSizeXZ;
 						chunk.Data.Set(lx, vy, lz, (byte)VoxelMaterialIds.Hive);
 						chunk.Data.SetHealth(lx, vy, lz, VoxelHealth.MaxHealth);
+						continue;
 					}
+					if (!_chunks.TryGetValue(owner, out VoxelChunk neighbour))
+					{
+						// Not loaded: dropped (see summary — it re-generates
+						// the shared voxels itself).
+						continue;
+					}
+					if (!neighbour.DataReady)
+					{
+						// Loaded but still generating: queue the voxel for that
+						// chunk; ReDrainHiveOverhangs applies it once the data
+						// is ready (same mechanism the canopy overhangs use).
+						TerrainGenerator.PendingHiveOverhang(owner, vx, vy, vz, VoxelHealth.MaxHealth);
+						continue;
+					}
+					int nlx = vx - owner.X * ChunkSizeXZ;
+					int nlz = vz - owner.Y * ChunkSizeXZ;
+					neighbour.Data.Set(nlx, vy, nlz, (byte)VoxelMaterialIds.Hive);
+					neighbour.Data.SetHealth(nlx, vy, nlz, VoxelHealth.MaxHealth);
+					// The neighbour's data just changed under its mesh: make
+					// sure the budget rebuilds it (the caller also marks the
+					// 1-ring, but a radius-6 sphere can reach a diagonal chunk
+					// that is NOT in the 1-ring, so stamp it explicitly).
+					neighbour.NeedsMesh = true;
+					neighbour.EditPriority = ++_editPriorityCounter;
 				}
 			}
 		}
@@ -4404,11 +4471,28 @@ public partial class VoxelWorld : Node3D
 	/// and the goal is explicit — nearest-to-player-first — not a fixed spiral,
 	/// so the re-sort is the feature, not a bug.
 	/// </summary>
+	private bool _genStallLogged;
+
+	// Last time the periodic [GenDiag] log fired (for the 1-per-second cadence).
+	private float _lastGenDiag;
+
 	private void PumpGenerationQueue(Vector2I playerChunk)
 	{
 		if (_genQueue.Count == 0)
 		{
+			_genStallLogged = false;
 			return;
+		}
+
+		// STALL DIAGNOSTIC: the queue has work to do, but if the budget is
+		// already at its cap we can't start anything. That means the in-flight
+		// set is full — either 8 chunks are legitimately generating (normal) or
+		// a budget slot leaked (a bug). Log the state ONCE so we can tell the
+		// two apart if generation appears to stop.
+		if (_generatingBudget >= MaxConcurrentGenerations && !_genStallLogged)
+		{
+			_genStallLogged = true;
+			GD.PushWarning($"[VoxelWorld] Gen stall: budget={_generatingBudget}/{MaxConcurrentGenerations}, queue={_genQueue.Count}, loaded={_chunks.Count}, playerChunk={playerChunk}");
 		}
 
 		// Nearest-to-the-player's-current-chunk first.
@@ -4480,6 +4564,18 @@ public partial class VoxelWorld : Node3D
 		// single destructive drain dropped those, rendering a half tree). If
 		// anything landed, the chunk needs a mesh rebuild.
 		if (TerrainGenerator.ReDrainOverhangsUntilStable(coord, current.Data))
+		{
+			current.NeedsMesh = true;
+			current.EditPriority = ++_editPriorityCounter;
+		}
+
+		// HIVE border-overhangs (same mechanism as the canopy overhangs above):
+		// a hive placed in a neighbour may have queued sphere voxels for THIS
+		// chunk (it was still generating when the hive was placed). Apply any
+		// that are left now that the data is ready, and re-mesh this chunk if
+		// anything landed. The drain removes the queue entry, so a later
+		// regeneration of this chunk does not re-apply a stale hive.
+		if (TerrainGenerator.ReDrainHiveOverhangs(coord, current.Data))
 		{
 			current.NeedsMesh = true;
 			current.EditPriority = ++_editPriorityCounter;
@@ -4570,9 +4666,15 @@ public partial class VoxelWorld : Node3D
 		// re-open that edge at the boundary.
 		MarkNeighboursForRebuild(coord);
 		_chunks.Remove(coord);
-		// Map: drop this chunk's 2D data so stale terrain doesn't linger on the
-		// minimap / map window once the chunk is gone.
-		MapRenderer?.RemoveChunk(coord);
+		// Map: deliberately do NOT remove this chunk's 2D data. The map is meant
+		// to be a persistent record of everything the player has explored — when
+		// a chunk unloads (the player walks away) the terrain they already saw
+		// should stay on the map. The data only goes stale if the chunk is
+		// REGENERATED differently (which only happens for a fresh world or after
+		// the player edits terrain far enough that the chunk unloads and re-generates
+		// with the same seed — the surface data is deterministic, so it stays
+		// consistent). Editing an already-explored chunk updates the map via
+		// SetTile, so the map stays accurate.
 		// Despawn any enemies standing on this chunk — they have no ground
 		// (collision) once the chunk is gone, and would otherwise float or
 		// fall through the world. Free them so they can be re-spawned by the
@@ -4636,19 +4738,37 @@ public partial class VoxelWorld : Node3D
 	/// spawn on hives anywhere in the full-res area, and the player can walk the
 	/// full-res area. Giving the WHOLE full-res area live collision means any
 	/// entity on any full-res chunk can collide with the ground. The cost is a
-	/// larger Jolt body count (every sub-cell in the full-res area gets a body),
-	/// but <see cref="SetCollisionEnabled"/>/<see cref="VoxelChunk.SetSubCellCollisionEnabled"/>
-	/// are idempotent (they bail when the state is unchanged), so the per-frame
-	/// cost is the O(area²) loop of property reads — a constant ~625 chunks at a
-	/// 12-chunk render distance — not a re-attach of every body.
+	/// larger Jolt body count (every sub-cell in the full-res area gets a body).
+	/// <see cref="SetCollisionEnabled"/> bails when the state is unchanged, but
+	/// <see cref="VoxelChunk.SetSubCellCollisionEnabled"/> iterates EVERY
+	/// sub-cell body of the chunk — so running it for every in-range chunk
+	/// every frame is O(chunks × sub-cells) ≈ 256k iterations/frame at a
+	/// 12-chunk render distance, and it grows as more chunks generate (a real
+	/// main-thread cost). The loop therefore re-checks each chunk's sub-cell
+	/// bodies only every <see cref="SubCellCollisionRecheckIntervalUs"/>
+	/// (fresh rebuilds re-run the loop within that interval).
 	///
 	/// The loop covers the full-res square [-(R), +(R)] around the player chunk,
 	/// which is exactly the set of chunks that exist in <see cref="_chunks"/>
 	/// (LOD chunks are separate and never collide).
 	/// </summary>
+	/// <summary>
+	/// How long (microseconds, from <see cref="Time.GetTicksMsec"/> × 1000) a
+	/// chunk may stay skipped by
+	/// <see cref="UpdateLocalCollision"/> after its sub-cell collision was last
+	/// enabled. The O(sub-cells) per-chunk body loop then runs at most
+	/// 1 / this interval per chunk (~4×/s) instead of every frame — at a
+	/// 12-chunk render distance that was ~256k body iterations/frame on the
+	/// main thread, growing as chunks generated. A rebuild that finishes in the
+	/// interval (new sub-cells) re-runs the loop within the interval, so no
+	/// body is left unattached for more than 0.25 s.
+	/// </summary>
+	private const ulong SubCellCollisionRecheckIntervalUs = 250_000;
+
 	private void UpdateLocalCollision(Vector2I playerChunk)
 	{
 		int r = RenderDistanceChunks;
+		ulong nowUs = (ulong)Time.GetTicksMsec() * 1000UL;
 		for (int dx = -r; dx <= r; dx++)
 		{
 			for (int dz = -r; dz <= r; dz++)
@@ -4668,9 +4788,18 @@ public partial class VoxelWorld : Node3D
 					// Sub-cell mode: attach each sub-cell's built shape to a live
 					// body so entities collide with the sub-cell terrain. The body
 					// is created lazily (only for sub-cells with geometry) and the
-					// attach is idempotent, so this is cheap on the steady-state
-					// frames where nothing has changed.
-					chunk.SetSubCellCollisionEnabled(true);
+					// attach is idempotent — but running the per-body loop for
+					// EVERY sub-cell of EVERY in-range chunk every frame (256k+
+					// body iterations at a 12-chunk render distance, growing as
+					// chunks generate) was a measurable main-thread cost. A chunk
+					// whose collision was enabled within the last
+					// <see cref="SubCellCollisionRecheckIntervalUs"/> is skipped
+					// (its bodies are unchanged since then); anything newer — a
+					// fresh rebuild with new sub-cells — re-runs the loop.
+					if (nowUs - chunk.CollisionEnabledStampUs >= SubCellCollisionRecheckIntervalUs)
+					{
+						chunk.SetSubCellCollisionEnabled(true);
+					}
 				}
 			}
 		}

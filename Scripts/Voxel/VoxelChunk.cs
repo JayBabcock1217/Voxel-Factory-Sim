@@ -316,6 +316,20 @@ public partial class VoxelChunk : Node3D
 	/// </summary>
 	public VoxelWorld World { get; set; }
 
+	/// <summary>
+	/// The value of <see cref="Time.GetTicksMsec"/> in microseconds (microseconds
+	/// since process start) at the last moment this chunk's sub-cell collision
+	/// was enabled by
+	/// <see cref="SetSubCellCollisionEnabled"/>. Used as a staleness token by
+	/// <c>VoxelWorld.UpdateLocalCollision</c>: a chunk already enabled within the
+	/// last 0.25 s is skipped, so the O(sub-cells) per-chunk body loop runs at
+	/// most ~4×/s per chunk instead of every frame (at a 12-chunk render
+	/// distance that was ~256k body iterations/frame on the main thread).
+	/// New sub-cells (a rebuild that finished since the last enable) re-run the
+	/// loop within 0.25 s, so no body is ever left unattached for long.
+	/// </summary>
+	public ulong CollisionEnabledStampUs { get; set; }
+
 	public void Initialize(Vector2I coord, ChunkData data)
 	{
 		Coord = coord;
@@ -391,6 +405,13 @@ public partial class VoxelChunk : Node3D
 		foreach (var node in _regionNodes.Values)
 		{
 			SetRegionNodeCollisionEnabled(node, enabled);
+		}
+		if (enabled)
+		{
+			// Stamp the time so the world's per-frame radius gate can skip this
+			// chunk for the next 0.25 s (it is already enabled — no body work
+			// needed). See <see cref="CollisionEnabledStampUs"/>.
+			CollisionEnabledStampUs = (ulong)Time.GetTicksMsec() * 1000UL;
 		}
 	}
 
@@ -1995,16 +2016,30 @@ public partial class VoxelChunk : Node3D
 	/// if this chunk is still alive in the scene tree. The async build runs on a
 	/// worker thread; if the chunk was freed (QueueFree) while the build was in
 	/// flight, the node is disposed and calling <c>CallDeferred</c> on it throws
-	/// <see cref="System.ObjectDisposedException"/>. Checking <c>IsInsideTree()</c>
-	/// from the worker thread is safe: a freed node's tree pointer is nulled, so
-	/// this reads false (no exception). When the chunk is gone there is nothing to
-	/// apply anyway — the mesh was never going to be shown.
+	/// <see cref="System.ObjectDisposedException"/>.
+	///
+	/// The liveness probe is wrapped in a try-catch because <c>IsInsideTree()</c>
+	/// itself calls <c>GetPtr()</c>, which throws <see cref="System.ObjectDisposedException"/>
+	/// once the C# wrapper has been disposed — it does NOT safely return false
+	/// (the earlier assumption that "a freed node's tree pointer is nulled" is
+	/// wrong for a disposed wrapper: the native handle is gone, so GetPtr throws
+	/// instead of reading a null pointer). Treat a disposed node the same as an
+	/// out-of-tree node: bail out, there is nothing to apply anyway.
 	/// </summary>
 	private void MarshalApplyBuildResult()
 	{
-		if (!IsInsideTree())
+		bool alive;
+		try
 		{
-			return; // chunk was freed while the build was in flight
+			alive = IsInsideTree();
+		}
+		catch (System.ObjectDisposedException)
+		{
+			return; // chunk was freed + disposed while the build was in flight
+		}
+		if (!alive)
+		{
+			return;
 		}
 		CallDeferred(nameof(ApplyBuildResult));
 	}
@@ -2018,6 +2053,25 @@ public partial class VoxelChunk : Node3D
 	/// </summary>
 	private void ApplyBuildResult()
 	{
+		// The node may have been freed + disposed between the worker's
+		// IsInsideTree() check (which passed) and this deferred call firing on
+		// the main thread. Any GodotObject access below (e.g. _meshInstance.Mesh)
+		// would throw ObjectDisposedException, so bail out early. Clear the
+		// build flag first so the (now-gone) chunk doesn't look perpetually
+		// mid-build — harmless on a disposed node, correct if it somehow lingers.
+		try
+		{
+			if (!IsInsideTree())
+			{
+				_meshBuild = null;
+				return;
+			}
+		}
+		catch (System.ObjectDisposedException)
+		{
+			return;
+		}
+
 		_meshBuild = null;
 		// This async full build re-baked the wide light field from the new solid
 		// state (and re-cached the wide volumes), so the instant path's "already

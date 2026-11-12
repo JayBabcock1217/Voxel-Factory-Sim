@@ -48,7 +48,13 @@ public sealed class SettingsStore
 
 	// --- World ---
 	public int ChunkRenderDistance { get; set; } = 16;
-	public int LodRenderDistance { get; set; } = 256;
+	// Distant-Horizons-style LOD horizon. 256 (the old default) kept ~12k LOD
+	// regions alive and sampled 1M+ terrain columns every frame during a world
+	// load-in — a main-thread cost that grew with every chunk generated, the
+	// source of the "FPS drops below 60 as more chunks generate" complaint.
+	// 64 still renders a 4× full-res-radius horizon (enough for the skyline)
+	// at ~1/16th the cost. The slider can still raise it up to 256.
+	public int LodRenderDistance { get; set; } = 64;
 	public bool LodEnabled { get; set; } = true;
 
 	private SettingsStore() { }
