@@ -83,16 +83,26 @@ public static class LodChunkGenerator
 
 				// Tree canopies: raise the node to the top of the canopy and
 				// flag it with the dominant biome's leaf material so the LOD
-				// reads "forest" from afar. Rocks are intentionally omitted —
-				// a boulder is smaller than a coarse cell at this resolution,
-				// so it would not appear in the distant silhouette anyway.
-				// The base voxel must be solid (same rule as full-res foliage),
-				// so a canopy never floats over a hollowed-out surface.
-				if (TerrainGenerator.TreeAt(wx, wz, cfg) && biome != null
-					&& TerrainGenerator.FoliageBaseSolid(wx, h, wz, chunks, chunkSizeXZ))
+				// reads "forest" from afar. The silhouette comes from the tree
+				// structure definition (LodHeight), which shares the exact gate
+				// and sizing the full-res foliage stage uses, so distant trees
+				// line up with near trees. Rocks and hives are intentionally
+				// omitted — a boulder or a hive is smaller than a coarse cell at
+				// this resolution, so it would not appear in the distant
+				// silhouette anyway.
+				if (cfg.Structures != null && biome != null && cfg.ForestNoise != null)
 				{
-					h += TerrainGenerator.TrunkHeight(wx, wz, cfg) + TerrainGenerator.LeafRadius(wx, wz, cfg);
-					mat = (byte)(biome.LeafMaterial > 0 ? biome.LeafMaterial : mat);
+					foreach (var def in cfg.Structures.ColumnStructures)
+					{
+						if (def.LodHeight(wx, wz, h, cfg, chunks, chunkSizeXZ, out int delta, out int lm))
+						{
+							h += delta;
+							if (lm > 0)
+							{
+								mat = (byte)lm;
+							}
+						}
+					}
 				}
 
 				int idx = i + nodes * j;

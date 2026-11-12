@@ -20,7 +20,7 @@ public partial class OreDef : Resource
 	[Export] public int MaterialId { get; set; } = VoxelMaterialIds.CoalOre;
 
 	// ------------------------------------------------------------------
-	// Placement (deterministic per cell/vein — see OreStructureGenerator)
+	// Placement (deterministic per cell/vein — see OreStructureGenerator, the deep-rock structure)
 	// ------------------------------------------------------------------
 
 	/// <summary>Masters this ore (false = this ore never generates).</summary>

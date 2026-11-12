@@ -69,7 +69,7 @@ public partial class BiomeDef : Resource
 	/// <summary>Material below <c>CaveStoneDepth</c> (the deep "bedrock-ish" band).</summary>
 	[Export] public int CaveMaterial { get; set; } = VoxelMaterialIds.CaveStone;
 
-	/// <summary>Material used for boulders in this biome (see RockStructureGenerator).</summary>
+	/// <summary>Material used for boulders in this biome (see RockStructure in the structure registry).</summary>
 	[Export] public int RockMaterial { get; set; } = VoxelMaterialIds.Rock;
 
 	/// <summary>Tree trunk material.</summary>

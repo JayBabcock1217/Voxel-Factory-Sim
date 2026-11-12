@@ -130,5 +130,4 @@ Resolution = 4
 
 [node name="MapWindow" type="Node" parent="." unique_id=173899896]
 script = ExtResource("19_mapwindow")
-MinZoom = 1.0
 MaxZoom = 16.0

@@ -3528,6 +3528,68 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	private void WriteHiveVoxelsDirect(Vector3I center, int radius, Vector2I coord, VoxelChunk chunk)
 	{
+		// The hive's voxel set comes from the hive structure definition (the
+		// single class the structure system is based on), so the world's writer
+		// and the runtime node's footprint always agree.
+		var hive = _config?.Structures?.Hive;
+		if (hive != null)
+		{
+			hive.SetRadius(radius);
+		}
+		var offsets = hive != null ? hive.SphereVoxels() : SphereOffsets(radius);
+		foreach (var o in offsets)
+		{
+			int vx = center.X + o.X;
+			int vy = center.Y + o.Y;
+			int vz = center.Z + o.Z;
+			if (vy < 0 || vy >= ChunkHeight)
+			{
+				continue;
+			}
+			Vector2I owner = ChunkCoordOf(vx, vz);
+			if (owner == coord)
+			{
+				// The own chunk: always present + data-ready here.
+				int lx = vx - coord.X * ChunkSizeXZ;
+				int lz = vz - coord.Y * ChunkSizeXZ;
+				chunk.Data.Set(lx, vy, lz, (byte)VoxelMaterialIds.Hive);
+				chunk.Data.SetHealth(lx, vy, lz, VoxelHealth.MaxHealth);
+				continue;
+			}
+			if (!_chunks.TryGetValue(owner, out VoxelChunk neighbour))
+			{
+				// Not loaded: dropped (see summary — it re-generates
+				// the shared voxels itself).
+				continue;
+			}
+			if (!neighbour.DataReady)
+			{
+				// Loaded but still generating: queue the voxel for that
+				// chunk; ReDrainHiveOverhangs applies it once the data
+				// is ready (same mechanism the canopy overhangs use).
+				TerrainGenerator.PendingHiveOverhang(owner, vx, vy, vz, VoxelHealth.MaxHealth);
+				continue;
+			}
+			int nlx = vx - owner.X * ChunkSizeXZ;
+			int nlz = vz - owner.Y * ChunkSizeXZ;
+			neighbour.Data.Set(nlx, vy, nlz, (byte)VoxelMaterialIds.Hive);
+			neighbour.Data.SetHealth(nlx, vy, nlz, VoxelHealth.MaxHealth);
+			// The neighbour's data just changed under its mesh: make
+			// sure the budget rebuilds it (the caller also marks the
+			// 1-ring, but a radius-6 sphere can reach a diagonal chunk
+			// that is NOT in the 1-ring, so stamp it explicitly).
+			neighbour.NeedsMesh = true;
+			neighbour.EditPriority = ++_editPriorityCounter;
+		}
+	}
+
+	/// <summary>
+	/// Fallback sphere offsets (used when no hive structure definition is
+	/// available, e.g. before the config is built). Same solid sphere the
+	/// <see cref="HiveStructure.SphereVoxels"/> enumerates.
+	/// </summary>
+	private static IEnumerable<Vector3I> SphereOffsets(int radius)
+	{
 		int r2 = radius * radius;
 		for (int dx = -radius; dx <= radius; dx++)
 		{
@@ -3539,47 +3601,7 @@ public partial class VoxelWorld : Node3D
 					{
 						continue;
 					}
-					int vx = center.X + dx;
-					int vy = center.Y + dy;
-					int vz = center.Z + dz;
-					if (vy < 0 || vy >= ChunkHeight)
-					{
-						continue;
-					}
-					Vector2I owner = ChunkCoordOf(vx, vz);
-					if (owner == coord)
-					{
-						// The own chunk: always present + data-ready here.
-						int lx = vx - coord.X * ChunkSizeXZ;
-						int lz = vz - coord.Y * ChunkSizeXZ;
-						chunk.Data.Set(lx, vy, lz, (byte)VoxelMaterialIds.Hive);
-						chunk.Data.SetHealth(lx, vy, lz, VoxelHealth.MaxHealth);
-						continue;
-					}
-					if (!_chunks.TryGetValue(owner, out VoxelChunk neighbour))
-					{
-						// Not loaded: dropped (see summary — it re-generates
-						// the shared voxels itself).
-						continue;
-					}
-					if (!neighbour.DataReady)
-					{
-						// Loaded but still generating: queue the voxel for that
-						// chunk; ReDrainHiveOverhangs applies it once the data
-						// is ready (same mechanism the canopy overhangs use).
-						TerrainGenerator.PendingHiveOverhang(owner, vx, vy, vz, VoxelHealth.MaxHealth);
-						continue;
-					}
-					int nlx = vx - owner.X * ChunkSizeXZ;
-					int nlz = vz - owner.Y * ChunkSizeXZ;
-					neighbour.Data.Set(nlx, vy, nlz, (byte)VoxelMaterialIds.Hive);
-					neighbour.Data.SetHealth(nlx, vy, nlz, VoxelHealth.MaxHealth);
-					// The neighbour's data just changed under its mesh: make
-					// sure the budget rebuilds it (the caller also marks the
-					// 1-ring, but a radius-6 sphere can reach a diagonal chunk
-					// that is NOT in the 1-ring, so stamp it explicitly).
-					neighbour.NeedsMesh = true;
-					neighbour.EditPriority = ++_editPriorityCounter;
+					yield return new Vector3I(dx, dy, dz);
 				}
 			}
 		}
@@ -3596,18 +3618,20 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	private void SpawnHiveNode(Vector3I center, int radius, bool depleted)
 	{
-		if (HiveScene == null)
+		// Build the functional node through the hive structure definition (the
+		// single class the structure system is based on). Returns null when no
+		// hive scene is assigned.
+		var hiveDef = _config?.Structures?.Hive;
+		var node = hiveDef != null ? hiveDef.SpawnRuntimeNode(center, this) : null;
+		if (node == null)
 		{
 			return;
 		}
-		var hive = HiveScene.Instantiate<FactorySim.Hive>();
+		var hive = node as FactorySim.Hive;
 		if (hive == null)
 		{
 			return;
 		}
-		hive.CenterVoxel = center;
-		hive.Radius = radius;
-		hive.MaterialId = VoxelMaterialIds.Hive;
 
 		// Add to the tree FIRST: GlobalPosition is only valid (and readable)
 		// for a node that is inside the tree. Setting it before AddChild logs
@@ -5574,23 +5598,29 @@ public partial class VoxelWorld : Node3D
 			BiomeNoise = biomeNoise,
 		};
 
-		// Ores: one generator over the whole data-driven ore list (disabled
-		// ores are skipped inside the generator).
-		config.Structures.Add(new OreStructureGenerator(OreConfig));
-
-		if (EnableRocks)
+		// Ores: a deep-rock structure (the data-driven OreConfig list). Unlike
+		// surface foliage, ore veins live in the deep rock, so they stay on the
+		// IStructureGenerator path (cfg.OreGenerators) and are applied by the
+		// generation pipeline directly.
+		if (OreConfig != null)
 		{
-			// To add more structure types, create another IStructureGenerator
-			// implementation and append it here.
-			config.Structures.Add(new RockStructureGenerator
-			{
-				Probability = RockProbability,
-				CellSize = RockCellSize,
-				MinRadius = RockMinRadius,
-				MaxRadius = RockMaxRadius,
-				Squash = RockSquash,
-			});
+			config.OreGenerators.Add(new OreStructureGenerator(OreConfig));
 		}
+
+		// The structure registry: everything that GROWS on the surface (trees,
+		// cacti, rocks) plus the hive. All as StructureDefinition instances —
+		// the single class the foliage/structure system is based on.
+		config.Structures = StructureRegistry.Build(
+			config,
+			enableRocks: EnableRocks,
+			rockCellSize: RockCellSize,
+			rockProbability: RockProbability,
+			rockMinRadius: RockMinRadius,
+			rockMaxRadius: RockMaxRadius,
+			rockSquash: RockSquash,
+			hiveRadius: HiveRadius,
+			hiveScene: HiveScene,
+			hivesEnabled: HiveEveryNChunks > 0);
 
 		return config;
 	}

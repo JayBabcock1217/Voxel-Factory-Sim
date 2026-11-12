@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using FactorySim.Voxel;
 
@@ -48,14 +49,31 @@ public partial class MapWindow : Node
 	/// <summary>Panel height as a fraction of the viewport (0..1).</summary>
 	[Export] public float PanelHeightFrac { get; set; } = 0.8f;
 
-	/// <summary>Minimum zoom (pixels per world tile). 1 = one tile = one pixel.</summary>
-	[Export] public float MinZoom { get; set; } = 1f;
+	/// <summary>
+	/// Minimum zoom (pixels per tile). 1 = one tile per pixel. The map snaps
+	/// zoom to integer steps (<see cref="ZoomStep"/>), so fractional values are
+	/// rounded up to the first valid step — set this to a whole number.
+	/// </summary>
+	[Export(PropertyHint.Range, "1,16,1")] public float MinZoom { get; set; } = 1f;
 
-	/// <summary>Maximum zoom (pixels per world tile).</summary>
-	[Export] public float MaxZoom { get; set; } = 32f;
+	/// <summary>
+	/// Maximum zoom (pixels per tile). The map snaps zoom to integer steps
+	/// (<see cref="ZoomStep"/>), so set this to a whole number.
+	/// </summary>
+	[Export(PropertyHint.Range, "1,1024,1")] public float MaxZoom { get; set; } = 64f;
 
-	/// <summary>Initial zoom when the map opens.</summary>
-	[Export] public float InitialZoom { get; set; } = 3f;
+	/// <summary>
+	/// Zoom granularity in pixels per tile. Zoom is snapped to multiples of
+	/// this so every tile occupies an exact integer number of screen pixels —
+	/// this is what makes adjacent tiles abut with no black seam between them.
+	/// 16 matches the chunk size (<see cref="UI.ChunkMapData.Size"/>), so a
+	/// chunk is always an integer multiple of tiles wide on screen (16px at
+	/// step 1, 32px at step 2, …).
+	/// </summary>
+	[Export(PropertyHint.Range, "1,16,1")] public float ZoomStep { get; set; } = 1f;
+
+	/// <summary>Initial zoom when the map opens (snapped to ZoomStep).</summary>
+	[Export(PropertyHint.Range, "1,1024,1")] public float InitialZoom { get; set; } = 1f;
 
 	// ------------------------------------------------------------------
 	// State
@@ -116,6 +134,10 @@ public partial class MapWindow : Node
 	// RebuildDisplay, pushed into the Image via SetData). Avoids per-frame
 	// allocation. Image.GetData() returns a copy, so we can't write to it.
 	private byte[] _displayBuf;
+
+	// Reusable 4-byte pixel pattern for the per-tile blit in RebuildDisplay
+	// (avoids a per-frame allocation of a fresh pattern array).
+	private byte[] _pxPattern = new byte[4];
 
 	// Dirty flag: set when the terrain data changes (a chunk generates, gets
 	// edited, or is removed), the view is panned, or the zoom changes. The
@@ -481,7 +503,7 @@ public partial class MapWindow : Node
 			{
 				_viewCenter = new Vector2(_player.GlobalPosition.X, _player.GlobalPosition.Z);
 			}
-			_zoom = InitialZoom;
+			_zoom = SnapZoom(InitialZoom, 0);
 			// Force a rebuild on the next frame (the view just changed).
 			_lastViewCenter = Vector2.Zero;
 			_lastZoom = -1f;
@@ -694,10 +716,42 @@ public partial class MapWindow : Node
 		return best;
 	}
 
+	/// <summary>
+	/// Snaps a pixels-per-tile value to a multiple of <see cref="ZoomStep"/>
+	/// and clamps it to [MinZoom, MaxZoom]. Integer (chunk-scale) zoom is what
+	/// keeps adjacent tiles abutting with no black seam: each tile then spans
+	/// exactly `zoom` whole screen pixels, so its screen block has integer size
+	/// and consecutive tiles' edges land on the same pixel.
+	///
+	/// With <c>direction &gt; 0</c> (zoom in) it snaps UP to the next multiple
+	/// strictly above the value, and with <c>direction &lt; 0</c> (zoom out) it
+	/// snaps DOWN to the next multiple strictly below — so a wheel tick ALWAYS
+	/// moves the zoom by at least one step and never gets stuck.
+	/// </summary>
+	private float SnapZoom(float z, int direction)
+	{
+		float step = Mathf.Max(1f, ZoomStep);
+		float lo = Mathf.Max(0f, MinZoom);
+		float hi = Mathf.Max(lo, MaxZoom);
+		if (direction > 0)
+		{
+			float snapped = (float)(System.Math.Ceiling(z / step - 1e-4f) * step);
+			return Mathf.Min(hi, Mathf.Max(lo, snapped));
+		}
+		if (direction < 0)
+		{
+			float snapped = (float)(System.Math.Floor(z / step + 1e-4f) * step);
+			return Mathf.Min(hi, Mathf.Max(lo, snapped));
+		}
+		// No direction (initial zoom / arbitrary value): nearest multiple.
+		return Mathf.Min(hi, Mathf.Max(lo, Mathf.Round(z / step) * step));
+	}
+
 	/// <summary>Zooms around the given screen position (keeps that world point fixed).</summary>
 	private void ZoomAt(Vector2 screenPos, float factor)
 	{
-		float newZoom = Mathf.Clamp(_zoom * factor, MinZoom, MaxZoom);
+		int direction = factor > 1f ? 1 : (factor < 1f ? -1 : 0);
+		float newZoom = SnapZoom(_zoom * factor, direction);
 		if (Mathf.IsEqualApprox(newZoom, _zoom))
 		{
 			return;
@@ -1018,22 +1072,25 @@ public partial class MapWindow : Node
 		int tileMinZ = (int)Mathf.Floor(_viewCenter.Y - cy / zoom);
 		int tileMaxZ = (int)Mathf.Ceil(_viewCenter.Y + cy / zoom);
 
-		// CAP the tile range to prevent the low-zoom blowup. At zoom=1 on a
-		// 800×600 display, the raw range is 800×600 = 480K tiles. Cap the
-		// rendered tile count to MaxRenderedTiles (default 256×256 = 65K) by
-		// centering the range on the view center and shrinking it if needed.
-		// The visual difference is negligible at low zoom (each tile is 1px).
-		const int MaxRenderedTiles = 256;
+		// CAP the tile range to prevent the low-zoom blowup. You can't render
+		// more DISTINCT tiles than the display has pixels (at zoom < 1, multiple
+		// tiles share one pixel, so iterating them all is wasted work). Cap the
+		// per-axis tile count to the display's pixel dimensions (plus a small
+		// margin for the rounded tile spans) — this is the true upper bound on
+		// useful resolution, and it scales with the panel size so a large panel
+		// can show the whole explored area at low zoom.
+		int maxTilesX = w + 2;
+		int maxTilesZ = h + 2;
 		int tileW = tileMaxX - tileMinX + 1;
 		int tileH = tileMaxZ - tileMinZ + 1;
-		if (tileW > MaxRenderedTiles || tileH > MaxRenderedTiles)
+		if (tileW > maxTilesX || tileH > maxTilesZ)
 		{
 			int centerX = (tileMinX + tileMaxX) / 2;
 			int centerZ = (tileMinZ + tileMaxZ) / 2;
-			tileMinX = centerX - MaxRenderedTiles / 2;
-			tileMaxX = centerX + MaxRenderedTiles / 2;
-			tileMinZ = centerZ - MaxRenderedTiles / 2;
-			tileMaxZ = centerZ + MaxRenderedTiles / 2;
+			tileMinX = centerX - maxTilesX / 2;
+			tileMaxX = centerX + maxTilesX / 2;
+			tileMinZ = centerZ - maxTilesZ / 2;
+			tileMaxZ = centerZ + maxTilesZ / 2;
 			tileW = tileMaxX - tileMinX + 1;
 			tileH = tileMaxZ - tileMinZ + 1;
 		}
@@ -1053,9 +1110,8 @@ public partial class MapWindow : Node
 		// packed path (no Vector2I, no Color allocation) and blit it to the
 		// screen-pixel block it occupies. The chunk coord is computed per-tile
 		// (FloorDiv is cheap — just an int div + branch). A single reusable
-		// 4-byte pixel pattern avoids per-tile allocation.
-		int zInt = Mathf.Max(1, (int)zoom);
-		byte[] px = new byte[4]; // reusable pixel pattern
+		// 4-byte pixel pattern (_pxPattern) avoids per-frame allocation.
+		byte[] px = _pxPattern;
 
 		for (int tz = tileMinZ; tz <= tileMaxZ; tz++)
 		{
@@ -1081,11 +1137,17 @@ public partial class MapWindow : Node
 				}
 
 				// Screen rect for this tile: its top-left world corner maps to a
-				// screen point; the tile spans zoom pixels from there.
+				// screen point (sx0, sy0, floored to integer pixels); the tile
+				// spans exactly `zoom` pixels from there. Zoom is snapped to
+				// integer multiples of ZoomStep (see SnapZoom), so `zoom` is a
+				// whole number of pixels per tile — the block has exact integer
+				// size and consecutive tiles' edges land on the SAME pixel
+				// (sx1 == next sx0), so they abut with no black seam.
+				int tileSpan = Mathf.Max(1, (int)System.Math.Round(zoom));
 				int sx0 = (int)(cx + (tx - _viewCenter.X) * zoom);
 				int sy0 = (int)(cy + (tz - _viewCenter.Y) * zoom);
-				int sx1 = Mathf.Min(w, sx0 + zInt);
-				int sy1 = Mathf.Min(h, sy0 + zInt);
+				int sx1 = Mathf.Min(w, sx0 + tileSpan);
+				int sy1 = Mathf.Min(h, sy0 + tileSpan);
 				int sxStart = Mathf.Max(0, sx0);
 				int syStart = Mathf.Max(0, sy0);
 				if (sxStart < sx1 && syStart < sy1)

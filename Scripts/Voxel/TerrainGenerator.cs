@@ -16,9 +16,12 @@ namespace FactorySim.Voxel;
 ///    biome's Probability (see <see cref="SampleBiomes"/>), so the world's biome
 ///    mix follows the editor-set probabilities.
 /// 3. 3D Perlin noise cave carving (hollow, enclosed by a surface crust)
-/// 4. procedural structures (see <see cref="IStructureGenerator"/>)
-/// 5. per-biome foliage (trees, or cacti for cactus biomes), placed with a hashed
-///    margin scan so plants are identical no matter which chunk generates them
+/// 4. cell-placed structures (rock boulders, from the world's
+///    <see cref="StructureRegistry"/>), stamped over a hashed cell grid so they
+///    are identical no matter which chunk generates them
+/// 5. column-placed structures (trees, or cacti for cactus biomes, from the same
+///    <see cref="StructureRegistry"/>), rolled per column so plants are
+///    identical no matter which chunk generates them
 ///
 /// Biome selection is a PURE function of (wx, wz) + config (see
 /// <see cref="BiomeAt"/>), so it is deterministic and seam-safe — a column's
@@ -56,18 +59,20 @@ public static class TerrainGenerator
 			GenerateCaves(chunk, wx0, wz0, cfg, cfg.ChunkHeight, heights, sx, sz).Wait();
 		}
 
-		// Stage 3: stamp structures (ores, rocks) — after caves.
-		var structureTasks = new List<Task>();
-		foreach (var structure in cfg.Structures)
+		// Stage 3: stamp structures — after caves. Ore veins (deep rock, via the
+		// IStructureGenerator path) and cell-placed rocks (from the structure
+		// registry).
+		ApplyStructuresAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks).Wait();
+		if (cfg.Structures != null)
 		{
-			structureTasks.Add(structure.ApplyAsync(chunk, wx0, wz0, cfg, heights, sx, sz));
-		}
-		if (structureTasks.Count > 0)
-		{
-			Task.WaitAll(structureTasks.ToArray());
+			Action<int, int, int, byte> rockPut = MakePut(chunk, wx0, wz0, sx, sz, chunks);
+			foreach (var rock in cfg.Structures.CellStructures)
+			{
+				rock.PlaceCells(chunk, wx0, wz0, sx, sz, heights, cfg, rockPut);
+			}
 		}
 
-		// Stage 4: foliage — after structures.
+		// Stage 4: foliage (trees, cacti) — after structures.
 		PlaceFoliageAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks).Wait();
 	}
 
@@ -125,16 +130,16 @@ public static class TerrainGenerator
 			if (timeStages) { GD.Print($"[GenTiming]   caves     {sw.ElapsedMilliseconds} ms"); sw.Restart(); }
 		}
 
-		// Stage 3: stamp structures (ores, rocks). Must run after caves so
-		// veins are placed into solid rock, not into air carved by caves.
-		var structureTasks = new List<Task>();
-		foreach (var structure in cfg.Structures)
+		// Stage 3: stamp structures. Must run after caves so ore veins land in
+		// solid rock and boulders rest on the post-cave surface.
+		await ApplyStructuresAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks);
+		if (cfg.Structures != null)
 		{
-			structureTasks.Add(structure.ApplyAsync(chunk, wx0, wz0, cfg, heights, sx, sz));
-		}
-		if (structureTasks.Count > 0)
-		{
-			await Task.WhenAll(structureTasks);
+			Action<int, int, int, byte> rockPut = MakePut(chunk, wx0, wz0, sx, sz, chunks);
+			foreach (var rock in cfg.Structures.CellStructures)
+			{
+				rock.PlaceCells(chunk, wx0, wz0, sx, sz, heights, cfg, rockPut);
+			}
 		}
 		if (timeStages) { GD.Print($"[GenTiming]   structures {sw.ElapsedMilliseconds} ms"); sw.Restart(); }
 
@@ -521,44 +526,116 @@ public static class TerrainGenerator
 	}
 
 	/// <summary>
-	/// Places foliage (trees, cacti) using the bounded worker pool. The 256
-	/// columns are partitioned across <see cref="WorkerCount"/> workers (instead
-	/// of the old one-Task.Run-per-column, which alone spawned 256 thread-pool
-	/// tasks per chunk). The dominant biome per column comes from the shared
-	/// <see cref="ColumnBiomes"/> cache, so the 2D biome noise is not re-sampled
-	/// here. Behaviour is identical.
+	/// Runs the deep-rock <see cref="IStructureGenerator"/>s (ore veins) for the
+	/// chunk, in parallel. This is the only remaining use of the
+	/// <see cref="IStructureGenerator"/> path — surface foliage is now driven by
+	/// the <see cref="StructureRegistry"/> (see the foliage + rock stages).
 	/// </summary>
+	private static Task ApplyStructuresAsync(
+		ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz,
+		Dictionary<Vector2I, VoxelChunk> chunks)
+	{
+		var generators = cfg.OreGenerators;
+		if (generators == null || generators.Count == 0)
+		{
+			return Task.CompletedTask;
+		}
+		var tasks = new List<Task>(generators.Count);
+		foreach (var g in generators)
+		{
+			tasks.Add(g.ApplyAsync(chunk, wx0, wz0, cfg, heights, sx, sz));
+		}
+		return Task.WhenAll(tasks);
+	}
+
+	/// <summary>
+	/// Builds the shared voxel writer for a chunk: given a world voxel it
+	/// resolves the chunk that OWNS it (the own chunk plus any loaded neighbour),
+	/// writes into it when that chunk is data-ready, and QUEUES it when the
+	/// owning chunk is still generating (applied by the main-thread re-drain once
+	/// it finishes). A chunk that is not loaded at all is dropped (it will
+	/// generate fresh and stamp its own instances). This is the single seam that
+	/// lets a structure's shape spill across chunk borders in full. Every
+	/// structure definition's <c>Place</c> delegates its voxels to this.
+	/// </summary>
+	private static Action<int, int, int, byte> MakePut(
+		ChunkData chunk, int wx0, int wz0, int sx, int sz,
+		Dictionary<Vector2I, VoxelChunk> chunks)
+	{
+		int cs = chunk.SizeX;
+		int sy = chunk.SizeY;
+		return (vx, vy, vz, mat) =>
+		{
+			if (vy < 0 || vy >= sy) return;
+			if (chunks == null) return;
+			Vector2I coord = new Vector2I(FloorDiv(vx, cs), FloorDiv(vz, cs));
+			if (!chunks.TryGetValue(coord, out VoxelChunk ch))
+				return; // not loaded: dropped (see summary)
+			if (!ch.DataReady)
+			{
+				// Loaded but still generating: queue the voxel for that chunk
+				// (applied by the main-thread re-drain once it finishes).
+				_pendingOverhangs.AddOrUpdate(coord,
+					_ => new System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>(
+						new OverhangVoxel[] { new OverhangVoxel(vx, vy, vz, mat) }),
+					(_, existing) =>
+					{
+						existing.Add(new OverhangVoxel(vx, vy, vz, mat));
+						return existing;
+					});
+				return;
+			}
+			ChunkData o = ch.Data;
+			int lx = vx - coord.X * cs;
+			int lz = vz - coord.Y * cs;
+			if (lx < 0 || lx >= cs || lz < 0 || lz >= cs) return;
+			if (o.Get(lx, vy, lz) == 0)
+				o.Set(lx, vy, lz, mat);
+		};
+	}
+
 	private static async Task PlaceFoliageAsync(
 		ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz,
 		Dictionary<Vector2I, VoxelChunk> chunks)
 	{
 		// Each chunk handles ONLY the columns inside its own data (no margin).
-		// A whole instance is written after its root checks pass; the trunk and
-		// the FULL canopy are emitted voxel-by-voxel into whichever chunk owns
-		// each voxel (the own chunk plus any loaded neighbour), so a canopy that
-		// overhangs a chunk border is drawn in full — not clipped. The root
-		// checks read only the own chunk's surface voxel, so the "no floating
-		// foliage" guarantee is unchanged: a rejected column leaves nothing
-		// behind in the own chunk or its neighbours.
-		//
-		// Overhang voxels written into a neighbour's buffer are picked up when the
-		// world re-meshes the 8 neighbours on generation completion (an overhang
-		// can only land in one of those 8), so no extra bookkeeping is needed.
+		// For every column, each COLUMN structure (tree, cactus, ...) is rolled
+		// against the column's dominant biome and, when it passes, its instance
+		// is stamped (trunk + full canopy, or a cactus column) voxel-by-voxel
+		// into whichever chunk owns each voxel, so a shape that overhangs a
+		// chunk border is drawn in full — not clipped. The root checks read only
+		// the own chunk's surface voxel, so the "no floating foliage" guarantee
+		// is unchanged: a rejected column leaves nothing behind.
 		var (dom, _, _, _, _) = ColumnBiomes(wx0, wz0, sx, sz, cfg);
 		int cols = sx * sz;
-
-		await Task.Run(() =>
+		var structures = cfg.Structures != null ? cfg.Structures.ColumnStructures : null;
+		if (structures != null)
 		{
-			ParallelSlices(cols, (cStart, cEnd, _) =>
+			int structCount = structures.Count;
+			Action<int, int, int, byte> put = MakePut(chunk, wx0, wz0, sx, sz, chunks);
+			await Task.Run(() =>
 			{
-				for (int c = cStart; c < cEnd; c++)
+				ParallelSlices(cols, (cStart, cEnd, _) =>
 				{
-					int x = c % sx;
-					int z = c / sx;
-					PlaceFoliageInstance(x, z, dom[c], chunk, wx0, wz0, cfg, heights, sx, sz, chunks);
-				}
+					for (int c = cStart; c < cEnd; c++)
+					{
+						int x = c % sx;
+						int z = c / sx;
+						int wx = wx0 + x;
+						int wz = wz0 + z;
+						int h = heights[x + sx * z];
+						for (int s = 0; s < structCount; s++)
+						{
+							var def = structures[s];
+							if (def.PlaceAtColumn(wx, wz, dom[c], cfg))
+							{
+								def.Place(wx, wz, h, chunk, sx, chunks, cfg, put);
+							}
+						}
+					}
+				});
 			});
-		});
+		}
 
 		// Apply any overhang voxels that earlier chunks queued for THIS chunk
 		// (their neighbours were still generating when they ran). The own buffer
@@ -772,152 +849,6 @@ public static class TerrainGenerator
 	}
 
 	/// <summary>
-	/// Place one whole foliage instance (cactus column, or trunk + canopy) rooted
-	/// at the surface of in-chunk column (x, z). The trunk and the FULL canopy
-	/// are written voxel-by-voxel into the chunk that owns each voxel (the own
-	/// chunk plus any loaded neighbour), so canopy overhang at a chunk border is
-	/// drawn in full. This happens ONLY after every root check passes:
-	///   1. the column is on a biome that grows foliage, and the per-column
-	///      probability roll passes (<see cref="TreeAt"/>);
-	///   2. the surface voxel at height h is SOLID — if a cave carved it to air,
-	///      the instance would float, so nothing is written;
-	///   3. the surface voxel is the biome's SURFACE material (grass, etc.), not
-	///      a rock boulder or cave material.
-	/// When any check fails nothing is written. A neighbour that is not loaded or
-	/// still generating is simply skipped for its voxels (they appear once that
-	/// neighbour has generated), never written into prematurely.
-	///
-	/// <paramref name="dominant"/> is the column's dominant biome index, taken
-	/// from the shared <see cref="ColumnBiomes"/> cache so the 2D biome noise is
-	/// not re-sampled here (it was sampled once for the whole chunk).
-	/// </summary>
-	private static void PlaceFoliageInstance(
-		int x, int z, int dominant, ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz,
-		Dictionary<Vector2I, VoxelChunk> chunks)
-	{
-		int wx = wx0 + x;
-		int wz = wz0 + z;
-		int h = heights[x + sx * z];
-
-		var biome = BiomeOf(cfg, dominant);
-		if (biome == null || !biome.EnableFoliage) return;
-
-		// Per-column probability / forest-noise gate. Uses the dominant biome
-		// we were given (no re-sampling): the forest-density noise gate and the
-		// hashed per-column roll are pure functions of (wx, wz, cfg) + the
-		// dominant biome, so this is identical to the old TreeAt(wx, wz, cfg)
-		// because `dominant` IS the column's true dominant biome.
-		if (!TreeAtDominant(wx, wz, dominant, cfg)) return;
-
-		// Check 1: the surface voxel must be solid (not cave-carved).
-		if (h < 0 || h >= chunk.SizeY) return;
-		byte surface = chunk.Get(x, h, z);
-		if (surface == 0) return;
-
-		// Check 2: the surface must be the biome's surface material (grass
-		// etc.), so a tree never sprouts from a rock boulder or cave stone.
-		if (surface != (byte)biome.SurfaceMaterial) return;
-
-		int cs = chunk.SizeX;
-		int sy = chunk.SizeY;
-		int th = TrunkHeight(wx, wz, cfg);
-
-		// Write only into air voxels so we never overwrite terrain or an
-		// existing voxel. Resolve the owning chunk per voxel so the instance
-		// can spill across chunk borders. A neighbour that is loaded but still
-		// generating can't be written into yet, so its voxel is QUEUED and
-		// applied when that neighbour finishes (ReDrainOverhangsUntilStable).
-		// A chunk that is not loaded at all is dropped (it will generate fresh
-		// and its own foliage stage handles its rooted instances).
-		void PutVoxel(int vx, int vy, int vz, byte mat)
-		{
-			if (vy < 0 || vy >= sy) return;
-			if (chunks == null) return;
-			Vector2I coord = new Vector2I(FloorDiv(vx, cs), FloorDiv(vz, cs));
-			if (!chunks.TryGetValue(coord, out VoxelChunk ch))
-				return; // not loaded: dropped (see above)
-			if (!ch.DataReady)
-			{
-				// Loaded but still generating: queue the voxel for that chunk
-				// (applied by the main-thread re-drain once it finishes).
-				_pendingOverhangs.AddOrUpdate(coord,
-					_ => new System.Collections.Concurrent.ConcurrentBag<OverhangVoxel>(
-						new OverhangVoxel[] { new OverhangVoxel(vx, vy, vz, mat) }),
-					(_, existing) =>
-					{
-						existing.Add(new OverhangVoxel(vx, vy, vz, mat));
-						return existing;
-					});
-				return;
-			}
-			ChunkData o = ch.Data;
-			int lx = vx - coord.X * cs;
-			int lz = vz - coord.Y * cs;
-			if (lx < 0 || lx >= cs || lz < 0 || lz >= cs) return;
-			if (o.Get(lx, vy, lz) == 0)
-				o.Set(lx, vy, lz, mat);
-		}
-
-		if (biome.IsCactus && biome.CactusMaterial > 0)
-		{
-			// Cactus: a single vertical column, no canopy.
-			int cactusTop = h + th;
-			for (int y = h + 1; y <= Math.Min(cactusTop, sy - 1); y++)
-				PutVoxel(wx, y, wz, (byte)biome.CactusMaterial);
-			return;
-		}
-
-		if (biome.TrunkMaterial == 0) return; // no trunk material -> no tree
-
-		int lr = LeafRadius(wx, wz, cfg);
-		// Canopy centred one voxel above the trunk top so the trunk pokes
-		// through the top of the blob (Minecraft style).
-		int top = h + th;
-		int cy = top + 1;
-
-		// Trunk.
-		for (int y = h + 1; y <= Math.Min(top, sy - 1); y++)
-			PutVoxel(wx, y, wz, (byte)biome.TrunkMaterial);
-
-		// Canopy: main blob plus an optional lower second tier. Emitted into
-		// whatever chunk each leaf voxel belongs to.
-		if (biome.LeafMaterial != 0)
-		{
-			WriteLeafBlobWorld(wx, wz, cy, lr, (byte)biome.LeafMaterial, PutVoxel);
-			if (biome.HasLeafTier2 && lr > 1)
-			{
-				int lr2 = Mathf.Max(1, Mathf.RoundToInt(lr * biome.LeafTier2RadiusFactor));
-				WriteLeafBlobWorld(wx, wz, cy - biome.LeafTier2HeightBelow, lr2, (byte)biome.LeafMaterial, PutVoxel);
-			}
-		}
-	}
-
-	/// <summary>
-	/// Emit a spherical leaf blob centred at world column (wx, wz) and height
-	/// <paramref name="centerY"/> with the given radius, delegating each voxel to
-	/// <paramref name="write"/> (which resolves the owning chunk and clips to
-	/// air). Used so the canopy can spill across chunk borders.
-	/// </summary>
-	private static void WriteLeafBlobWorld(
-		int wx, int wz, int centerY, int radius, byte leafMaterial,
-		Delegate write)
-	{
-		int r2 = radius * radius;
-		var put = (System.Action<int, int, int, byte>)write;
-		for (int dx = -radius; dx <= radius; dx++)
-		{
-			for (int dy = -radius; dy <= radius; dy++)
-			{
-				for (int dz = -radius; dz <= radius; dz++)
-				{
-					if (dx * dx + dy * dy + dz * dz > r2) continue;
-					put(wx + dx, centerY + dy, wz + dz, leafMaterial);
-				}
-			}
-		}
-	}
-
-	/// <summary>
 	/// LOD overload of <see cref="FoliageBaseSolid"/>: resolves the base voxel
 	/// through the world's full chunk map (a region spans many chunks, so there
 	/// is no pre-fetched neighbour set). A column whose chunk is unloaded or
@@ -957,33 +888,6 @@ public static class TerrainGenerator
 		int q = a / b;
 		if ((a % b != 0) && ((a < 0) != (b < 0))) q--;
 		return q;
-	}
-
-	/// <summary>
-	/// Stamps a spherical leaf blob of the given radius into the chunk, centered
-	/// at (col.X, centerY, col.Z). Only fills air voxels (never overwrites trunk
-	/// or terrain) and only writes voxels that fall inside this chunk.
-	/// </summary>
-	private static void WriteLeafBlob(ChunkData chunk, Vector3I col, int centerY, int radius, int leafMaterial)
-	{
-		int r2 = radius * radius;
-		for (int dx = -radius; dx <= radius; dx++)
-		{
-			for (int dy = -radius; dy <= radius; dy++)
-			{
-				for (int dz = -radius; dz <= radius; dz++)
-				{
-					if (dx * dx + dy * dy + dz * dz > r2) continue;
-
-					int nx = col.X + dx;
-					int ny = centerY + dy;
-					int nz = col.Z + dz;
-					if (nx < 0 || nx >= chunk.SizeX || ny < 0 || ny >= chunk.SizeY || nz < 0 || nz >= chunk.SizeZ) continue;
-					if (chunk.Get(nx, ny, nz) == 0)
-						chunk.Set(nx, ny, nz, (byte)leafMaterial);
-				}
-			}
-		}
 	}
 
 	// ---------------------------------------------------------------------
@@ -1177,87 +1081,21 @@ public static class TerrainGenerator
 	}
 
 	/// <summary>
-	/// Whether a tree/cactus grows at (wx, wz). The dominant biome must have
-	/// foliage enabled and the shared forest-density noise must clear that biome's
-	/// threshold; a hashed per-column roll then decides the plant. The global
-	/// <see cref="GenConfig.FoliageDensity"/> multiplier (0..1) thins out the
-	/// instances inside a forest: it scales the biome's per-column probability
-	/// AFTER the noise gate, so the grove layout stays stable and only the tree
-	/// count within it changes.
+	/// Whether a TREE grows at (wx, wz). Delegates to the tree structure
+	/// definition's per-column gate (see <see cref="TreeStructure.PlaceAtColumn"/>).
+	/// Kept for the LOD heightfield, which samples the tree silhouette through
+	/// this + <see cref="TreeStructure.TrunkHeight"/> +
+	/// <see cref="TreeStructure.LeafRadius"/>.
 	/// </summary>
 	public static bool TreeAt(int wx, int wz, GenConfig cfg)
 	{
 		var (weights, dominant) = BiomeAt(wx, wz, cfg);
-		var biome = BiomeOf(cfg, dominant);
-		if (biome == null || !biome.EnableFoliage) return false;
-		if (cfg.ForestNoise.GetNoise2D(wx, wz) < biome.DensityThreshold) return false;
-		float chance = biome.Probability * Mathf.Clamp(cfg.FoliageDensity, 0f, 1f);
-		if (chance <= 0f) return false;
-		uint h = VoxelHash.Hash2(wx, wz, (uint)cfg.Seed ^ 0x9E37u);
-		return VoxelHash.Hash01(h) < chance;
-	}
-
-	/// <summary>
-	/// <see cref="TreeAt"/> but with the column's dominant biome SUPPLIED rather
-	/// than re-sampled (the caller already computed it via
-	/// <see cref="ColumnBiomes"/>). Identical result when
-	/// <paramref name="dominant"/> is the column's true dominant biome — which it
-	/// is, since that's how <see cref="ColumnBiomes"/> computes it — but skips the
-	/// redundant 2D biome-noise sample.
-	/// </summary>
-	private static bool TreeAtDominant(int wx, int wz, int dominant, GenConfig cfg)
-	{
-		var biome = BiomeOf(cfg, dominant);
-		if (biome == null || !biome.EnableFoliage) return false;
-		if (cfg.ForestNoise.GetNoise2D(wx, wz) < biome.DensityThreshold) return false;
-		float chance = biome.Probability * Mathf.Clamp(cfg.FoliageDensity, 0f, 1f);
-		if (chance <= 0f) return false;
-		uint h = VoxelHash.Hash2(wx, wz, (uint)cfg.Seed ^ 0x9E37u);
-		return VoxelHash.Hash01(h) < chance;
-	}
-
-	/// <summary>Trunk (or cactus column) height for a column, from the dominant biome's range.</summary>
-	public static int TrunkHeight(int wx, int wz, GenConfig cfg)
-	{
-		var (_, dominant) = BiomeAt(wx, wz, cfg);
-		var biome = BiomeOf(cfg, dominant);
-		int min = biome != null ? biome.TrunkMinHeight : 3;
-		int max = biome != null ? biome.TrunkMaxHeight : 5;
-		uint h = VoxelHash.Hash2(wx, wz, (uint)cfg.Seed ^ 0x51ADu);
-		float r = VoxelHash.Hash01(h);
-		return min + (int)(r * (max - min + 1));
-	}
-
-	/// <summary>Leaf-blob radius for a column, from the dominant biome's range.</summary>
-	public static int LeafRadius(int wx, int wz, GenConfig cfg)
-	{
-		var (_, dominant) = BiomeAt(wx, wz, cfg);
-		var biome = BiomeOf(cfg, dominant);
-		int min = biome != null ? biome.LeafMinRadius : 2;
-		int max = biome != null ? biome.LeafMaxRadius : 3;
-		uint h = VoxelHash.Hash2(wx, wz, (uint)cfg.Seed ^ 0xBEEFu);
-		float r = VoxelHash.Hash01(h);
-		return min + (int)(r * (max - min + 1));
+		return TreeStructure.Gate(wx, wz, dominant, cfg);
 	}
 
 	// ---------------------------------------------------------------------
 	// Material-layer helpers
 	// ---------------------------------------------------------------------
-
-	/// <summary>Largest leaf radius across biomes (for the foliage margin scan).</summary>
-	private static int MaxLeafRadius(GenConfig cfg)
-	{
-		var biomes = Biomes(cfg);
-		int max = 3;
-		for (int i = 0; i < biomes.Length; i++)
-		{
-			if (biomes[i].LeafMaxRadius > max)
-			{
-				max = biomes[i].LeafMaxRadius;
-			}
-		}
-		return max;
-	}
 
 	/// <summary>
 	/// Picks the per-layer material for a column: for each distinct material id in

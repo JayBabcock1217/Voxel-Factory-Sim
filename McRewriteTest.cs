@@ -284,6 +284,7 @@ public partial class McRewriteTest : Node
 	{
 		const int S = 16;
 		const int H = 48;
+		var perlin = () => new FastNoiseLite { Seed = 1337, NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin };
 		var cfg = new GenConfig
 		{
 			Seed = 1337,
@@ -293,7 +294,12 @@ public partial class McRewriteTest : Node
 			DirtDepth = 3,
 			CaveStoneDepth = 5,
 			EnableCaves = false,
-			HeightNoise = new FastNoiseLite { Seed = 1337, NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin },
+			HeightNoise = perlin(),
+			// Biome + forest noise are required by the heightmap/foliage stages
+			// (SampleBiomes reads BiomeNoise, the tree gate reads ForestNoise).
+			BiomeNoise = perlin(),
+			ForestNoise = perlin(),
+			FoliageDensity = 0f, // no surface foliage in this test (ore + health only)
 			MaterialConfig = new VoxelMaterialConfig(),
 			BiomeConfig = new BiomeConfig(),
 		};
@@ -318,7 +324,11 @@ public partial class McRewriteTest : Node
 			},
 		};
 		cfg.OreConfig = oreCfg;
-		cfg.Structures.Add(new OreStructureGenerator(oreCfg));
+		cfg.OreGenerators.Add(new OreStructureGenerator(oreCfg));
+		// No surface structures in this test (trees/rocks/hive): the foliage
+		// stage reads cfg.Structures, so give it an empty registry to keep the
+		// terrain deterministic (this test only exercises ore + health).
+		cfg.Structures = new StructureRegistry();
 
 		var data = new ChunkData(S, H, S);
 		TerrainGenerator.Generate(data, 0, 0, cfg);

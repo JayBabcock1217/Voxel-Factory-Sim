@@ -48,8 +48,21 @@ public sealed class GenConfig
 	public float FoliageDensity;
 
 	/// <summary>
-	/// Structure generators to run after terrain + caves.
-	/// Add new implementations of <see cref="IStructureGenerator"/> here for future expansion.
+	/// The world's structure registry: every piece of foliage / structure that
+	/// grows in the world (trees, cacti, rocks, the hive), all as
+	/// <see cref="StructureDefinition"/> instances. The generation stages read
+	/// from it: the foliage stage rolls <see cref="StructureRegistry.ColumnStructures"/>
+	/// per column, the structures stage stamps
+	/// <see cref="StructureRegistry.CellStructures"/> (rocks) per cell, and the
+	/// hive is placed by a per-chunk main-thread roll.
 	/// </summary>
-	public List<IStructureGenerator> Structures { get; } = new();
+	public StructureRegistry Structures;
+
+	/// <summary>
+	/// Deep-rock structure generators (ore veins) applied in the structures
+	/// stage. Kept separate from <see cref="Structures"/> because ore is a
+	/// deep-rock feature (an <see cref="IStructureGenerator"/>), not surface
+	/// foliage.
+	/// </summary>
+	public List<IStructureGenerator> OreGenerators { get; } = new();
 }
