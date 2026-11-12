@@ -194,6 +194,29 @@ public partial class SkyCycle : Node
 
 	public override void _Ready()
 	{
+		// Ensure the sun and the world environment are in their expected groups
+		// BEFORE we look them up. The scene is supposed to assign these groups
+		// (groups = ["sun_light"] / groups = ["world_environment"]), but the
+		// Godot editor rewrites the .tscn on save and can silently drop
+		// hand-edited group entries — so relying on the scene file alone is
+		// fragile. Adding them here in code (the same way VoxelWorld joins
+		// "voxel_world") makes the group lookup below work no matter what the
+		// scene file contains. We also fall back to a tree walk in case the
+		// nodes exist but were never grouped.
+		var sun = GetTree()?.GetFirstNodeInGroup(SunLightGroup) as DirectionalLight3D
+			?? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root);
+		var worldEnv = GetTree()?.GetFirstNodeInGroup(WorldEnvironmentGroup) as WorldEnvironment
+			?? FindDescendantOfType<WorldEnvironment>(GetTree()?.Root);
+
+		if (sun != null)
+		{
+			sun.AddToGroup(SunLightGroup);
+		}
+		if (worldEnv != null)
+		{
+			worldEnv.AddToGroup(WorldEnvironmentGroup);
+		}
+
 		_sun = GetTree()?.GetFirstNodeInGroup(SunLightGroup) as DirectionalLight3D;
 		_worldEnvironment = GetTree()?.GetFirstNodeInGroup(WorldEnvironmentGroup) as WorldEnvironment;
 		_environment = _worldEnvironment?.Environment;
@@ -345,5 +368,29 @@ public partial class SkyCycle : Node
 	{
 		float r = x % m;
 		return r < 0f ? r + m : r;
+	}
+
+	/// <summary>
+	/// Depth-first search for the first descendant of <paramref name="root"/>
+	/// that is a <typeparamref name="T"/> (or is itself). Used as a fallback when
+	/// the expected group is empty (e.g. the scene editor dropped the group
+	/// entry), so the cycle can still find the sun / world environment. Returns
+	/// null when <paramref name="root"/> is null or no such node exists.
+	/// </summary>
+	private static T FindDescendantOfType<T>(Node root) where T : Node
+	{
+		if (root is T match)
+		{
+			return match;
+		}
+		for (int i = 0; i < root.GetChildCount(); i++)
+		{
+			var result = FindDescendantOfType<T>(root.GetChild(i));
+			if (result != null)
+			{
+				return result;
+			}
+		}
+		return null;
 	}
 }
