@@ -71,6 +71,37 @@ public partial class VoxelWorld : Node3D
 	[Export(PropertyHint.Range, "1,32,1")]
 	public int ChunksPerFrame { get; set; } = 3;
 
+	[ExportGroup("Load")]
+	/// <summary>
+	/// How strongly chunk generation + meshing is prioritised toward the
+	/// direction the player is LOOKING. 0.0 = pure distance (current behaviour,
+	/// the load ring is a uniform square around the player). 1.0 = chunks
+	/// directly in front of the player jump far ahead of chunks at the same
+	/// distance behind the player. The bias is SOFT (a distance multiplier, not
+	/// a hard cone), so near chunks always still beat far ones — only the
+	/// ordering at equal distance is tilted toward the view. Applied to both
+	/// the generation queue (which chunk generates next) and the per-frame mesh
+	/// budget (which ready chunk meshes next), so the view fills in first.
+	/// </summary>
+	[Export(PropertyHint.Range, "0.0,1.0,0.05")]
+	public float ForwardBias { get; set; } = 0.5f;
+
+	/// <summary>
+	/// The player's horizontal facing direction, updated once per frame in
+	/// <see cref="_Process"/>. Used by <see cref="EffectiveDistSq"/> to bias the
+	/// load ring toward the view direction. Horizontal-only (Y zeroed) and
+	/// normalised; defaults to the camera's forward when the player is absent.
+	/// </summary>
+	private Vector3 _playerForward = new Vector3(0f, 0f, -1f);
+
+	/// <summary>
+	/// The chunk the player is currently standing in, cached each frame in
+	/// <see cref="_Process"/>. <see cref="EffectiveDistSq"/> biases distances
+	/// relative to this chunk (not the spawn anchor), so the load ring follows
+	/// the player's live position + facing.
+	/// </summary>
+	private Vector2I _livePlayerChunk = Vector2I.Zero;
+
 	[ExportGroup("World")]
 	/// <summary>Random seed for all generation.</summary>
 	[Export]
@@ -1723,6 +1754,19 @@ public partial class VoxelWorld : Node3D
 		Vector2I spawnChunk = ChunkCoordOf(_spawnAnchor != Vector3.Zero ? _spawnAnchor : playerNode.GlobalPosition);
 		Vector2I livePlayerChunk = ChunkCoordOf(playerNode.GlobalPosition);
 
+		_livePlayerChunk = livePlayerChunk;
+
+		// Cache the player's horizontal facing direction for the view-direction
+		// load bias (ForwardBias). Godot's -Z is forward in the node's local
+		// space, so the basis * (-Z) is the world-space look direction. Y is
+		// zeroed (looking up/down shouldn't change which XZ chunks load first)
+		// and it is normalised. A near-zero result (looking straight down or an
+		// unrotated node) falls back to the default forward so the bias never
+		// divides by ~0.
+		var fwd = playerNode.GlobalTransform.Basis * new Vector3(0f, 0f, -1f);
+		fwd.Y = 0f;
+		_playerForward = fwd.LengthSquared() > 0.001f ? fwd.Normalized() : new Vector3(0f, 0f, -1f);
+
 		// Enqueue every in-range chunk that isn't already loaded or queued, in
 		// SPIRAL (ring) order around the player's LIVE chunk, then pump the
 		// queue (which re-sorts by the live player position). The queue (not the
@@ -1957,7 +2001,11 @@ public partial class VoxelWorld : Node3D
 		// a deterministic total order over the edited area.
 		pending = pending
 			.OrderByDescending(c => c.EditPriority)
-			.ThenBy(c => DistanceSq(c.Coord, livePlayerChunk))
+			// BIASed view distance (see EffectiveDistSq): ready chunks in the
+			// direction the player is looking mesh before ones at the same
+			// distance behind them, so the view fills in first. EditPriority
+			// still dominates (edited chunks jump ahead of first-builds).
+			.ThenBy(c => EffectiveDistSq(c.Coord))
 			.ToList();
 
 		for (int i = 0; i < pending.Count && i < ChunksPerFrame; i++)
@@ -4519,8 +4567,12 @@ public partial class VoxelWorld : Node3D
 			GD.PushWarning($"[VoxelWorld] Gen stall: budget={_generatingBudget}/{MaxConcurrentGenerations}, queue={_genQueue.Count}, loaded={_chunks.Count}, playerChunk={playerChunk}");
 		}
 
-		// Nearest-to-the-player's-current-chunk first.
-		_genQueue.Sort((a, b) => DistanceSq(a, playerChunk).CompareTo(DistanceSq(b, playerChunk)));
+		// Nearest-to-the-player's-current-chunk first, BIASed toward the view
+		// direction (ForwardBias). EffectiveDistSq reads the live _playerChunk +
+		// _playerForward cached each frame, so the in-flight set tilts toward
+		// where the player is LOOKING, not just where they stand. At
+		// ForwardBias = 0 this is the old pure-distance order.
+		_genQueue.Sort((a, b) => EffectiveDistSq(a).CompareTo(EffectiveDistSq(b)));
 
 		while (_generatingBudget < MaxConcurrentGenerations)
 		{
@@ -5386,6 +5438,39 @@ public partial class VoxelWorld : Node3D
 		int dx = a.X - b.X;
 		int dy = a.Y - b.Y;
 		return dx * dx + dy * dy;
+	}
+
+	/// <summary>
+	/// The view-direction-biased priority distance for a chunk, used to order
+	/// the generation queue and the per-frame mesh budget. Unlike
+	/// <see cref="DistanceSq"/>, this shortens the effective distance of chunks
+	/// that lie in the direction the player is facing (<see cref="ForwardBias"/>)
+	/// and lengthens the distance of chunks behind the player, so the view
+	/// fills in first. The bias is a MULTIPLIER on the true distance:
+	/// <c>dist * (1 - ForwardBias * dot)</c> where <c>dot</c> is the cosine of
+	/// the angle between the player's facing and the chunk direction
+	/// (1 = directly ahead, -1 = directly behind). At <c>ForwardBias = 0</c>
+	/// this is exactly <c>dist</c> (pure distance, the old behaviour). Because
+	/// it scales the true distance (not a fixed offset), near chunks always
+	/// still beat far ones — only the ordering at equal distance is tilted.
+	/// Returns the BIASed squared distance, so callers can compare directly.
+	/// </summary>
+	private float EffectiveDistSq(Vector2I coord)
+	{
+		int dx = coord.X - _livePlayerChunk.X;
+		int dz = coord.Y - _livePlayerChunk.Y;
+		float dist = System.MathF.Sqrt(dx * dx + dz * dz);
+		if (dist < 0.5f)
+		{
+			return 0f; // the player's own chunk: no bias, always first
+		}
+		float dot = (dx * _playerForward.X + dz * _playerForward.Z) / dist; // -1..1
+		float biased = dist * (1f - ForwardBias * dot);
+		if (biased < 0f)
+		{
+			biased = 0f; // ForwardBias <= 1 guarantees this never happens, but clamp for safety
+		}
+		return biased * biased;
 	}
 
 	/// <summary>
