@@ -186,6 +186,18 @@ public sealed class VoxelMaterialPalette
 	/// </summary>
 	public Color[] Tints { get; private set; } = Array.Empty<Color>();
 
+	/// <summary>Per-material metallic (index = material id - 1). Updated by <see cref="Apply"/>.</summary>
+	public float[] Metallics { get; private set; } = Array.Empty<float>();
+
+	/// <summary>Per-material roughness (index = material id - 1). Updated by <see cref="Apply"/>.</summary>
+	public float[] Roughnesses { get; private set; } = Array.Empty<float>();
+
+	/// <summary>Per-material specular (index = material id - 1). Updated by <see cref="Apply"/>.</summary>
+	public float[] Speculars { get; private set; } = Array.Empty<float>();
+
+	/// <summary>Per-material normal map (index = material id - 1). Null when the material has no normal map. Updated by <see cref="Apply"/>.</summary>
+	public Texture2D[] NormalMaps { get; private set; } = Array.Empty<Texture2D>();
+
 	/// <summary>
 	/// The texture for material <paramref name="id"/> (null when the material has
 	/// no texture or the id is unconfigured). The inventory / hotbar / recipe UI
@@ -278,6 +290,19 @@ public sealed class VoxelMaterialPalette
 			// same brightness as the plain materials. Out-of-range = white tint.
 			sm.SetShaderParameter(new StringName("TintA"), slotA >= 0 && slotA < Tints.Length ? Tints[slotA] : Colors.White);
 			sm.SetShaderParameter(new StringName("TintB"), slotB >= 0 && slotB < Tints.Length ? Tints[slotB] : Colors.White);
+			// Per-material PBR values, mixed in the shader by the blend factor so
+			// the crossfade matches each material's surface response.
+			sm.SetShaderParameter(new StringName("MetallicA"), slotA >= 0 && slotA < Metallics.Length ? Metallics[slotA] : 0f);
+			sm.SetShaderParameter(new StringName("MetallicB"), slotB >= 0 && slotB < Metallics.Length ? Metallics[slotB] : 0f);
+			sm.SetShaderParameter(new StringName("RoughnessA"), slotA >= 0 && slotA < Roughnesses.Length ? Roughnesses[slotA] : 1f);
+			sm.SetShaderParameter(new StringName("RoughnessB"), slotB >= 0 && slotB < Roughnesses.Length ? Roughnesses[slotB] : 1f);
+			sm.SetShaderParameter(new StringName("SpecularA"), slotA >= 0 && slotA < Speculars.Length ? Speculars[slotA] : 0.05f);
+			sm.SetShaderParameter(new StringName("SpecularB"), slotB >= 0 && slotB < Speculars.Length ? Speculars[slotB] : 0.05f);
+			// Per-material normal maps so the blend face has the same surface
+			// detail as the single-material faces (prevents the blend from
+			// reading brighter due to missing normal map micro-variation).
+			sm.SetShaderParameter(new StringName("NormalA"), slotA >= 0 && slotA < NormalMaps.Length ? (NormalMaps[slotA] ?? FallbackTexture) : FallbackTexture);
+			sm.SetShaderParameter(new StringName("NormalB"), slotB >= 0 && slotB < NormalMaps.Length ? (NormalMaps[slotB] ?? FallbackTexture) : FallbackTexture);
 			return sm;
 		});
 	}
@@ -326,6 +351,9 @@ public sealed class VoxelMaterialPalette
 		sm.SetShader(_voxelShader);
 		sm.SetShaderParameter(new StringName("Texture"), id >= 0 && id < Textures.Length ? (Textures[id] ?? FallbackTexture) : FallbackTexture);
 		sm.SetShaderParameter(new StringName("Tint"), id >= 0 && id < Tints.Length ? Tints[id] : Colors.White);
+		sm.SetShaderParameter(new StringName("Metallic"), id >= 0 && id < Metallics.Length ? Metallics[id] : 0f);
+		sm.SetShaderParameter(new StringName("Roughness"), id >= 0 && id < Roughnesses.Length ? Roughnesses[id] : 1f);
+		sm.SetShaderParameter(new StringName("Specular"), id >= 0 && id < Speculars.Length ? Speculars[id] : 0.05f);
 		return sm;
 	}
 
@@ -340,6 +368,10 @@ public sealed class VoxelMaterialPalette
 
 uniform sampler2D Texture : source_color, filter_linear_mipmap, repeat_enable;
 uniform vec4 Tint;
+// Per-material PBR values (set by BuildMaterial from the palette arrays).
+uniform float Metallic;
+uniform float Roughness;
+uniform float Specular;
 
 varying float vLight;
 
@@ -360,12 +392,11 @@ void fragment() {
 	// light (0..1). A cave interior (light 0) goes to black; an open surface
 	// (light 1) is unchanged. clamp guards against out-of-range attributes.
 	ALBEDO = t.rgb * clamp(vLight, 0.0, 1.0);
-	// Match the standard materials' PBR response (Roughness 1.0, Specular 0.05,
-	// Metallic 0.0 — see VoxelMaterialEntry defaults) so the surface reads the
-	// same as the old StandardMaterial3D, just light-scaled.
-	ROUGHNESS = 1.0;
-	SPECULAR = 0.05;
-	METALLIC = 0.0;
+	// Per-material PBR response (matches the VoxelBase.gdshader defaults:
+	// Roughness 1.0, Specular 0.05, Metallic 0.0).
+	METALLIC = Metallic;
+	ROUGHNESS = Roughness;
+	SPECULAR = Specular;
 }
 ";
 
@@ -401,6 +432,17 @@ uniform sampler2D TextureB : source_color, filter_linear_mipmap, repeat_enable;
 // lighter than the plain (non-blended) materials.
 uniform vec4 TintA;
 uniform vec4 TintB;
+// Per-material PBR values, mixed by the blend factor so the crossfade
+// matches both materials' surface response at f=0 and f=1.
+uniform float MetallicA;
+uniform float MetallicB;
+uniform float RoughnessA;
+uniform float RoughnessB;
+uniform float SpecularA;
+uniform float SpecularB;
+// Per-material normal maps (hint_normal = null-safe, samples white when unset).
+uniform sampler2D NormalA : hint_normal;
+uniform sampler2D NormalB : hint_normal;
 
 varying float vFactor;
 varying float vLight;
@@ -429,17 +471,17 @@ void fragment() {
 	// Sky light darkens enclosed geometry (caves): scale the crossfade by the
 	// per-vertex light (0..1), same as the plain-surface shader.
 	ALBEDO = albedo * clamp(vLight, 0.0, 1.0);
-	// Match the standard materials' PBR response EXACTLY. The plain materials
-	// (VoxelMaterialEntry defaults) are: Roughness 1.0, Metallic 0.0, and
-	// SchlickGgx specular with MetallicSpecular 0.05. In a raw spatial shader
-	// the SchlickGgx specular strength is the SPECULAR output — leaving it at
-	// the 0.5 default adds ~10x the sheen the plain material has, which is what
-	// made the blend read BRIGHTER. Pinning SPECULAR to 0.05 (and ROUGHNESS to
-	// 1.0) reproduces the plain material's diffuse + subtle specular, so the
-	// crossfade reads the same brightness as the non-blended surfaces.
-	ROUGHNESS = 1.0;
-	SPECULAR = 0.05;
-	METALLIC = 0.0;
+	// Mix the PBR response between the two materials so the blend matches
+	// each material's surface at f=0 and f=1.
+	METALLIC = mix(MetallicA, MetallicB, f);
+	ROUGHNESS = mix(RoughnessA, RoughnessB, f);
+	SPECULAR = mix(SpecularA, SpecularB, f);
+	// Blend the normal maps so the crossfade has the same surface detail as
+	// the single-material surfaces (prevents the blend from reading brighter
+	// due to missing normal map micro-variation).
+	vec3 nA = texture(NormalA, tuv).rgb * 2.0 - 1.0;
+	vec3 nB = texture(NormalB, tuv).rgb * 2.0 - 1.0;
+	NORMAL_MAP = mix(nA, nB, f);
 }
 ";
 
@@ -511,21 +553,40 @@ void fragment() {
 				continue;
 			}
 
-			bool hasTexture = entry.Texture != null;
+			// Extract the albedo texture from the custom material's shader
+			// parameters. Null when the material has no custom material or no
+			// albedo parameter (flat color fallback).
+			Texture2D albedoTex = entry.GetAlbedoTexture();
+			bool hasTexture = albedoTex != null;
 			// A textured material shows the texture at full brightness (white
 			// tint); an untextured one keeps its configured color.
 			Color tint = hasTexture ? Colors.White : entry.AlbedoColor;
 
 			TextureScales[slot] = entry.TextureScale;
-			// Expose the texture directly so the UI can draw the same texture
-			// it uses on the terrain as the item icon.
-			Textures[slot] = entry.Texture;
+			// Expose the texture so the UI can draw the same texture it uses
+			// on the terrain as the item icon, and so the blend shader can
+			// sample it.
+			Textures[slot] = albedoTex;
+			NormalMaps[slot] = entry.GetNormalMapTexture();
 			Tints[slot] = tint;
-			// Rebuild the slot's shader material with the (possibly new)
-			// texture + tint. Reassigning the array slot is a live update: the
-			// mesh surfaces index Materials[slot], so they pick up the new
-			// material on the next draw without a remesh.
-			Materials[slot] = BuildMaterial(slot);
+			Metallics[slot] = entry.Metallic;
+			Roughnesses[slot] = entry.Roughness;
+			Speculars[slot] = entry.SpecularAmount;
+
+			// If the material has a custom shader (e.g. a Visual Shader), use it
+			// directly. Otherwise, build the built-in sky-light shader material.
+			if (entry.CustomMaterial != null)
+			{
+				Materials[slot] = entry.CustomMaterial;
+			}
+			else
+			{
+				// Rebuild the slot's shader material with the (possibly new)
+				// texture + tint. Reassigning the array slot is a live update: the
+				// mesh surfaces index Materials[slot], so they pick up the new
+				// material on the next draw without a remesh.
+				Materials[slot] = BuildMaterial(slot);
+			}
 		}
 	}
 
@@ -550,28 +611,41 @@ void fragment() {
 		var old = Materials;
 		var oldScales = TextureScales;
 		var oldTextures = Textures;
+		var oldNormalMaps = NormalMaps;
 		var oldTints = Tints;
+		var oldMetallics = Metallics;
+		var oldRoughnesses = Roughnesses;
+		var oldSpeculars = Speculars;
 		var newMaterials = new Material[count];
 		var newScales = new float[count];
 		var newTextures = new Texture2D[count];
+		var newNormalMaps = new Texture2D[count];
 		var newTints = new Color[count];
+		var newMetallics = new float[count];
+		var newRoughnesses = new float[count];
+		var newSpeculars = new float[count];
 		int keep = Math.Min(old.Length, count);
 		for (int i = 0; i < keep; i++)
 		{
 			newMaterials[i] = old[i];
 			newScales[i] = oldScales[i];
 			newTextures[i] = i < oldTextures.Length ? oldTextures[i] : null;
+			newNormalMaps[i] = i < oldNormalMaps.Length ? oldNormalMaps[i] : null;
 			newTints[i] = i < oldTints.Length ? oldTints[i] : Colors.White;
+			newMetallics[i] = i < oldMetallics.Length ? oldMetallics[i] : 0f;
+			newRoughnesses[i] = i < oldRoughnesses.Length ? oldRoughnesses[i] : 1f;
+			newSpeculars[i] = i < oldSpeculars.Length ? oldSpeculars[i] : 0.05f;
 		}
 		for (int i = keep; i < count; i++)
 		{
-			// Placeholder slot values: white tint, no texture, scale 1. The
-			// material itself is built below (once the arrays are assigned, so
-			// BuildMaterial reads the NEW full-size Textures/Tints, not the old
-			// shorter ones). Apply() then rebuilds it with the real config.
+			// Placeholder slot values: white tint, no texture, scale 1, standard PBR.
 			newTextures[i] = null;
+			newNormalMaps[i] = null;
 			newTints[i] = Colors.White;
 			newScales[i] = 1f;
+			newMetallics[i] = 0f;
+			newRoughnesses[i] = 1f;
+			newSpeculars[i] = 0.05f;
 		}
 
 		// Assign the slot arrays FIRST so BuildMaterial reads the new,
@@ -580,7 +654,11 @@ void fragment() {
 		Materials = newMaterials;
 		TextureScales = newScales;
 		Textures = newTextures;
+		NormalMaps = newNormalMaps;
 		Tints = newTints;
+		Metallics = newMetallics;
+		Roughnesses = newRoughnesses;
+		Speculars = newSpeculars;
 		for (int i = keep; i < count; i++)
 		{
 			Materials[i] = BuildMaterial(i);

@@ -479,10 +479,8 @@ public partial class VoxelWorld : Node3D
 	/// crafting UI. Edits made in the editor's inspector are persisted back to the
 	/// .tres by <see cref="SaveMaterialConfig"/>; at runtime, <see
 	/// cref="BackfillKnownMaterials"/> adds any newly-introduced special materials
-	/// (torch, hive, ...) that an older file is missing, and <see
-	/// cref="VoxelMaterialConfig.SanitizeTextures"/> drops broken texture
-	/// references. The in-memory <c>= new()</c> default is only a fallback when
-	/// the export is left unset.
+	/// (torch, hive, ...) that an older file is missing. The in-memory
+	/// <c>= new()</c> default is only a fallback when the export is left unset.
 	/// </summary>
 	[Export]
 	public VoxelMaterialConfig MaterialConfig { get; set; } = new();
@@ -1268,35 +1266,7 @@ public partial class VoxelWorld : Node3D
 			SaveMaterialConfig();
 		}
 
-		// Drop any material texture reference that is not a real Texture2D (a
-		// broken/disposed resource, or a bare Resource placeholder from a .tres
-		// whose texture image was missing at load time). Left in place, the
-		// engine's property bridge throws InvalidCastException when it re-sets
-		// the property. Clearing it makes the material fall back to its flat
-		// color for THIS run.
-		//
-		// Deliberately NOT persisted: the .tres keeps pointing at the (missing)
-		// texture path, so restoring the file brings the texture back on the
-		// next run. Re-saving a sanitized config here was a data-loss bug — it
-		// rewrote the .tres with every texture assignment stripped, so the
-		// config permanently "reset to defaults" after each play session.
-		if (MaterialConfig != null)
-		{
-			MaterialConfig.SanitizeTextures();
-			// TEMP DIAGNOSTIC: log the config's origin + each material's texture
-			// state at startup so a missing texture is visible in the console
-			// (remove after verifying).
-			GD.Print($"[MatDiag] config origin: {MaterialConfig.ResourcePath} (export path: {MaterialConfigPath})");
-			foreach (var def in MaterialConfig.Materials ?? System.Array.Empty<VoxelMaterialDef>())
-			{
-				if (def?.Entry == null)
-				{
-					continue;
-				}
-				var t = def.Entry.Texture;
-				GD.Print($"[MatDiag] id={def.Id} name='{def.Name}' texture={(t == null ? "NULL" : (t is Texture2D ? "Texture2D(" + t.ResourcePath + ")" : t.GetClass() + "(" + t.ResourcePath + ")"))}");
-			}
-		}
+
 
 		// Apply the material config once, then follow live inspector edits.
 		ApplyMaterials();
@@ -1584,6 +1554,7 @@ public partial class VoxelWorld : Node3D
 		bool countChanged = Palette.MaterialCount != newCount;
 		bool tilingChanged = false;
 		bool tintChanged = false;
+		bool pbrChanged = false;
 		for (int i = 0; i < Palette.TextureScales.Length && i < newCount; i++)
 		{
 			var entry = MaterialConfig.Materials[i].Entry;
@@ -1600,20 +1571,30 @@ public partial class VoxelWorld : Node3D
 			// into its cached ShaderMaterial. Compare against the effective tint,
 			// not the raw entry color, so a textured material's white tint is not
 			// mistaken for a change on every call.
-			Color effectiveTint = entry.Texture != null ? Colors.White : entry.AlbedoColor;
+			Color effectiveTint = entry.GetAlbedoTexture() != null ? Colors.White : entry.AlbedoColor;
 			if (Palette.Tints.Length > i && Palette.Tints[i] != effectiveTint)
 			{
 				tintChanged = true;
 			}
+			// The blend shader bakes each material's PBR values into its cached
+			// ShaderMaterial. A change to metallic/roughness/specular requires a
+			// cache clear so the next mesh build picks up the new values.
+			if (Palette.Metallics.Length > i && !Mathf.IsEqualApprox(Palette.Metallics[i], entry.Metallic))
+				pbrChanged = true;
+			if (Palette.Roughnesses.Length > i && !Mathf.IsEqualApprox(Palette.Roughnesses[i], entry.Roughness))
+				pbrChanged = true;
+			if (Palette.Speculars.Length > i && !Mathf.IsEqualApprox(Palette.Speculars[i], entry.SpecularAmount))
+				pbrChanged = true;
 		}
 
 		Palette.Resize(newCount);
 		Palette.Apply(MaterialConfig);
 		Palette.BlendEnabled = MaterialConfig.EnableBlend;
-		if (tintChanged || countChanged)
+		if (tintChanged || pbrChanged || countChanged)
 		{
 			// countChanged is already handled by Resize() clearing the cache;
-			// tintChanged needs an explicit clear because Resize kept the slots.
+			// tintChanged / pbrChanged need an explicit clear because Resize
+			// kept the slots (and their cached blend materials).
 			Palette.ClearBlendCache();
 		}
 
@@ -4343,6 +4324,11 @@ public partial class VoxelWorld : Node3D
 			if (t.IsFaulted)
 			{
 				GD.PushError($"[VoxelWorld] Terrain generation failed for chunk {coord}: {t.Exception}");
+				// Release the generation slot so the budget doesn't leak. Without
+				// this, a faulted generation permanently occupies one of the 8
+				// concurrent slots, and after 8 faults the queue stops pumping
+				// entirely (chunks stop generating at the edge of the loaded area).
+				CallDeferred(nameof(OnGenerationFaulted), new Variant[] { coord });
 				return;
 			}
 			// Marshal back to the main thread: the scene-tree and <c>_chunks</c>
@@ -4351,6 +4337,27 @@ public partial class VoxelWorld : Node3D
 			// the supplied arguments.
 			CallDeferred(nameof(OnGenerationComplete), new Variant[] { coord, chunk });
 		}, TaskScheduler.Default);
+	}
+
+	/// <summary>
+	/// Called (on the main thread via <c>CallDeferred</c>) when a chunk's async
+	/// terrain generation faults (throws). Releases the generation slot so the
+	/// budget doesn't leak, and frees the half-initialized chunk so it can be
+	/// re-queued on the next frame. Without this, a faulted generation
+	/// permanently occupies one of the <see cref="MaxConcurrentGenerations"/>
+	/// slots — after 8 faults the queue stops pumping entirely and chunks stop
+	/// generating at the edge of the loaded area.
+	/// </summary>
+	private void OnGenerationFaulted(Vector2I coord)
+	{
+		_generatingBudget = Mathf.Max(0, _generatingBudget - 1);
+		// Free the half-initialized chunk so it doesn't linger in _chunks and
+		// block re-queueing. The next _Process frame will re-enqueue it via
+		// EnqueueSpiralRing (it's in range but no longer in _chunks).
+		if (_chunks.TryGetValue(coord, out VoxelChunk chunk))
+		{
+			FreeChunk(chunk);
+		}
 	}
 
 	/// <summary>

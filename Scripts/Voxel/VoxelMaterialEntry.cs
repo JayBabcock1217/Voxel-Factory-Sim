@@ -42,92 +42,66 @@ public partial class VoxelMaterialEntry : Resource
 		}
 	}
 
-	/// <summary>Optional texture. Null = flat color.</summary>
-	[Export]
-	public Texture2D Texture
-	{
-		get => _texture;
-		set
-		{
-			// TEMP DIAGNOSTIC (remove after verifying): log every non-null
-			// Texture assignment so we can see whether the .tres's texture
-			// assignments reach C# (property bridge) or not.
-			if (value != null)
-			{
-				GD.Print($"[MatDiag] Texture SET path={value.ResourcePath} class={value.GetClass()}");
-			}
-			_texture = value;
-			Raise();
-		}
-	}
-	private Texture2D _texture;
 	/// <summary>
-	/// Assigns the texture, guarding against a malformed value. NOTE: the C#
-	/// property setter is NOT what Godot's property bridge uses to load a .tres —
-	/// the generated <c>SetGodotClassPropertyValue</c> writes the backing field
-	/// directly and throws <see cref="InvalidCastException"/> if the stored value
-	/// is a non-Texture2D (e.g. a bare <c>Resource</c> placeholder for a texture
-	/// whose image was missing at save time). The real defense is
-	/// <see cref="VoxelMaterialConfig.SanitizeTextures"/> (run at load), which
-	/// clears any such reference BEFORE the engine re-sets properties. This setter
-	/// is for C# code paths and keeps the null-check symmetric.
+	/// The custom shader material (e.g. a Visual Shader or a ShaderMaterial with
+	/// VoxelBase.gdshader). When set, this material is used for the voxel surface
+	/// INSTEAD of the built-in sky-light shader. The custom material must be a
+	/// spatial shader that samples its own textures and applies lighting.
+	///
+	/// The albedo texture is extracted from the shader's "albedo" parameter (for
+	/// VoxelBase.gdshader) and used by the blend shader and UI icons. When null,
+	/// the built-in sky-light shader is used (flat AlbedoColor, no texture).
 	/// </summary>
-	public void SetTexture(Texture2D value)
+	[Export] public ShaderMaterial CustomMaterial { get; set; }
+	public void SetCustomMaterial(ShaderMaterial value)
 	{
-		if (!ReferenceEquals(Texture, value))
+		if (!ReferenceEquals(CustomMaterial, value))
 		{
-			Texture = value;
+			CustomMaterial = value;
 			Raise();
 		}
 	}
 
 	/// <summary>
-	/// True when the <see cref="Texture"/> reference is a real, usable
-	/// <see cref="Texture2D"/> (non-null, the right type, and not a freed
-	/// resource). Used by <see cref="VoxelMaterialConfig.SanitizeTextures"/> to
-	/// drop malformed references that would crash the property bridge.
-	///
-	/// NOTE: this must NOT compare <c>GetClass() == "Texture2D"</c>. An imported
-	/// PNG loads as a CONCRETE subclass (e.g. <c>CompressedTexture2D</c> /
-	/// <c>ImageTexture</c>), whose <c>GetClass()</c> is the subclass name — not
-	/// the base "Texture2D" — so that comparison is false for every real texture
-	/// and the sanitizer wrongly wiped all of them. The C# <c>is</c> check tests
-	/// the whole Texture2D hierarchy, and a null/detached backing (a freed or
-	/// not-yet-loaded native object) is caught by the <c>ReferenceEquals(null)</c>
-	/// probe.
+	/// Extracts the albedo texture from the <see cref="CustomMaterial"/>'s shader
+	/// parameters. Returns null when the material has no shader or no "albedo"
+	/// parameter. Used by the palette to fill the <see cref="VoxelMaterialPalette
+	/// .Textures"/> array (for blend shader + UI icons).
 	/// </summary>
-	public bool HasValidTexture()
+	public Texture2D GetAlbedoTexture()
 	{
-		var tex = Texture;
-		if (tex == null)
+		return GetShaderTexture("albedo");
+	}
+
+	/// <summary>
+	/// Extracts the normal map texture from the <see cref="CustomMaterial"/>'s
+	/// shader parameters. Returns null when the material has no shader or no
+	/// "normal_map" parameter. Used by the palette to fill the <see cref="
+	/// VoxelMaterialPalette.NormalMaps"/> array (for the blend shader).
+	/// </summary>
+	public Texture2D GetNormalMapTexture()
+	{
+		return GetShaderTexture("normal_map");
+	}
+
+	/// <summary>
+	/// Reads a texture-type shader parameter from the <see cref="CustomMaterial"/>.
+	/// Returns null when the material has no shader, the parameter is unset, or
+	/// the value is not a <see cref="Texture2D"/>.
+	/// </summary>
+	private Texture2D GetShaderTexture(string name)
+	{
+		if (CustomMaterial?.Shader == null)
 		{
-			return false;
+			return null;
 		}
-		// A genuine Texture2D of any concrete class (ImageTexture,
-		// CompressedTexture2D, AtlasTexture, ...). A bare Resource placeholder
-		// for a missing file fails this check and is dropped.
-		if (!(tex is Texture2D))
+		var param = CustomMaterial.GetShaderParameter(name);
+		if (param.VariantType == Variant.Type.Nil)
 		{
-			return false;
+			return null;
 		}
-		// A freed / detached native object surfaces as a wrapper that compares
-		// equal to null (or throws when its native handle is touched). Guard so
-		// a disposed texture is treated as broken, not valid.
-		if (ReferenceEquals(tex, null))
-		{
-			return false;
-		}
-		try
-		{
-			// Touch a native-backed property to force the handle check: a
-			// disposed resource throws here.
-			_ = tex.GetClass();
-			return true;
-		}
-		catch (Exception)
-		{
-			return false;
-		}
+		var obj = param.AsGodotObject();
+		return obj as Texture2D;
 	}
 
 	/// <summary>How many times the texture repeats per voxel face (1 = one tile per face).</summary>

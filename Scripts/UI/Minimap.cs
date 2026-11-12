@@ -40,24 +40,12 @@ public partial class Minimap : Node
 	[Export] public int MarginPx { get; set; } = 12;
 
 	/// <summary>
-	/// The width (in world tiles) of the square terrain slice that the circle is
-	/// cut out of. It must be LARGER than the circle's diameter (in tiles) so the
-	/// circle always fits inside sampled terrain with a margin — otherwise the
-	/// circle's diagonal edges read past the slice and show as dark "unknown"
-	/// (which is what made the map look "covered"). The circle's radius in tiles
-	/// is (DiameterPx/2) / (DiameterPx/RadiusTiles) = RadiusTiles/2, so a value
-	/// ~50% larger than needed (RadiusTiles ≈ 1.5 × DiameterPx/tile) is safe.
+	/// Voxel-to-pixel resolution: how many world voxels map to one minimap
+	/// pixel. 1 = one voxel per pixel (finest detail); 2 = one pixel per 2×2
+	/// voxels; 4 = one pixel per 4×4 voxels, and so on. Higher values zoom out
+	/// so the circle reveals more of the surrounding world.
 	/// </summary>
-	[Export] public int RadiusTiles { get; set; } = 96;
-
-	/// <summary>
-	/// Zoom factor applied to the terrain inside the circle. 1.0 shows the slice
-	/// at its native scale; a smaller value (e.g. 0.5) zooms OUT so the circle
-	/// reveals more of the surrounding world (each tile covers fewer pixels), and
-	/// a larger value (e.g. 2.0) zooms IN. Tune this in the editor to set how
-	/// much terrain the minimap shows.
-	/// </summary>
-	[Export] public float Zoom { get; set; } = 1f;
+	[Export(PropertyHint.Range, "1,64,1")] public int Resolution { get; set; } = 1;
 
 	// ------------------------------------------------------------------
 	// State
@@ -77,8 +65,9 @@ public partial class Minimap : Node
 	private Image _displayImage;
 	private ImageTexture _displayTexture;
 
-	// The terrain slice (RadiusTiles × RadiusTiles world tiles), read fresh each
-	// frame from the shared map data (which the world pushes as chunks generate).
+	// The terrain slice (effSize × effSize world tiles, where effSize =
+	// DiameterPx / Resolution), read fresh each frame from the shared map data
+	// (which the world pushes as chunks generate).
 	private Image _slice;
 
 	// The slice's world origin; re-centered on the player every frame.
@@ -105,8 +94,8 @@ public partial class Minimap : Node
 	private int _lastSlicePx;
 	private int _lastSlicePz;
 
-	// The zoom value the slice was last read for (to detect zoom changes).
-	private float _lastSliceZoom = -1f;
+	// The resolution value the slice was last read for (to detect resolution changes).
+	private int _lastSliceResolution = -1;
 
 	// ------------------------------------------------------------------
 	// Lifecycle
@@ -165,8 +154,8 @@ public partial class Minimap : Node
 		_displayTexture = ImageTexture.CreateFromImage(_displayImage);
 		_mapRect.Texture = _displayTexture;
 
-		// The terrain slice (dynamically sized based on zoom — SetData in
-		// ReadSlice resizes it on each re-read).
+		// The terrain slice (dynamically sized — SetData in ReadSlice resizes
+		// it on each re-read).
 		_slice = Image.CreateEmpty(1, 1, false, Image.Format.Rgba8);
 
 		// Subscribe to waypoint changes (redraw the overlay immediately).
@@ -224,7 +213,7 @@ public partial class Minimap : Node
 
 		var px = (int)Mathf.Floor(_player.GlobalPosition.X);
 		var pz = (int)Mathf.Floor(_player.GlobalPosition.Z);
-		float zoom = Mathf.Max(0.05f, Zoom); // guard against 0 / negative
+		int res = Mathf.Max(1, Resolution); // guard against 0 / negative
 
 		// Detect player movement to a new tile (the slice window shifts).
 		if (px != _lastSlicePx || pz != _lastSlicePz)
@@ -234,28 +223,31 @@ public partial class Minimap : Node
 			_lastSlicePz = pz;
 		}
 
-		// Detect zoom changes (the effective slice size changes).
-		if (Mathf.Abs(zoom - _lastSliceZoom) > 0.001f)
+		// Detect resolution changes (the effective slice size changes).
+		if (res != _lastSliceResolution)
 		{
 			_sliceDirty = true;
-			_lastSliceZoom = zoom;
+			_lastSliceResolution = res;
 		}
 
-		// The effective slice size grows when zoom < 1 (zoom out) so the circle
-		// always has terrain to sample. At zoom = 1 the slice is RadiusTiles;
-		// at zoom = 0.5 it doubles to 2×RadiusTiles, etc. Capped to avoid
-		// allocating huge buffers at extreme zoom-out values.
-		int effSize = (int)Math.Ceiling(RadiusTiles / zoom);
-		effSize = Mathf.Clamp(effSize, RadiusTiles, 512);
+		// The slice size is the number of SLICE PIXELS (each covering a
+		// res×res block of voxels) that fit in the display circle. At
+		// resolution 1 each pixel is one voxel, so the slice is DiameterPx
+		// pixels wide. At resolution 2 each pixel covers 2×2 voxels, so the
+		// slice is DiameterPx/2 pixels wide. Capped to avoid allocating huge
+		// buffers at extreme resolutions.
+		int effSize = Mathf.Clamp(DiameterPx / res, 16, 512);
 
 		// Re-read the slice ONLY when the terrain data changed (a chunk
 		// generated / edited / removed), the player moved to a new tile, or
-		// the zoom changed. The map data is persistent — it only changes on
-		// chunk events, so we don't re-read it every frame.
+		// the resolution changed. The map data is persistent — it only changes
+		// on chunk events, so we don't re-read it every frame.
 		if (_sliceDirty)
 		{
-			_sliceMinX = px - effSize / 2;
-			_sliceMinZ = pz - effSize / 2;
+			// Align the slice origin to the resolution grid so each slice pixel
+			// covers exactly a res×res block of voxels, centered on the player.
+			_sliceMinX = px - (effSize * res) / 2;
+			_sliceMinZ = pz - (effSize * res) / 2;
 			ReadSlice(_manager.Renderer, effSize);
 			_sliceDirty = false;
 		}
@@ -263,7 +255,7 @@ public partial class Minimap : Node
 		// Rotate the slice into the circular display and draw the overlays.
 		// This runs every frame (the yaw changes continuously), but it's cheap
 		// now (raw buffer ops, no Godot bindings).
-		UpdateDisplay(px, pz, effSize, zoom);
+		UpdateDisplay(px, pz, effSize, res);
 	}
 
 	public override void _ExitTree()
@@ -284,12 +276,12 @@ public partial class Minimap : Node
 	// ------------------------------------------------------------------
 
 	/// <summary>
-	/// Reads the slice's tiles (<paramref name="size"/> × <paramref name="size"/>
-	/// world tiles, centered on the player) from the shared
-	/// <see cref="MapRenderer"/> into <see cref="_slice"/>. Each tile is an O(1)
-	/// lookup (the world pushed the chunk's 2D height+material data), so reading
-	/// the whole slice is cheap — no scanning, no budget. This is the "map just
-	/// displays the world" data path. Writes go through the slice's raw buffer
+	/// Reads the terrain slice (<paramref name="size"/> × <paramref name="size"/>
+	/// slice pixels, centered on the player) from the shared
+	/// <see cref="MapRenderer"/> into <see cref="_slice"/>. Each slice pixel
+	/// averages a <c>Resolution × Resolution</c> block of world voxels (box
+	/// downsampling), so the resolution actually changes the minimap's level of
+	/// detail — not just the slice size. Writes go through the slice's raw buffer
 	/// (4 bytes/pixel) rather than per-pixel SetPixel, to avoid the per-pixel
 	/// binding marshaling cost.
 	/// </summary>
@@ -297,48 +289,72 @@ public partial class Minimap : Node
 	{
 		var palette = _world.Palette;
 		const int CS = UI.ChunkMapData.Size; // 16
+		int res = Mathf.Max(1, Resolution);
+
 		// Image.GetData() returns a COPY of the pixel data — writing to it does
 		// NOT modify the image. We must fill a managed buffer and push it into the
 		// Image via SetData (one bulk copy per frame, no per-pixel marshaling).
+		if (_slice == null)
+		{
+			_slice = Image.CreateEmpty(1, 1, false, Image.Format.Rgba8);
+		}
 		if (_sliceBuffer == null || _sliceBuffer.Length != size * size * 4)
 		{
 			_sliceBuffer = new byte[size * size * 4];
 		}
 		byte[] buf = _sliceBuffer;
 		int row = size * 4;
+		int res2 = res * res;
 
-		// Walk the slice tile-by-tile using the non-allocating packed color path
-		// (no Vector2I allocation per tile, no Color allocation). The chunk coord
-		// is computed per-tile via FloorDiv (a cheap int div + branch).
-		for (int dz = 0; dz < size; dz++)
+		// Walk the slice pixel-by-pixel. Each pixel averages a res×res block of
+		// world voxels (box downsampling). The chunk coord is computed per-voxel
+		// via FloorDiv (a cheap int div + branch).
+		for (int dy = 0; dy < size; dy++)
 		{
-			int wz = _sliceMinZ + dz;
-			int cz = MapRenderer.FloorDiv(wz, CS);
-			int lz = wz - cz * CS;
-			int ro = dz * row;
+			int wz0 = _sliceMinZ + dy * res;
+			int ro = dy * row;
 			for (int dx = 0; dx < size; dx++)
 			{
-				int wx = _sliceMinX + dx;
-				int cx = MapRenderer.FloorDiv(wx, CS);
-				int lx = wx - cx * CS;
-
-				uint packed;
-				bool known = renderer.TryGetTileColorPacked(cx, cz, lx, lz, palette, out packed);
-				int o = ro + dx * 4;
-				if (known)
+				int wx0 = _sliceMinX + dx * res;
+				long rSum = 0, gSum = 0, bSum = 0;
+				int known = 0;
+				for (int vz = 0; vz < res; vz++)
 				{
-					buf[o] = (byte)(packed & 0xFF);         // R
-					buf[o + 1] = (byte)((packed >> 8) & 0xFF);   // G
-					buf[o + 2] = (byte)((packed >> 16) & 0xFF);  // B
-					buf[o + 3] = (byte)((packed >> 24) & 0xFF);  // A
+					int wz = wz0 + vz;
+					int cz = MapRenderer.FloorDiv(wz, CS);
+					int lz = wz - cz * CS;
+					for (int vx = 0; vx < res; vx++)
+					{
+						int wx = wx0 + vx;
+						int cx = MapRenderer.FloorDiv(wx, CS);
+						int lx = wx - cx * CS;
+
+						uint packed;
+						if (renderer.TryGetTileColorPacked(cx, cz, lx, lz, palette, out packed))
+						{
+							rSum += packed & 0xFF;
+							gSum += (packed >> 8) & 0xFF;
+							bSum += (packed >> 16) & 0xFF;
+							known++;
+						}
+					}
+				}
+				int o = ro + dx * 4;
+				if (known > 0)
+				{
+					// Average the known voxels in the block.
+					buf[o] = (byte)(rSum / known);
+					buf[o + 1] = (byte)(gSum / known);
+					buf[o + 2] = (byte)(bSum / known);
 				}
 				else
 				{
-					buf[o] = 18;   // UnknownColor: (0.07, 0.08, 0.10, 1)
+					// Entire block is unknown (chunk not yet generated).
+					buf[o] = 18;
 					buf[o + 1] = 20;
 					buf[o + 2] = 26;
-					buf[o + 3] = 255;
 				}
+				buf[o + 3] = 255;
 			}
 		}
 		_slice.SetData(size, size, false, Image.Format.Rgba8, buf);
@@ -353,7 +369,7 @@ public partial class Minimap : Node
 	/// buffer, pushes it into the display Image, and draws the waypoint / player
 	/// overlays.
 	/// </summary>
-	private void UpdateDisplay(int px, int pz, int sliceSize, float zoom)
+	private void UpdateDisplay(int px, int pz, int sliceSize, int resolution)
 	{
 		float yaw = _player.Rotation.Y;
 		int d = DiameterPx;
@@ -363,15 +379,15 @@ public partial class Minimap : Node
 		{
 			_displayBuf = new byte[d * d * 4];
 		}
-		// The terrain is rotated by -yaw and scaled by Zoom. The rotation keeps
-		// the player's facing pointing up; the sign here (and in the compass /
-		// waypoint overlays below) is kept consistent so the N marker and
-		// waypoints always track the terrain as the player turns.
+		// The terrain is rotated by -yaw. The rotation keeps the player's
+		// facing pointing up; the sign here (and in the compass / waypoint
+		// overlays below) is kept consistent so the N marker and waypoints
+		// always track the terrain as the player turns.
 		RotateBlit(_sliceBuffer, sliceSize, sliceSize, _displayBuf, -yaw, d);
 		_displayImage.SetData(d, d, false, Image.Format.Rgba8, _displayBuf);
 
 		// Overlays (drawn with SetPixel on the Image — only a few dozen calls).
-		OverlayWaypoints(px, pz, yaw, zoom);
+		OverlayWaypoints(px, pz, yaw, resolution);
 		OverlayPlayerCenter();
 
 		float northAngleScreen = yaw; // "N" rotates with the map
@@ -405,11 +421,11 @@ public partial class Minimap : Node
 		// This guarantees the entire circle is filled with terrain at any yaw.
 		//
 		//   edgePx = destSize / 2     (circle radius)
-		//   edgeSrc = srcW / 2        (slice half-width in tile units)
+		//   edgeSrc = srcW / 2        (slice half-width in voxel units)
 		//   scale = edgePx / edgeSrc
 		//
-		// The zoom is already baked into the slice size (sliceSize =
-		// RadiusTiles / zoom), so no additional zoom factor is needed here.
+		// The resolution is already baked into the slice size (sliceSize =
+		// DiameterPx / Resolution), so no additional scale factor is needed here.
 		float scale = destSize / (float)srcW;
 		float destCx = destSize * 0.5f;
 		float radius = destSize * 0.5f;
@@ -484,20 +500,19 @@ public partial class Minimap : Node
 	/// display image. A waypoint within the circle is a colored diamond; one
 	/// outside the circle becomes a small arrow on the rim pointing toward it.
 	/// </summary>
-	private void OverlayWaypoints(int px, int pz, float yaw, float zoom)
+	private void OverlayWaypoints(int px, int pz, float yaw, int resolution)
 	{
 		if (_manager?.Renderer == null)
 		{
 			return;
 		}
 		var waypoints = _manager.Renderer.Waypoints;
-		// px per tile — matches the terrain's scale in RotateBlit (edge-fit
+		// px per voxel — matches the terrain's scale in RotateBlit (edge-fit
 		// scale applied to the effective slice size) so waypoints sit on the
-		// same spot as the terrain tile they mark.
-		// scale = DiameterPx / sliceSize, where sliceSize = RadiusTiles / zoom
-		//       = DiameterPx * zoom / RadiusTiles
-		int sliceSize = Mathf.Clamp((int)Math.Ceiling(RadiusTiles / zoom), RadiusTiles, 512);
-		float scale = DiameterPx / (float)sliceSize;
+		// same spot as the terrain voxel they mark.
+		// scale = DiameterPx / sliceSize, where sliceSize = DiameterPx / resolution
+		//       = resolution
+		float scale = resolution;
 		float radiusPx = DiameterPx * 0.5f;
 
 		foreach (var wp in waypoints)

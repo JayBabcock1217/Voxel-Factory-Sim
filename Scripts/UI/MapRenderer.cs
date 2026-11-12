@@ -342,11 +342,18 @@ public partial class MapRenderer : RefCounted
 		Color avg = Colors.White;
 		try
 		{
-			// GetImage() extracts the texture's pixels (it works for every
-			// Texture2D type, including imported CompressedTexture2D). Sample a
-			// coarse grid (max ~16×16) so the average is cheap and stable.
+			// GetImage() extracts the texture's pixels. For CompressedTexture2D
+			// (imported PNGs) the image is in compressed format, so GetPixel
+			// fails — decompress to an uncompressed image first. Sample a coarse
+			// grid (max ~16×16) so the average is cheap and stable.
 			if (tex.GetImage() is Image img && img != null)
 			{
+				if (img.IsCompressed())
+				{
+					// Convert() can't handle compressed→uncompressed; Decompress()
+					// decompresses in place and returns an Error code.
+					img.Decompress();
+				}
 				int w = img.GetWidth();
 				int h = img.GetHeight();
 				if (w > 0 && h > 0)
