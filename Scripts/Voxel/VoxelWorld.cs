@@ -1001,10 +1001,21 @@ public partial class VoxelWorld : Node3D
 			{
 				return 1f;
 			}
-			// Anchor on the spawn chunk (the player's scene position, not the
-			// live position — the player has no physics yet, so they haven't
-			// moved). Count how many of the 3x3 are fully ready.
-			Vector2I pc = ChunkCoordOf(_spawnAnchor);
+			// Anchor on the LIVE player chunk (the player's scene position —
+			// the player has no physics yet, so they haven't moved), NOT the
+			// spawn anchor. The generation queue, BoostSpawnNeighbourhoodPriority,
+			// and the mesh budget all key off the live position, so the 3x3 the
+			// bar reports must be the SAME 3x3 those systems prioritize. When the
+			// saved position (spawn anchor) differs from the scene position,
+			// keying on the anchor made the bar report a 3x3 that nothing was
+			// boosting — the boost never applied to it, the 9 chunks competed as
+			// ordinary priority-0 chunks against the whole render distance, and
+			// the bar stayed at 0% forever.
+			//
+			// _livePlayerChunk is cached every frame in _Process (before the
+			// gate reads this), so it is always current by the time the bar
+			// samples it.
+			Vector2I pc = _livePlayerChunk;
 			int ready = 0;
 			for (int dx = -1; dx <= 1; dx++)
 			{
@@ -1872,7 +1883,14 @@ public partial class VoxelWorld : Node3D
 			// far chunk, written through the edit overlay); waiting on those would
 			// hang the gate forever and the player would never spawn. Edits
 			// outside the neighbourhood apply later, when their own chunk loads.
-			bool neighbourhoodReady = SpawnNeighbourhoodReady(spawnChunk) && !HasPendingEditsInSpawnNeighbourhood(spawnChunk);
+			// Key the gate on the LIVE player chunk (the same 3x3 the bar and
+			// the boost use), NOT the spawn anchor (the saved position). The
+			// generation + boost + mesh budget all work on the live 3x3, so the
+			// gate must verify THAT 3x3 — otherwise the boost never applies to
+			// the gate's neighbourhood and the gate starves (the bar stuck at
+			// 0%). The saved edits for the live neighbourhood are still checked
+			// (HasPendingEditsInSpawnNeighbourhood(livePlayerChunk)).
+			bool neighbourhoodReady = SpawnNeighbourhoodReady(livePlayerChunk) && !HasPendingEditsInSpawnNeighbourhood(livePlayerChunk);
 			if (neighbourhoodReady)
 			{
 				// Latch the first frame the neighbourhood reported ready. The
@@ -5656,7 +5674,14 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
-		Vector2I anchor = Vector2I.Zero;
+		// Anchor on the LIVE player chunk (the same 3x3 the generation queue,
+		// the spawn gate, and the SpawnLoadProgress bar all key off). The old
+		// Vector2I.Zero anchor meant the boost only ever applied to the 3x3
+		// around the world origin — so when the player's scene position was
+		// anywhere other than the origin, the boost did nothing and the gate's
+		// 3x3 was starved (the loading bar stuck at 0%).
+		var player = GetTree()?.GetFirstNodeInGroup("player") as Node3D;
+		Vector2I anchor = player != null ? ChunkCoordOf(player.GlobalPosition) : Vector2I.Zero;
 		for (int dx = -1; dx <= 1; dx++)
 		{
 			for (int dz = -1; dz <= 1; dz++)
