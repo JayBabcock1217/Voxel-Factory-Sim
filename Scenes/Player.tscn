@@ -17,6 +17,8 @@ material = SubResource("StandardMaterial3D_body")
 radius = 0.3
 height = 1.8
 
+[sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_mab4k"]
+
 [sub_resource type="SphereShape3D" id="SphereShape_pickup"]
 radius = 1.2
 
@@ -31,6 +33,7 @@ mesh = SubResource("CapsuleMesh_body")
 
 [node name="Camera3D" type="Camera3D" parent="." unique_id=1797128082]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
+attributes = SubResource("CameraAttributesPractical_mab4k")
 
 [node name="VoxelTool" type="Node3D" parent="." unique_id=1351639177]
 script = ExtResource("2_voxeltool")

@@ -126,7 +126,7 @@ script = ExtResource("17_waypointmgr")
 
 [node name="Minimap" type="Node" parent="." unique_id=550301101]
 script = ExtResource("18_minimap")
-Zoom = 2.0
+Resolution = 4
 
 [node name="MapWindow" type="Node" parent="." unique_id=173899896]
 script = ExtResource("19_mapwindow")

@@ -1,0 +1,16 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://ccfb2oh1nlxur"]
+
+[ext_resource type="Shader" uid="uid://ihsot8w63cfb" path="res://Materials/VoxelBase.gdshader" id="1_325fg"]
+[ext_resource type="Texture2D" uid="uid://csxn7kx4p6yri" path="res://Textures/Retro/Rock/Rock_01/Rock_01_basecolor.png" id="2_325fg"]
+[ext_resource type="Texture2D" uid="uid://cjoi0dcps8t3m" path="res://Textures/Retro/Rock/Rock_01/Rock_01_normal.png" id="3_j04f8"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_325fg")
+shader_parameter/albedo = ExtResource("2_325fg")
+shader_parameter/normal_map = ExtResource("3_j04f8")
+shader_parameter/metallic = 0.0
+shader_parameter/roughness = 1.0
+shader_parameter/specular = 0.05
+shader_parameter/uv_scale = 1.0
+shader_parameter/normal_strength = 1.0

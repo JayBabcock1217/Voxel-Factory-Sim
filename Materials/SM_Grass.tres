@@ -1,0 +1,16 @@
+[gd_resource type="ShaderMaterial" format=3 uid="uid://d0teq7fi1ge5v"]
+
+[ext_resource type="Shader" uid="uid://ihsot8w63cfb" path="res://Materials/VoxelBase.gdshader" id="1_shader"]
+[ext_resource type="Texture2D" uid="uid://cw0anxruh77ck" path="res://Textures/Retro/Grass/Grass_01/Grass_01_basecolor.png" id="2_3777t"]
+[ext_resource type="Texture2D" uid="uid://sa8gm88h77hl" path="res://Textures/Retro/Grass/Grass_01/Grass_01_normal.png" id="3_vfdem"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_shader")
+shader_parameter/albedo = ExtResource("2_3777t")
+shader_parameter/normal_map = ExtResource("3_vfdem")
+shader_parameter/metallic = 0.0
+shader_parameter/roughness = 1.0
+shader_parameter/specular = 0.05
+shader_parameter/uv_scale = 1.0
+shader_parameter/normal_strength = 1.0
