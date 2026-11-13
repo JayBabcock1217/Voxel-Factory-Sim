@@ -258,15 +258,17 @@ public partial class SkyCycle : Node
 	/// <summary>
 	/// Maps a phase in [0,1) to the MOON's arc angle θ_moon (in radians). The
 	/// moon is up during the NIGHT window (phase ∈ [0.75, 1) ∪ [0, 0.25), i.e.
-	/// 18:00 → 06:00), and its arc is designed so it travels in the SAME
-	/// direction as the sun (east → west), not the opposite way. The moon:
-	///   * rises in the EAST at 18:00 (phase 0.75)
+	/// 18:00 → 06:00). The moon travels in the OPPOSITE direction to the sun:
+	/// it rises in the WEST (where the sun sets) and sets in the EAST (where
+	/// the sun rises). The moon:
+	///   * rises in the WEST at 18:00 (phase 0.75)
 	///   * is at its ZENITH at 00:00 (phase 0, midnight)
-	///   * sets in the WEST at 06:00 (phase 0.25)
+	///   * sets in the EAST at 06:00 (phase 0.25)
 	/// Its altitude (how high it is) follows a sine hump over the night,
 	/// peaking at midnight. The arc angle is θ_moon = π·nightT where nightT is
 	/// the progress through the night (0 at 18:00, 0.5 at 00:00, 1 at 06:00),
-	/// so θ_moon sweeps 0 → π across the night.
+	/// so θ_moon sweeps 0 → π across the night. The forward X is flipped
+	/// (cosθ instead of -cosθ) so the moon's disc travels west→east.
 	/// </summary>
 	private float PhaseToMoonArc(float phase)
 	{
@@ -466,13 +468,14 @@ public partial class SkyCycle : Node
 		// LIGHT0_DIRECTION = -forward points UP (y > 0) = day mode, and the
 		// sun disc renders toward LIGHT0_DIRECTION (up in the sky). At noon
 		// θ=π/2: forward (0,-1,0) = straight DOWN, LIGHT0_DIRECTION (0,1,0) = UP.
+		//
+		// We use Basis.LookingAt to construct the basis, which makes -Z point
+		// toward the target direction. The "up" vector is (0,0,1) (out of the
+		// arc plane) so the basis stays in the XY plane.
 		float cosT = Mathf.Cos(arcAngle);
 		float sinT = Mathf.Sin(arcAngle);
 		Vector3 fwd = new Vector3(-cosT, -sinT, 0f);  // light points DOWN at noon (source is up)
-		Vector3 zCol = -fwd;                          // (cosT, sinT, 0)
-		Vector3 xCol = new Vector3(sinT, cosT, 0f);   // ⊥ to fwd, in the plane
-		Vector3 yCol = zCol.Cross(xCol);              // right-handed completion
-		_sun.GlobalBasis = new Basis(xCol, yCol, zCol);
+		_sun.GlobalBasis = Basis.LookingAt(fwd, new Vector3(0f, 0f, 1f));
 
 		// --- Sun energy + ENABLE (on the DirectionalLight3D, not the Env) ---
 		// The sun's energy fades with altitude so the scene brightens at noon
@@ -512,13 +515,14 @@ public partial class SkyCycle : Node
 				float moonArc = PhaseToMoonArc(_phase);
 				float cosM = Mathf.Cos(moonArc);
 				float sinM = Mathf.Sin(moonArc);
-				// Forward (-Z) along (-cosθ, +sinθ, 0): Y = sinM > 0 (up),
-				// so LIGHT0_DIRECTION = -forward has Y < 0 (night mode).
-				Vector3 mFwd = new Vector3(-cosM, sinM, 0f);
-				Vector3 mZ = -mFwd;
-				Vector3 mX = new Vector3(sinM, cosM, 0f);
-				Vector3 mY = mZ.Cross(mX);
-				_moon.GlobalBasis = new Basis(mX, mY, mZ);
+				// Forward (-Z) along (cosθ, +sinθ, 0): the X is flipped compared
+				// to the sun so the moon travels in the OPPOSITE direction (the
+				// moon rises in the west where the sun sets, and sets in the east
+				// where the sun rises). Y = sinM > 0 (up), so LIGHT0_DIRECTION
+				// = -forward has Y < 0 (night mode). At moonrise (θ=0): forward
+				// (1,0,0) = west. At moonset (θ=π): forward (-1,0,0) = east.
+				Vector3 mFwd = new Vector3(cosM, sinM, 0f);
+				_moon.GlobalBasis = Basis.LookingAt(mFwd, new Vector3(0f, 0f, 1f));
 				// Fade the moon's energy with its altitude (0 at the horizon,
 				// MoonEnergy at the zenith) so it softly fades in at moonrise
 				// and out at moonset rather than popping.
