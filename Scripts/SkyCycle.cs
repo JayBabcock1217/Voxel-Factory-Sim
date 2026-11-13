@@ -188,24 +188,16 @@ public partial class SkyCycle : Node
 	/// <summary>
 	/// A value in [0,1] describing how "day" it is: 1 at noon, 0 at midnight,
 	/// ~0.5 at sunrise/sunset. This is the same quantity the sun's energy and
-	/// ambient are faded by.
+	/// ambient are faded by. It is the sun's altitude (sin of the arc angle),
+	/// clamped to ≥0 so night reads as 0 — using the same PhaseToArcAngle
+	/// mapping ApplyPhase uses, so "how day it is" always matches the sky.
 	/// </summary>
 	public float DayAmount
 	{
 		get
 		{
-			// Map phase → sun altitude: the sun is up for the DaySeconds portion of
-			// the cycle. Within that window the altitude goes 0→1→0 (a sine hump);
-			// in the night window it stays 0 (the sun is below the horizon).
-			float dayFrac = DaySeconds / FullCycleSeconds;
-			float p = _phase;
-			if (p < dayFrac)
-			{
-				// Day window: sine hump from sunrise (p=0) to sunset (p=dayFrac).
-				float t = p / dayFrac; // 0..1 across the day
-				return (float)System.Math.Sin(t * System.Math.PI);
-			}
-			return 0f;
+			float sunAltitude = (float)System.Math.Sin(PhaseToArcAngle(_phase));
+			return System.Math.Max(0f, sunAltitude);
 		}
 	}
 
@@ -213,7 +205,66 @@ public partial class SkyCycle : Node
 	public float FullCycleSeconds => System.Math.Max(1f, DaySeconds + NightSeconds);
 
 	/// <summary>The phase at which the sun sets (end of the day window).</summary>
-	public float SunsetPhase => System.Math.Max(1f, DaySeconds) / FullCycleSeconds;
+	public float SunsetPhase => DayStartPhase + DayFraction;
+
+	/// <summary>
+	/// The fraction of the full cycle that is DAY (sun above the horizon), in
+	/// (0,1). Derived from DaySeconds / (DaySeconds + NightSeconds).
+	/// </summary>
+	private float DayFraction => System.Math.Max(1e-4f, System.Math.Min(1f - 1e-4f, System.Math.Max(1f, DaySeconds) / FullCycleSeconds));
+
+	/// <summary>
+	/// The phase at which the sun RISES (start of the day window). The day
+	/// window is CENTERED on phase 0.5 (noon) so that the phase reads like a
+	/// clock: 0 = midnight, 0.25 = sunrise (when day and night are equal),
+	/// 0.5 = noon, 0.75 = sunset. With unequal day/night the window keeps noon
+	/// at 0.5 but the sunrise/sunset times shift.
+	/// </summary>
+	private float DayStartPhase => 0.5f - DayFraction / 2f;
+
+	/// <summary>
+	/// Maps a phase in [0,1) to the sun's ARC ANGLE θ (in radians), using the
+	/// CLOCK convention: the day window is centered on phase 0.5 (noon).
+	///   * phase 0     → θ = 3π/2 (midnight, sun at its nadir)
+	///   * sunrise     → θ = 0    (sun on the eastern horizon)
+	///   * phase 0.5   → θ = π/2  (noon, sun at its zenith)
+	///   * sunset      → θ = π    (sun on the western horizon)
+	///   * phase 1.0   → θ = 3π/2 (midnight again)
+	/// Within the day window [DayStart, DayStart+DayFraction) θ sweeps 0→π;
+	/// within the night window it sweeps π→2π. The sun's altitude is sin(θ)
+	/// (positive by day, negative by night), which is exactly what the sky
+	/// shader's LIGHT0_DIRECTION.y day/night blend needs.
+	///
+	/// This is the SINGLE source of truth for the phase→arc mapping; both
+	/// ApplyPhase (sun + moon) and DayAmount use it so they always agree.
+	/// (The OLD mapping anchored the day window at phase 0, which made
+	/// "settime 0.5" land at sunset instead of noon — the inversion the user
+	/// reported.)
+	/// </summary>
+	private float PhaseToArcAngle(float phase)
+	{
+		float dayFrac = DayFraction;
+		float dayStart = DayStartPhase;
+		float dayEnd = dayStart + dayFrac;
+		float nightLen = System.Math.Max(1e-4f, 1f - dayFrac);
+		float p = phase;
+
+		if (p >= dayStart && p < dayEnd)
+		{
+			// Day window: sunrise (p=dayStart) → sunset (p=dayEnd) maps to 0→π.
+			return ((p - dayStart) / dayFrac) * Mathf.Pi;
+		}
+		else
+		{
+			// Night window: sunset (p=dayEnd) → sunrise (p=dayStart, wrapping
+			// through midnight at p=0) maps to π→2π. Handle the wraparound by
+			// measuring the night progress from dayEnd forward through 1.0.
+			float nightT = (p >= dayEnd)
+				? (p - dayEnd) / nightLen
+				: (p + 1f - dayEnd) / nightLen; // wrapped past midnight
+			return Mathf.Pi + nightT * Mathf.Pi;
+		}
+	}
 
 	// ------------------------------------------------------------------
 	// Node lifecycle
@@ -378,23 +429,14 @@ public partial class SkyCycle : Node
 		// saw LIGHT0_DIRECTION.y ≈ -1 (night) the whole time and nothing
 		// visibly changed even though the phase/energy numbers advanced.
 		//
-		// DayAmount puts the DAY at phase [0, dayFrac), so the arc maps the day
-		// window [0, dayFrac) to [0, π] (sunrise→noon→sunset) and the night
-		// window [dayFrac, 1) to [π, 2π] (sunset→midnight→sunrise). Phase 0 =
-		// sunrise, phase dayFrac = sunset, phase (dayFrac + nightFrac/2) =
-		// midnight.
-		float dayFrac = System.Math.Max(1f, DaySeconds) / FullCycleSeconds;
-		float arcAngle;
-		if (_phase < dayFrac)
-		{
-			// Day: phase 0→dayFrac maps to arc 0→π (sunrise→sunset via noon).
-			arcAngle = (_phase / dayFrac) * Mathf.Pi;
-		}
-		else
-		{
-			// Night: phase dayFrac→1 maps to arc π→2π (sunset→midnight→sunrise).
-			arcAngle = Mathf.Pi + ((_phase - dayFrac) / System.Math.Max(1e-4f, 1f - dayFrac)) * Mathf.Pi;
-		}
+		// The phase→arc mapping uses the CLOCK convention (see PhaseToArcAngle):
+		// the day window is centered on phase 0.5 (noon), so phase 0 = midnight,
+		// 0.25 = sunrise, 0.5 = noon, 0.75 = sunset (when day and night are
+		// equal). This is what "settime 0.5 = noon" and the StartingPhase docs
+		// promise. (The old mapping anchored the day window at phase 0, which
+		// inverted the clock and made settime 0.5 land at sunset.)
+		float dayFrac = DayFraction;
+		float arcAngle = PhaseToArcAngle(_phase);
 
 		// Point the light's -Z (forward) along (-cosθ, +sinθ, 0). We build the
 		// basis directly so the forward is exact: the Z column is -forward
@@ -415,7 +457,13 @@ public partial class SkyCycle : Node
 		// while it is above the horizon (sin(θ) > 0) and DISABLED at night, so
 		// it stops casting a shadow map and contributing light when it's down.
 		float sunUp = Mathf.Max(0f, (float)System.Math.Sin(arcAngle)); // 0 at horizon, 1 at noon
-		bool sunAbove = System.Math.Sin(arcAngle) > 0f;
+		// The sun is "up" while its altitude is >= 0 (on or above the horizon).
+		// Using >= (not >) means at EXACTLY sunrise/sunset (altitude 0) the sun
+		// is still enabled and the moon is off — so "settime 0.25" (sunrise)
+		// shows the sun on the horizon, not the moon. (With a strict >, a phase
+		// landing exactly on the horizon would disable the sun and enable the
+		// moon, which looked like "the time is inverted.")
+		bool sunAbove = (float)System.Math.Sin(arcAngle) >= 0f;
 		_sun.Visible = sunAbove;
 		_sun.LightEnergy = Mathf.Lerp(NightSunEnergy, DaySunEnergy, sunUp);
 
@@ -427,9 +475,12 @@ public partial class SkyCycle : Node
 		// blend — so the moon's forward must point DOWN (y < 0) to keep the sky
 		// in "night" mode, and the sky shader then renders the moon's disc
 		// toward -LIGHT0_DIRECTION (up in the sky). The moon arcs across the
-		// night window [dayFrac, 1): φ = 0 at sunset (rising), φ = π/2 at
-		// midnight (zenith, shining straight down), φ = π at sunrise (setting).
-		// Its energy fades to 0 as it approaches the horizon (soft in/out).
+		// NIGHT window: φ = 0 at sunset (rising), φ = π/2 at midnight (zenith,
+		// shining straight down), φ = π at sunrise (setting). The night window
+		// runs from sunset (phase dayEnd) through midnight (phase 0) to sunrise
+		// (phase dayStart), so we measure the night progress from dayEnd forward
+		// (wrapping past 1.0). Its energy fades to 0 at the horizon (soft in/out).
+		float dayEnd = DayStartPhase + DayFraction;
 		if (_moon != null)
 		{
 			bool moonUp = !sunAbove;
@@ -437,7 +488,11 @@ public partial class SkyCycle : Node
 			if (moonUp)
 			{
 				float nightLen = System.Math.Max(1e-4f, 1f - dayFrac);
-				float phi = ((_phase - dayFrac) / nightLen) * Mathf.Pi; // 0..π over the night
+				// Night progress 0..1 from sunset through midnight to sunrise.
+				float nightT = (_phase >= dayEnd)
+					? (_phase - dayEnd) / nightLen
+					: (_phase + 1f - dayEnd) / nightLen;
+				float phi = nightT * Mathf.Pi; // 0..π over the night
 				float cosP = Mathf.Cos(phi);
 				float sinP = Mathf.Sin(phi);
 				// Moon forward: (cosφ, -sinφ, 0). At midnight φ=π/2 → (0,-1,0)
