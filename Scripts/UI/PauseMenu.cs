@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using FactorySim.Commands;
 
 namespace FactorySim.UI;
 
@@ -25,6 +26,12 @@ public partial class PauseMenu : CanvasLayer
 	private Control _home;
 	private Player _player;
 	private bool _open;
+
+	// Command console: a text input at the bottom of the menu. Each submitted
+	// line is parsed by the CommandRegistry and dispatched to the matching
+	// ConsoleCommand; the command's feedback string is shown in the label below.
+	private LineEdit _commandInput;
+	private Label _commandFeedback;
 
 	public bool IsOpen => _open;
 
@@ -81,6 +88,18 @@ public partial class PauseMenu : CanvasLayer
 		Input.MouseMode = open
 			? Input.MouseModeEnum.Visible
 			: Input.MouseModeEnum.Captured;
+
+		// Give the command input focus when the menu opens (so the player can
+		// start typing a command immediately), and release it when the menu
+		// closes (so typed keys go to the game, not a hidden LineEdit).
+		if (open && _commandInput != null)
+		{
+			_commandInput.GrabFocus();
+		}
+		else if (!open && _commandInput != null)
+		{
+			_commandInput.ReleaseFocus();
+		}
 	}
 
 	private void BuildContent()
@@ -137,6 +156,44 @@ public partial class PauseMenu : CanvasLayer
 		_home.AddChild(MakeButton("Settings", OpenSettings));
 		_home.AddChild(MakeButton("Quit to Main Menu", QuitToMenu));
 
+		// --- Command console ---
+		// A label hint, a LineEdit for typing commands, and a feedback line that
+		// shows the last command's result. The input submits on Enter (TextSubmitted
+		// signal) which runs the command through the CommandRegistry.
+		var cmdHint = new Label
+		{
+			LayoutMode = 2,
+			Text = "Command (type 'help' for a list, then Enter to run):",
+			HorizontalAlignment = HorizontalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		cmdHint.AddThemeFontSizeOverride("font_size", 18);
+		cmdHint.AddThemeColorOverride("font_color", new Color(0.7f, 0.7f, 0.75f));
+		_home.AddChild(cmdHint);
+
+		_commandInput = new LineEdit
+		{
+			LayoutMode = 2,
+			CustomMinimumSize = new Vector2(340, 44),
+			PlaceholderText = "e.g.  settime 0.5",
+		};
+		_commandInput.AddThemeFontSizeOverride("font_size", 22);
+		_commandInput.TextSubmitted += OnCommandSubmitted;
+		_home.AddChild(_commandInput);
+
+		_commandFeedback = new Label
+		{
+			LayoutMode = 2,
+			Text = "",
+			HorizontalAlignment = HorizontalAlignment.Center,
+			AutowrapMode = TextServer.AutowrapMode.Word,
+			CustomMinimumSize = new Vector2(420, 0),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_commandFeedback.AddThemeFontSizeOverride("font_size", 18);
+		_commandFeedback.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.8f));
+		_home.AddChild(_commandFeedback);
+
 		// Settings overlay: same shared panel as the main menu.
 		_settingsMenu = new SettingsMenu
 		{
@@ -192,6 +249,42 @@ public partial class PauseMenu : CanvasLayer
 		// the new scene's _Ready applies the saved display settings.
 		GetTree().Paused = false;
 		GetTree().ChangeSceneToFile(MainScenePath);
+	}
+
+	/// <summary>
+	/// Runs the text the player typed into the command input. The line is passed
+	/// to the <see cref="CommandRegistry"/>, which parses it and dispatches to the
+	/// matching command. The command's feedback string is shown in the label
+	/// below the input, coloured green for "OK:" results and red for "ERR:" ones.
+	/// The input is cleared after each submit so the player can immediately type
+	/// the next command. Note: the tree is PAUSED while the menu is open, but
+	/// this CanvasLayer uses ProcessMode.Always so the input still accepts text
+	/// and the command still runs (commands that need a live node resolve it from
+	/// the tree, which exists even while paused).
+	/// </summary>
+	private void OnCommandSubmitted(string text)
+	{
+		string result = CommandRegistry.Instance.Run(text);
+
+		// Colour the feedback by outcome: OK green, ERR red, anything else neutral.
+		if (result.StartsWith("ERR:", StringComparison.Ordinal))
+		{
+			_commandFeedback.AddThemeColorOverride("font_color", new Color(0.95f, 0.4f, 0.4f));
+		}
+		else if (result.StartsWith("OK:", StringComparison.Ordinal))
+		{
+			_commandFeedback.AddThemeColorOverride("font_color", new Color(0.55f, 0.9f, 0.55f));
+		}
+		else
+		{
+			_commandFeedback.AddThemeColorOverride("font_color", new Color(0.8f, 0.85f, 0.8f));
+		}
+		_commandFeedback.Text = result;
+
+		// Clear the input for the next command and keep focus on it so the player
+		// can chain commands without re-clicking.
+		_commandInput.Text = "";
+		_commandInput.GrabFocus();
 	}
 
 	private static Button MakeButton(string text, Action pressed)
