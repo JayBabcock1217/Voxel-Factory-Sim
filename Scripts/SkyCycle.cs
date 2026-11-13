@@ -295,13 +295,21 @@ public partial class SkyCycle : Node
 		// "voxel_world") makes the group lookup below work no matter what the
 		// scene file contains. We also fall back to a tree walk in case the
 		// nodes exist but were never grouped.
+		// Discover the sun and moon lights. Prefer group membership (the
+		// scene assigns groups = ["sun_light"] / ["moon_light"]), but the
+		// Godot editor can drop hand-edited group entries, so fall back to a
+		// tree walk. The tree walk must NOT grab the moon as the sun (or
+		// vice versa), so the sun search skips any node named "MoonLight" and
+		// the moon search skips the sun.
 		var sun = GetTree()?.GetFirstNodeInGroup(SunLightGroup) as DirectionalLight3D
-			?? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root);
+			?? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root, skipName: "MoonLight");
 		var worldEnv = GetTree()?.GetFirstNodeInGroup(WorldEnvironmentGroup) as WorldEnvironment
 			?? FindDescendantOfType<WorldEnvironment>(GetTree()?.Root);
 
 		var moon = GetTree()?.GetFirstNodeInGroup(MoonLightGroup) as DirectionalLight3D
-			?? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root, skip: sun);
+			?? (sun != null
+				? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root, skip: sun)
+				: FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root, skipName: "MoonLight"));
 
 		if (sun != null)
 		{
@@ -553,18 +561,24 @@ public partial class SkyCycle : Node
 
 	/// <summary>
 	/// Depth-first search for the first descendant of <paramref name="root"/>
-	/// that is a <typeparamref name="T"/> (or is itself), optionally skipping a
-	/// specific node (<paramref name="skip"/>). Used as a fallback when the
-	/// expected group is empty (e.g. the scene editor dropped the group entry),
-	/// so the cycle can still find the sun / moon / world environment. When
+	/// that is a <typeparamref name="T"/> (or is itself), optionally skipping
+	/// a specific node (<paramref name="skip"/>) or any node whose Name equals
+	/// <paramref name="skipName"/>. Used as a fallback when the expected group
+	/// is empty (e.g. the scene editor dropped the group entry), so the cycle
+	/// can still find the sun / moon / world environment. When looking for the
+	/// SUN we pass skipName: "MoonLight" so the walk doesn't grab the moon
+	/// light (which might be the first DirectionalLight3D in tree order). When
 	/// looking for the MOON we pass the sun as <paramref name="skip"/> so the
-	/// walk doesn't just grab the sun (the first DirectionalLight3D in tree
-	/// order). Returns null when <paramref name="root"/> is null or no such
-	/// node exists.
+	/// walk doesn't just grab the sun. Returns null when <paramref name="root"/>
+	/// is null or no such node exists.
 	/// </summary>
-	private static T FindDescendantOfType<T>(Node root, Node skip = null) where T : Node
+	private static T FindDescendantOfType<T>(Node root, Node skip = null, string skipName = null) where T : Node
 	{
 		if (ReferenceEquals(root, skip))
+		{
+			return null;
+		}
+		if (!string.IsNullOrEmpty(skipName) && root.Name == skipName)
 		{
 			return null;
 		}
@@ -574,7 +588,7 @@ public partial class SkyCycle : Node
 		}
 		for (int i = 0; i < root.GetChildCount(); i++)
 		{
-			var result = FindDescendantOfType<T>(root.GetChild(i), skip);
+			var result = FindDescendantOfType<T>(root.GetChild(i), skip, skipName);
 			if (result != null)
 			{
 				return result;
