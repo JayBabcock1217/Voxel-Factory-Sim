@@ -83,15 +83,24 @@ public partial class SkyCycle : Node
 	[Export] public SkyboxConfig SkyboxConfig { get; set; }
 
 	/// <summary>
-	/// Length of the DAY (sun above the horizon), in seconds. The full cycle is
-	/// DaySeconds + NightSeconds. Keep ≥ 1 to avoid a divide-by-zero.
+	/// Half of the full cycle length, in seconds — the real time the clock
+	/// takes to sweep through the DAYLIGHT half of the 24h cycle (06:00→18:00).
+	/// The full cycle is DaySeconds + NightSeconds. On the fixed 24h clock the
+	/// sun is ALWAYS up 06:00–18:00 (12h) and down 18:00–06:00 (12h), so
+	/// DaySeconds and NightSeconds control the CYCLE SPEED, not the day/night
+	/// split: setting both to the same value gives a uniform clock speed, and
+	/// their SUM is how many real seconds a full 24h day takes. Keep ≥ 1.
 	/// </summary>
 	[Export(PropertyHint.Range, "1,3600,1")]
 	public float DaySeconds { get; set; } = 300f;
 
 	/// <summary>
-	/// Length of the NIGHT (sun below the horizon), in seconds. The full cycle
-	/// is DaySeconds + NightSeconds. Keep ≥ 1 to avoid a divide-by-zero.
+	/// Half of the full cycle length, in seconds — the real time the clock
+	/// takes to sweep through the NIGHT half of the 24h cycle (18:00→06:00).
+	/// See <see cref="DaySeconds"/>: on the fixed 24h clock the sun is always
+	/// down for 12h (18:00–06:00), so this controls the cycle speed (together
+	/// with DaySeconds, their sum = FullCycleSeconds), not the night's length
+	/// in clock-hours. Keep ≥ 1.
 	/// </summary>
 	[Export(PropertyHint.Range, "1,3600,1")]
 	public float NightSeconds { get; set; } = 120f;
@@ -186,11 +195,12 @@ public partial class SkyCycle : Node
 	public float Phase => _phase;
 
 	/// <summary>
-	/// A value in [0,1] describing how "day" it is: 1 at noon, 0 at midnight,
-	/// ~0.5 at sunrise/sunset. This is the same quantity the sun's energy and
-	/// ambient are faded by. It is the sun's altitude (sin of the arc angle),
-	/// clamped to ≥0 so night reads as 0 — using the same PhaseToArcAngle
-	/// mapping ApplyPhase uses, so "how day it is" always matches the sky.
+	/// A value in [0,1] describing how "day" it is: 1 at noon (12:00), 0 at
+	/// midnight (00:00) and at sunrise/sunset (06:00/18:00, when the sun is on
+	/// the horizon). This is the same quantity the sun's energy and ambient are
+	/// faded by. It is the sun's altitude (sin of the arc angle), clamped to ≥0
+	/// so night reads as 0 — using the same PhaseToArcAngle mapping ApplyPhase
+	/// uses, so "how day it is" always matches the sky and the 24h clock.
 	/// </summary>
 	public float DayAmount
 	{
@@ -204,66 +214,43 @@ public partial class SkyCycle : Node
 	/// <summary>Total length of one full cycle (day + night), in seconds.</summary>
 	public float FullCycleSeconds => System.Math.Max(1f, DaySeconds + NightSeconds);
 
-	/// <summary>The phase at which the sun sets (end of the day window).</summary>
-	public float SunsetPhase => DayStartPhase + DayFraction;
-
 	/// <summary>
-	/// The fraction of the full cycle that is DAY (sun above the horizon), in
-	/// (0,1). Derived from DaySeconds / (DaySeconds + NightSeconds).
+	/// The phase at which the sun sets (end of the day window). On the fixed
+	/// 24h clock this is always 0.75 (18:00); the sun rises at 0.25 (06:00).
 	/// </summary>
-	private float DayFraction => System.Math.Max(1e-4f, System.Math.Min(1f - 1e-4f, System.Math.Max(1f, DaySeconds) / FullCycleSeconds));
+	public float SunsetPhase => 0.75f;
 
 	/// <summary>
-	/// The phase at which the sun RISES (start of the day window). The day
-	/// window is CENTERED on phase 0.5 (noon) so that the phase reads like a
-	/// clock: 0 = midnight, 0.25 = sunrise (when day and night are equal),
-	/// 0.5 = noon, 0.75 = sunset. With unequal day/night the window keeps noon
-	/// at 0.5 but the sunrise/sunset times shift.
-	/// </summary>
-	private float DayStartPhase => 0.5f - DayFraction / 2f;
-
-	/// <summary>
-	/// Maps a phase in [0,1) to the sun's ARC ANGLE θ (in radians), using the
-	/// CLOCK convention: the day window is centered on phase 0.5 (noon).
-	///   * phase 0     → θ = 3π/2 (midnight, sun at its nadir)
-	///   * sunrise     → θ = 0    (sun on the eastern horizon)
-	///   * phase 0.5   → θ = π/2  (noon, sun at its zenith)
-	///   * sunset      → θ = π    (sun on the western horizon)
-	///   * phase 1.0   → θ = 3π/2 (midnight again)
-	/// Within the day window [DayStart, DayStart+DayFraction) θ sweeps 0→π;
-	/// within the night window it sweeps π→2π. The sun's altitude is sin(θ)
-	/// (positive by day, negative by night), which is exactly what the sky
-	/// shader's LIGHT0_DIRECTION.y day/night blend needs.
+	/// Maps a phase in [0,1) to the sun's ARC ANGLE θ (in radians), on a FIXED
+	/// 24-HOUR CLOCK: the sun's position is a pure function of the clock time,
+	/// independent of DaySeconds/NightSeconds. The mapping is θ = 2π·phase − π/2:
+	///   * phase 0    (midnight) → θ = −π/2  (sun at its nadir, straight down)
+	///   * phase 0.25 (06:00)    → θ = 0     (sun on the eastern horizon, sunrise)
+	///   * phase 0.5  (12:00)    → θ = π/2   (sun at its zenith, noon)
+	///   * phase 0.75 (18:00)    → θ = π     (sun on the western horizon, sunset)
+	///   * phase 1    (24:00)    → θ = 3π/2  (midnight again)
+	/// The sun's altitude is sin(θ): positive for phase ∈ (0.25, 0.75) (06:00–
+	/// 18:00, daylight) and negative otherwise (night). This is exactly what the
+	/// sky shader's LIGHT0_DIRECTION.y day/night blend needs, and it GUARANTEES
+	/// that "settime 12" puts the sun at its zenith, "settime 0"/"24" at its
+	/// nadir, "settime 6" on the sunrise horizon, and "settime 18" on the sunset
+	/// horizon — the sun angle always matches the 24-hour clock.
+	///
+	/// NOTE: because the sun's arc is fixed to the clock, the daylight window is
+	/// always 06:00–18:00 (12 hours) in phase terms, regardless of
+	/// DaySeconds/NightSeconds. Those two exports now control the CYCLE SPEED
+	/// (how many real seconds a full 24h clock takes: FullCycleSeconds =
+	/// DaySeconds + NightSeconds), not the day/night SPLIT. The day and night
+	/// are always equal in real time (each = half the cycle).
 	///
 	/// This is the SINGLE source of truth for the phase→arc mapping; both
 	/// ApplyPhase (sun + moon) and DayAmount use it so they always agree.
-	/// (The OLD mapping anchored the day window at phase 0, which made
-	/// "settime 0.5" land at sunset instead of noon — the inversion the user
-	/// reported.)
 	/// </summary>
 	private float PhaseToArcAngle(float phase)
 	{
-		float dayFrac = DayFraction;
-		float dayStart = DayStartPhase;
-		float dayEnd = dayStart + dayFrac;
-		float nightLen = System.Math.Max(1e-4f, 1f - dayFrac);
-		float p = phase;
-
-		if (p >= dayStart && p < dayEnd)
-		{
-			// Day window: sunrise (p=dayStart) → sunset (p=dayEnd) maps to 0→π.
-			return ((p - dayStart) / dayFrac) * Mathf.Pi;
-		}
-		else
-		{
-			// Night window: sunset (p=dayEnd) → sunrise (p=dayStart, wrapping
-			// through midnight at p=0) maps to π→2π. Handle the wraparound by
-			// measuring the night progress from dayEnd forward through 1.0.
-			float nightT = (p >= dayEnd)
-				? (p - dayEnd) / nightLen
-				: (p + 1f - dayEnd) / nightLen; // wrapped past midnight
-			return Mathf.Pi + nightT * Mathf.Pi;
-		}
+		// θ = 2π·phase − π/2. At phase 0 this is −π/2 (nadir); at 0.5 it's π/2
+		// (zenith). The sine of θ gives the sun's altitude directly.
+		return 2f * Mathf.Pi * phase - Mathf.Pi / 2f;
 	}
 
 	// ------------------------------------------------------------------
@@ -429,13 +416,11 @@ public partial class SkyCycle : Node
 		// saw LIGHT0_DIRECTION.y ≈ -1 (night) the whole time and nothing
 		// visibly changed even though the phase/energy numbers advanced.
 		//
-		// The phase→arc mapping uses the CLOCK convention (see PhaseToArcAngle):
-		// the day window is centered on phase 0.5 (noon), so phase 0 = midnight,
-		// 0.25 = sunrise, 0.5 = noon, 0.75 = sunset (when day and night are
-		// equal). This is what "settime 0.5 = noon" and the StartingPhase docs
-		// promise. (The old mapping anchored the day window at phase 0, which
-		// inverted the clock and made settime 0.5 land at sunset.)
-		float dayFrac = DayFraction;
+		// The phase→arc mapping is the FIXED 24h clock (see PhaseToArcAngle):
+		// θ = 2π·phase − π/2, so phase 0 = midnight (nadir), 0.25 = 06:00
+		// (sunrise), 0.5 = 12:00 (noon, zenith), 0.75 = 18:00 (sunset), 1 =
+		// 24:00 (midnight). The sun angle always matches the clock, so
+		// "settime 12" → sun at zenith, "settime 0" → sun at nadir, etc.
 		float arcAngle = PhaseToArcAngle(_phase);
 
 		// Point the light's -Z (forward) along (-cosθ, +sinθ, 0). We build the
@@ -474,24 +459,27 @@ public partial class SkyCycle : Node
 		// directional light (LIGHT0) and drives the sky shader's day/night
 		// blend — so the moon's forward must point DOWN (y < 0) to keep the sky
 		// in "night" mode, and the sky shader then renders the moon's disc
-		// toward -LIGHT0_DIRECTION (up in the sky). The moon arcs across the
-		// NIGHT window: φ = 0 at sunset (rising), φ = π/2 at midnight (zenith,
-		// shining straight down), φ = π at sunrise (setting). The night window
-		// runs from sunset (phase dayEnd) through midnight (phase 0) to sunrise
-		// (phase dayStart), so we measure the night progress from dayEnd forward
-		// (wrapping past 1.0). Its energy fades to 0 at the horizon (soft in/out).
-		float dayEnd = DayStartPhase + DayFraction;
+		// toward -LIGHT0_DIRECTION (up in the sky).
+		//
+		// On the fixed 24h clock the NIGHT window is phase [0.75, 1) ∪ [0,
+		// 0.25) (18:00 → 06:00). The moon arcs across it: φ = 0 at sunset
+		// (18:00, phase 0.75, rising), φ = π/2 at midnight (phase 0, zenith,
+		// shining straight down), φ = π at sunrise (06:00, phase 0.25,
+		// setting). We measure the night progress from 0.75 forward through 1.0
+		// and wrapping to 0.25. Its energy fades to 0 at the horizon (soft in/out).
+		const float NightStartPhase = 0.75f; // sunset (18:00)
+		const float NightLenPhase = 0.5f;     // night spans 0.5 of the cycle (12h)
 		if (_moon != null)
 		{
 			bool moonUp = !sunAbove;
 			_moon.Visible = moonUp;
 			if (moonUp)
 			{
-				float nightLen = System.Math.Max(1e-4f, 1f - dayFrac);
-				// Night progress 0..1 from sunset through midnight to sunrise.
-				float nightT = (_phase >= dayEnd)
-					? (_phase - dayEnd) / nightLen
-					: (_phase + 1f - dayEnd) / nightLen;
+				// Night progress 0..1 from sunset (0.75) through midnight (0) to
+				// sunrise (0.25). Handle the wraparound past phase 1.0.
+				float nightT = (_phase >= NightStartPhase)
+					? (_phase - NightStartPhase) / NightLenPhase
+					: (_phase + 1f - NightStartPhase) / NightLenPhase;
 				float phi = nightT * Mathf.Pi; // 0..π over the night
 				float cosP = Mathf.Cos(phi);
 				float sinP = Mathf.Sin(phi);
