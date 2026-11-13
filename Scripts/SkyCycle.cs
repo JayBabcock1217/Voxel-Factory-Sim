@@ -286,8 +286,17 @@ public partial class SkyCycle : Node
 	// Node lifecycle
 	// ------------------------------------------------------------------
 
+	/// <summary>The group this node joins so the save system can find it.</summary>
+	public const string SkyCycleGroup = "sky_cycle";
+
 	public override void _Ready()
 	{
+		// Join the "sky_cycle" group so the save system (WorldSave) can find
+		// this node to read/write the time of day. The Godot editor drops
+		// hand-edited group entries from .tscn files, so we add it in code
+		// (the same way VoxelWorld joins "voxel_world").
+		AddToGroup(SkyCycleGroup);
+
 		// Ensure the sun and the world environment are in their expected groups
 		// BEFORE we look them up. The scene is supposed to assign these groups
 		// (groups = ["sun_light"] / groups = ["world_environment"]), but the

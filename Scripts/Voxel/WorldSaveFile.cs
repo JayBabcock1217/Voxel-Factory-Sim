@@ -66,6 +66,8 @@ public static class WorldSaveFile
 
 	/// <summary>
 	/// Current save format version. Bump it when the layout changes.
+	///   v10 — added the day-phase field (the time of day, 0..1, so the
+	///         sun/moon position survives a restart).
 	///   v9 — added the waypoint section (player-placed map markers: name +
 	///        world position + color), so the minimap / map window's waypoints
 	///        survive a restart.
@@ -87,7 +89,7 @@ public static class WorldSaveFile
 	///   v2 — added the machine section (placed machines: voxel + item id + rotation).
 	///   v1 — the original layout (no machine section).
 	/// </summary>
-	public const int CurrentVersion = 9;
+	public const int CurrentVersion = 10;
 
 	/// <summary>
 	/// Every version this reader knows how to LOAD. A file whose version is in
@@ -98,7 +100,7 @@ public static class WorldSaveFile
 	/// and add a <see cref="Migrate"/> case that converts it to the current
 	/// <see cref="Data"/>.
 	/// </summary>
-	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+	public static readonly int[] SupportedVersions = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
 
 	/// <summary>The first version that carries the machine section.</summary>
 	private const int VersionWithMachines = 2;
@@ -153,6 +155,15 @@ public static class WorldSaveFile
 	/// them (the feature did not exist).
 	/// </summary>
 	private const int VersionWithWaypoints = 9;
+
+	/// <summary>
+	/// The first version that carries the day-phase section (the time of day,
+	/// as a fraction of the 24h cycle: 0 = midnight, 0.5 = noon). v9 and
+	/// earlier files have no day-phase field; the reader defaults
+	/// <see cref="Data.DayPhase"/> to -1 (meaning "not saved") for them so the
+	/// caller can tell whether to apply a saved time or keep the default.
+	/// </summary>
+	private const int VersionWithDayPhase = 10;
 
 	/// <summary>The oldest version <see cref="Read"/> will accept at all.</summary>
 	public static int OldestSupportedVersion => SupportedVersions[0];
@@ -499,6 +510,15 @@ public static class WorldSaveFile
 		/// </summary>
 		public List<WaypointRecord> Waypoints { get; set; } = new();
 
+		/// <summary>
+		/// The saved time of day (v10+), as a fraction of the 24h cycle:
+		/// 0 = midnight, 0.25 = 06:00 (sunrise), 0.5 = noon, 0.75 = 18:00
+		/// (sunset). A value of -1 means "not saved" (v9-and-earlier files,
+		/// or a save that did not record a time) and the caller should keep
+		/// the default starting phase.
+		/// </summary>
+		public float DayPhase { get; set; } = -1f;
+
 		/// <summary>FNV-1a 32-bit checksum of all section bytes.</summary>
 		public uint Checksum { get; set; }
 	}
@@ -695,6 +715,15 @@ public static class WorldSaveFile
 				w.Write(wp.Color.B);
 				w.Write(wp.Color.A);
 			}
+		}
+
+		// Day phase (v10+). A single f32: the time of day as a fraction of the
+		// 24h cycle (0 = midnight, 0.5 = noon). -1 means "not saved" (the
+		// caller did not record a time). Written unconditionally so the reader
+		// can tell the layout apart by version.
+		if (CurrentVersion >= VersionWithDayPhase)
+		{
+			w.Write(data.DayPhase);
 		}
 
 		// Trailing FNV-1a over every byte written above the checksum. Flush the
@@ -976,6 +1005,16 @@ public static class WorldSaveFile
 					Color color = new Color(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
 					data.Waypoints.Add(new WaypointRecord(name, pos, color));
 				}
+			}
+
+			// Day phase (v10+). v9-and-earlier files end right after the
+			// waypoint section (or earlier), so the day-phase field is read
+			// only for v10-and-later versions. For older versions the field
+			// stays at its default (-1 = "not saved") so the caller keeps the
+			// default starting phase.
+			if (version >= VersionWithDayPhase)
+			{
+				data.DayPhase = r.ReadSingle();
 			}
 
 			uint storedChecksum = r.ReadUInt32();

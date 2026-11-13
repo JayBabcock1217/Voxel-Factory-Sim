@@ -401,6 +401,14 @@ public partial class WorldSave : Node
 			data.Waypoints = wpMgr.ToSaveRecords();
 		}
 
+		// Time of day (v10+). Capture the SkyCycle's current phase (0..1,
+		// 0 = midnight, 0.5 = noon) so the sun/moon position survives a
+		// restart. The SkyCycle joins the "sky_cycle" group in its _Ready.
+		if (GetTree()?.GetFirstNodeInGroup("sky_cycle") is SkyCycle cycle)
+		{
+			data.DayPhase = cycle.Phase;
+		}
+
 		return data;
 	}
 

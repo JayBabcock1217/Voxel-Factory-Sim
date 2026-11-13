@@ -4003,6 +4003,7 @@ public partial class VoxelWorld : Node3D
 				save.ApplyEnemies(save.Snapshot);
 				ApplyHives(save.Snapshot.Hives);
 				RestoreWaypoints(save.Snapshot.Waypoints);
+				RestoreDayPhase(save.Snapshot);
 				return SpawnPlayerOnTerrain(player);
 			}
 			RestoreInventoryFromSave(save.Snapshot);
@@ -4012,6 +4013,7 @@ public partial class VoxelWorld : Node3D
 			save.ApplyEnemies(save.Snapshot);
 			ApplyHives(save.Snapshot.Hives);
 			RestoreWaypoints(save.Snapshot.Waypoints);
+			RestoreDayPhase(save.Snapshot);
 			return true;
 		}
 		// No save: clear any stale waypoints from a previous world so the new
@@ -4036,6 +4038,25 @@ public partial class VoxelWorld : Node3D
 		if (GetTree().GetFirstNodeInGroup("waypoint_manager") is UI.WaypointManager wpMgr)
 		{
 			wpMgr.RestoreWaypoints(saved);
+		}
+	}
+
+	/// <summary>
+	/// Restores the saved time of day (v10+) by setting the <see cref="SkyCycle"/>
+	/// phase to the saved value. A <c>DayPhase</c> of -1 (v9-and-earlier saves,
+	/// or a save that did not record a time) is a no-op — the cycle keeps its
+	/// default starting phase. Called from <see cref="SpawnOrRestorePlayer"/>
+	/// once the player is placed.
+	/// </summary>
+	private void RestoreDayPhase(WorldSaveFile.Data data)
+	{
+		if (data == null || data.DayPhase < 0f)
+		{
+			return; // not saved (v9-and-earlier) — keep the default phase
+		}
+		if (GetTree()?.GetFirstNodeInGroup(SkyCycle.SkyCycleGroup) is SkyCycle cycle)
+		{
+			cycle.SetPhase(data.DayPhase);
 		}
 	}
 
