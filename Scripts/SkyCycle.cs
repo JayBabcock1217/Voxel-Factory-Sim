@@ -396,9 +396,10 @@ public partial class SkyCycle : Node
 		if (Time.GetTicksMsec() / 1000.0 - _lastCycleLogSec >= 1.0)
 		{
 			_lastCycleLogSec = Time.GetTicksMsec() / 1000.0;
-			// Print the sun's actual FORWARD vector (-Z of its basis) so we can
-			// confirm LIGHT0_DIRECTION is pointing up (y>0) during the day and
-			// down (y<0) at night — that's what the sky shader reads.
+			// Print the sun/moon FORWARD vectors (-Z of their basis). The sky
+			// shader reads LIGHT0_DIRECTION = -forward (direction FROM the
+			// light source), so during the day the sun's forward points DOWN
+			// (y<0) and LIGHT0_DIRECTION points UP (y>0) = day mode.
 			Vector3 fwd = _sun != null ? -_sun.GlobalBasis.Z : Vector3.Zero;
 			Vector3 mFwd = _moon != null ? -_moon.GlobalBasis.Z : Vector3.Zero;
 			GD.Print($"[SkyCycle] phase={_phase:F3} dayAmt={DayAmount:F3} " +
@@ -458,15 +459,17 @@ public partial class SkyCycle : Node
 		// "settime 12" → sun at zenith, "settime 0" → sun at nadir, etc.
 		float arcAngle = PhaseToArcAngle(_phase);
 
-		// Point the light's -Z (forward) along (-cosθ, +sinθ, 0). We build the
-		// basis directly so the forward is exact: the Z column is -forward
-		// (because forward = -Z ⇒ Z = -forward), X is any perpendicular in the
-		// arc plane, Y = Z × X. This is equivalent to look_at but written out so
-		// the forward is unambiguous. At noon θ=π/2: forward (0,1,0), Z (0,-1,0).
+		// Point the light's -Z (forward) along (-cosθ, -sinθ, 0). The sky
+		// shader's LIGHT0_DIRECTION is the direction FROM the light source
+		// (opposite of the light's forward, i.e. -forward). Pointing the
+		// forward DOWN (y < 0) means the light source is ABOVE, so
+		// LIGHT0_DIRECTION = -forward points UP (y > 0) = day mode, and the
+		// sun disc renders toward LIGHT0_DIRECTION (up in the sky). At noon
+		// θ=π/2: forward (0,-1,0) = straight DOWN, LIGHT0_DIRECTION (0,1,0) = UP.
 		float cosT = Mathf.Cos(arcAngle);
 		float sinT = Mathf.Sin(arcAngle);
-		Vector3 fwd = new Vector3(-cosT, sinT, 0f);   // where the light points
-		Vector3 zCol = -fwd;                          // (cosT, -sinT, 0)
+		Vector3 fwd = new Vector3(-cosT, -sinT, 0f);  // light points DOWN at noon (source is up)
+		Vector3 zCol = -fwd;                          // (cosT, sinT, 0)
 		Vector3 xCol = new Vector3(sinT, cosT, 0f);   // ⊥ to fwd, in the plane
 		Vector3 yCol = zCol.Cross(xCol);              // right-handed completion
 		_sun.GlobalBasis = new Basis(xCol, yCol, zCol);
@@ -492,10 +495,13 @@ public partial class SkyCycle : Node
 		// (sun altitude < 0, i.e. phase ∈ [0.75, 1) ∪ [0, 0.25) = 18:00–06:00)
 		// and DISABLED while the sun is up, so the two never double-light the
 		// scene. The moon's arc (PhaseToMoonArc) sweeps 0→π across the night
-		// (0 at 18:00 moonrise, π/2 at 00:00 zenith, π at 06:00 moonset). We
-		// use the SAME basis convention as the sun — forward (-Z) along
-		// (-cosθ, +sinθ, 0) — so the moon travels in the SAME direction as the
-		// sun (east→west across the sky), not the opposite way.
+		// (0 at 18:00 moonrise, π/2 at 00:00 zenith, π at 06:00 moonset).
+		//
+		// The moon's forward points UP (y > 0) while it is up, meaning the
+		// light source is BELOW, so LIGHT0_DIRECTION = -forward points DOWN
+		// (y < 0) = night mode. The moon disc renders toward -LIGHT0_DIRECTION
+		// (up in the sky). The moon's forward X follows the same east→west
+		// sweep as the sun.
 		if (_moon != null)
 		{
 			bool moonUp = !sunAbove;
@@ -505,9 +511,8 @@ public partial class SkyCycle : Node
 				float moonArc = PhaseToMoonArc(_phase);
 				float cosM = Mathf.Cos(moonArc);
 				float sinM = Mathf.Sin(moonArc);
-				// Same basis convention as the sun: forward (-Z) along
-				// (-cosθ, +sinθ, 0). This makes the moon sweep across the sky
-				// in the same direction as the sun (east→west).
+				// Forward (-Z) along (-cosθ, +sinθ, 0): Y = sinM > 0 (up),
+				// so LIGHT0_DIRECTION = -forward has Y < 0 (night mode).
 				Vector3 mFwd = new Vector3(-cosM, sinM, 0f);
 				Vector3 mZ = -mFwd;
 				Vector3 mX = new Vector3(sinM, cosM, 0f);
