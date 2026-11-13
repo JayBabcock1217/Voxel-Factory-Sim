@@ -59,6 +59,16 @@ public partial class SkyCycle : Node
 	/// <summary>Group the WorldEnvironment must be in to be driven.</summary>
 	public const string WorldEnvironmentGroup = "world_environment";
 
+	/// <summary>
+	/// Group the moon's DirectionalLight3D must be in to be driven. The moon is
+	/// a second, fainter directional light that is ENABLED only at night (when
+	/// the sun is below the horizon) and DISABLED by day, so the scene has a
+	/// soft bluish fill + shadows at night. Null-safe: if no node is in this
+	/// group (and none is found by the tree walk), the cycle simply never
+	/// enables a moon (day/night still works, just no night fill light).
+	/// </summary>
+	public const string MoonLightGroup = "moon_light";
+
 	// ------------------------------------------------------------------
 	// Configuration (all editable in the inspector on this node)
 	// ------------------------------------------------------------------
@@ -115,6 +125,22 @@ public partial class SkyCycle : Node
 	public float NightAmbientEnergy { get; set; } = 0.12f;
 
 	/// <summary>
+	/// The moon light's energy at its peak (midnight). The moon is a faint,
+	/// cool directional light that is only enabled while the sun is below the
+	/// horizon. Kept low so night is dim but still lit (and so the moon's
+	/// shadows are visible but soft). Faded to 0 as the moon approaches the
+	/// horizon (sunset / sunrise).
+	/// </summary>
+	[Export(PropertyHint.Range, "0,2,0.02")]
+	public float MoonEnergy { get; set; } = 0.15f;
+
+	/// <summary>
+	/// The moon light's colour. A cool blue-white by default (moonlight). Only
+	/// applied while the moon is enabled.
+	/// </summary>
+	[Export] public Color MoonColor { get; set; } = new Color(0.6f, 0.7f, 1.0f, 1.0f);
+
+	/// <summary>
 	/// The phase at which the app starts, in [0, 1) where 0 = midnight, 0.5 =
 	/// noon, 0.75 = sunset. Used as the initial time before the cycle advances.
 	/// </summary>
@@ -140,6 +166,7 @@ public partial class SkyCycle : Node
 	// ------------------------------------------------------------------
 
 	private DirectionalLight3D _sun;
+	private DirectionalLight3D _moon;
 	private WorldEnvironment _worldEnvironment;
 	private Environment _environment;
 
@@ -208,6 +235,9 @@ public partial class SkyCycle : Node
 		var worldEnv = GetTree()?.GetFirstNodeInGroup(WorldEnvironmentGroup) as WorldEnvironment
 			?? FindDescendantOfType<WorldEnvironment>(GetTree()?.Root);
 
+		var moon = GetTree()?.GetFirstNodeInGroup(MoonLightGroup) as DirectionalLight3D
+			?? FindDescendantOfType<DirectionalLight3D>(GetTree()?.Root, skip: sun);
+
 		if (sun != null)
 		{
 			sun.AddToGroup(SunLightGroup);
@@ -216,10 +246,30 @@ public partial class SkyCycle : Node
 		{
 			worldEnv.AddToGroup(WorldEnvironmentGroup);
 		}
+		if (moon != null)
+		{
+			moon.AddToGroup(MoonLightGroup);
+		}
 
 		_sun = GetTree()?.GetFirstNodeInGroup(SunLightGroup) as DirectionalLight3D;
+		_moon = GetTree()?.GetFirstNodeInGroup(MoonLightGroup) as DirectionalLight3D;
 		_worldEnvironment = GetTree()?.GetFirstNodeInGroup(WorldEnvironmentGroup) as WorldEnvironment;
 		_environment = _worldEnvironment?.Environment;
+
+		// The moon starts disabled; ApplyPhase() below will enable it if we
+		// start at night. Force the initial energy so a stale scene value is
+		// overwritten on the first frame.
+		if (_moon != null)
+		{
+			_moon.LightColor = MoonColor;
+		}
+
+		GD.Print($"[SkyCycle] _Ready: sun={(_sun != null ? _sun.Name : "NULL")} " +
+			$"moon={(_moon != null ? _moon.Name : "NULL")} " +
+			$"worldEnv={(_worldEnvironment != null ? _worldEnvironment.Name : "NULL")} " +
+			$"env={(_environment != null ? "set" : "NULL")} " +
+			$"Day={DaySeconds}s Night={NightSeconds}s StartingPhase={StartingPhase} Paused={Paused} " +
+			$"IsRunning={IsRunning}");
 
 		_phase = Mathf.Clamp(StartingPhase, 0f, 1f);
 		_currentSky = _environment?.Sky;
@@ -256,6 +306,8 @@ public partial class SkyCycle : Node
 		ApplyPhase();
 	}
 
+	private double _lastCycleLogSec;
+
 	public override void _Process(double delta)
 	{
 		if (!IsRunning)
@@ -265,6 +317,22 @@ public partial class SkyCycle : Node
 		float dt = (float)delta;
 		_phase = PosMod(_phase + dt / FullCycleSeconds, 1f);
 		ApplyPhase();
+
+		// Diagnostic (temporary): confirm the cycle is advancing and applying.
+		// Logs once per second with the current phase + sun state.
+		if (Time.GetTicksMsec() / 1000.0 - _lastCycleLogSec >= 1.0)
+		{
+			_lastCycleLogSec = Time.GetTicksMsec() / 1000.0;
+			// Print the sun's actual FORWARD vector (-Z of its basis) so we can
+			// confirm LIGHT0_DIRECTION is pointing up (y>0) during the day and
+			// down (y<0) at night — that's what the sky shader reads.
+			Vector3 fwd = _sun != null ? -_sun.GlobalBasis.Z : Vector3.Zero;
+			Vector3 mFwd = _moon != null ? -_moon.GlobalBasis.Z : Vector3.Zero;
+			GD.Print($"[SkyCycle] phase={_phase:F3} dayAmt={DayAmount:F3} " +
+				$"sun(on={(_sun != null && _sun.Visible)},E={(_sun != null ? _sun.LightEnergy.ToString("F2") : "NULL")},fwd=({fwd.X:F2},{fwd.Y:F2},{fwd.Z:F2})) " +
+				$"moon(on={(_moon != null && _moon.Visible)},E={(_moon != null ? _moon.LightEnergy.ToString("F2") : "NULL")},fwd=({mFwd.X:F2},{mFwd.Y:F2},{mFwd.Z:F2})) " +
+				$"amb={(_environment != null ? _environment.AmbientLightEnergy.ToString("F2") : "NULL")}");
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -299,11 +367,16 @@ public partial class SkyCycle : Node
 		// θ ∈ (π, 2π) (night) — exactly the behaviour the sky shader wants
 		// (LIGHT0_DIRECTION.y > 0 = day, < 0 = night).
 		//
-		// DirectionalLight3D shines along its -Z (forward) axis. To make its
-		// forward vector have components ( -cosθ, +sinθ, 0 ) (east→west across
-		// the sky, up→down with altitude) we rotate it by θ about the +Z axis.
-		// A rotation of θ about Z maps -Z → (-sinθ, -cosθ, 0); we want (-cosθ,
-		// sinθ, 0), which is a rotation of (θ - π/2) about Z. We use that.
+		// CRITICAL: the DirectionalLight3D shines along its -Z (forward) axis,
+		// and the sky shader reads LIGHT0_DIRECTION — the direction the light
+		// POINTS (its forward vector). So the light's forward must be
+		// (-cosθ, +sinθ, 0): at noon (θ=π/2) the forward is (0,+1,0) = straight
+		// UP (light shines down onto the ground from the sky, and
+		// LIGHT0_DIRECTION.y = +1 = day). The OLD code used a single Z-axis
+		// rotation (0,0,θ-π/2), which at noon gave forward (0,-1,0) = straight
+		// DOWN — the light pointed into the ground all day, so the sky shader
+		// saw LIGHT0_DIRECTION.y ≈ -1 (night) the whole time and nothing
+		// visibly changed even though the phase/energy numbers advanced.
 		//
 		// DayAmount puts the DAY at phase [0, dayFrac), so the arc maps the day
 		// window [0, dayFrac) to [0, π] (sunrise→noon→sunset) and the night
@@ -323,17 +396,69 @@ public partial class SkyCycle : Node
 			arcAngle = Mathf.Pi + ((_phase - dayFrac) / System.Math.Max(1e-4f, 1f - dayFrac)) * Mathf.Pi;
 		}
 
-		// Rotate the sun so its forward vector points along the arc direction
-		// (-cosθ, +sinθ, 0). As derived above, that is a rotation of (θ - π/2)
-		// about the Z axis.
-		float rotZ = arcAngle - Mathf.Pi / 2f;
-		_sun.Rotation = new Vector3(0f, 0f, rotZ);
+		// Point the light's -Z (forward) along (-cosθ, +sinθ, 0). We build the
+		// basis directly so the forward is exact: the Z column is -forward
+		// (because forward = -Z ⇒ Z = -forward), X is any perpendicular in the
+		// arc plane, Y = Z × X. This is equivalent to look_at but written out so
+		// the forward is unambiguous. At noon θ=π/2: forward (0,1,0), Z (0,-1,0).
+		float cosT = Mathf.Cos(arcAngle);
+		float sinT = Mathf.Sin(arcAngle);
+		Vector3 fwd = new Vector3(-cosT, sinT, 0f);   // where the light points
+		Vector3 zCol = -fwd;                          // (cosT, -sinT, 0)
+		Vector3 xCol = new Vector3(sinT, cosT, 0f);   // ⊥ to fwd, in the plane
+		Vector3 yCol = zCol.Cross(xCol);              // right-handed completion
+		_sun.GlobalBasis = new Basis(xCol, yCol, zCol);
 
-		// --- Sun energy (on the DirectionalLight3D, not the Environment) ---
+		// --- Sun energy + ENABLE (on the DirectionalLight3D, not the Env) ---
 		// The sun's energy fades with altitude so the scene brightens at noon
-		// and darkens toward the horizon and night.
+		// and darkens toward the horizon and night. The sun is ENABLED only
+		// while it is above the horizon (sin(θ) > 0) and DISABLED at night, so
+		// it stops casting a shadow map and contributing light when it's down.
 		float sunUp = Mathf.Max(0f, (float)System.Math.Sin(arcAngle)); // 0 at horizon, 1 at noon
+		bool sunAbove = System.Math.Sin(arcAngle) > 0f;
+		_sun.Visible = sunAbove;
 		_sun.LightEnergy = Mathf.Lerp(NightSunEnergy, DaySunEnergy, sunUp);
+
+		// --- Moon (second directional light, night only) ---
+		// The moon is ENABLED only while the sun is BELOW the horizon
+		// (sin(θ) < 0) and DISABLED by day, so it never double-lights the scene.
+		// When the sun is disabled, the moon becomes the first enabled
+		// directional light (LIGHT0) and drives the sky shader's day/night
+		// blend — so the moon's forward must point DOWN (y < 0) to keep the sky
+		// in "night" mode, and the sky shader then renders the moon's disc
+		// toward -LIGHT0_DIRECTION (up in the sky). The moon arcs across the
+		// night window [dayFrac, 1): φ = 0 at sunset (rising), φ = π/2 at
+		// midnight (zenith, shining straight down), φ = π at sunrise (setting).
+		// Its energy fades to 0 as it approaches the horizon (soft in/out).
+		if (_moon != null)
+		{
+			bool moonUp = !sunAbove;
+			_moon.Visible = moonUp;
+			if (moonUp)
+			{
+				float nightLen = System.Math.Max(1e-4f, 1f - dayFrac);
+				float phi = ((_phase - dayFrac) / nightLen) * Mathf.Pi; // 0..π over the night
+				float cosP = Mathf.Cos(phi);
+				float sinP = Mathf.Sin(phi);
+				// Moon forward: (cosφ, -sinφ, 0). At midnight φ=π/2 → (0,-1,0)
+				// (shining straight down onto the ground). y = -sinφ ≤ 0 → the
+				// sky shader stays in night mode; -forward.y = sinφ ≥ 0 → the
+				// moon disc renders up in the sky.
+				Vector3 mFwd = new Vector3(cosP, -sinP, 0f);
+				Vector3 mZ = -mFwd;
+				Vector3 mX = new Vector3(sinP, cosP, 0f);
+				Vector3 mY = mZ.Cross(mX);
+				_moon.GlobalBasis = new Basis(mX, mY, mZ);
+				// Fade the moon's energy with its altitude (0 at the horizon,
+				// MoonEnergy at the zenith) so it softly fades in at sunset and
+				// out at sunrise rather than popping on/off.
+				_moon.LightEnergy = MoonEnergy * sinP;
+			}
+			else
+			{
+				_moon.LightEnergy = 0f;
+			}
+		}
 
 		// --- Ambient light (on the Environment) ---
 		// The ambient (sky) light lifts non-shadowed surfaces; fade it at night
@@ -372,20 +497,28 @@ public partial class SkyCycle : Node
 
 	/// <summary>
 	/// Depth-first search for the first descendant of <paramref name="root"/>
-	/// that is a <typeparamref name="T"/> (or is itself). Used as a fallback when
-	/// the expected group is empty (e.g. the scene editor dropped the group
-	/// entry), so the cycle can still find the sun / world environment. Returns
-	/// null when <paramref name="root"/> is null or no such node exists.
+	/// that is a <typeparamref name="T"/> (or is itself), optionally skipping a
+	/// specific node (<paramref name="skip"/>). Used as a fallback when the
+	/// expected group is empty (e.g. the scene editor dropped the group entry),
+	/// so the cycle can still find the sun / moon / world environment. When
+	/// looking for the MOON we pass the sun as <paramref name="skip"/> so the
+	/// walk doesn't just grab the sun (the first DirectionalLight3D in tree
+	/// order). Returns null when <paramref name="root"/> is null or no such
+	/// node exists.
 	/// </summary>
-	private static T FindDescendantOfType<T>(Node root) where T : Node
+	private static T FindDescendantOfType<T>(Node root, Node skip = null) where T : Node
 	{
+		if (ReferenceEquals(root, skip))
+		{
+			return null;
+		}
 		if (root is T match)
 		{
 			return match;
 		}
 		for (int i = 0; i < root.GetChildCount(); i++)
 		{
-			var result = FindDescendantOfType<T>(root.GetChild(i));
+			var result = FindDescendantOfType<T>(root.GetChild(i), skip);
 			if (result != null)
 			{
 				return result;

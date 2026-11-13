@@ -34,13 +34,21 @@ tonemap_mode = 2
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="Enviornment" unique_id=1288290266]
 environment = SubResource("Environment_world")
-groups = ["world_environment"]
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="Enviornment" unique_id=761222868]
 transform = Transform3D(-0.8660253, -0.35355338, 0.3535538, 0, 0.70710725, 0.7071064, -0.50000024, 0.612372, -0.6123727, 0, 0, 0)
 shadow_enabled = true
-shadow_caster_mask = 1
+shadow_caster_mask = 3
 groups = ["sun_light"]
+
+[node name="MoonLight" type="DirectionalLight3D" parent="Enviornment" unique_id=9000000001]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+enabled = false
+light_color = Color(0.6, 0.7, 1, 1)
+light_energy = 0.15
+shadow_enabled = true
+shadow_caster_mask = 3
+groups = ["moon_light"]
 
 [node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
 script = ExtResource("2_voxelworld")
@@ -76,8 +84,8 @@ HiveScene = ExtResource("6_346fj")
 [node name="SkyCycle" type="Node" parent="." unique_id=411065409]
 script = ExtResource("16_skycycle")
 SkyboxConfig = ExtResource("15_skyboxconfig")
-DaySeconds = 5.0
-NightSeconds = 5.0
+DaySeconds = 3600.0
+NightSeconds = 3600.0
 
 [node name="Player" type="Node3D" parent="." unique_id=481445753]
 

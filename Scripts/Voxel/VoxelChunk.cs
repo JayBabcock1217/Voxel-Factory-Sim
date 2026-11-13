@@ -336,12 +336,15 @@ public partial class VoxelChunk : Node3D
 		Data = data;
 
 		_meshInstance = new MeshInstance3D { Name = "Mesh" };
-		// Terrain lives on RENDER LAYER 2 (see VoxelWorld.TerrainRenderLayer). The
-		// DirectionalLight3D's shadow Caster Mask is layer 1 only, so the terrain
-		// RECEIVES the sun's real-time shadow (the Caster Mask does not gate
-		// receiving) but does NOT CAST one — only layer-1 entities (the player,
-		// machines, drops) cast. Keeps the huge voxel terrain out of the shadow
-		// map while still showing a crisp character shadow on the ground.
+		// Terrain lives on RENDER LAYER 2 (see VoxelWorld.TerrainRenderLayer).
+		// The sun/moon DirectionalLight3D's shadow Caster Mask is layers 1+2
+		// (=3), so the terrain BOTH receives AND casts the sun's/moon's
+		// real-time shadow — hills, cliffs, and cave overhangs cast shadows onto
+		// the ground, and the player/machines/drops (layer 1) cast too. NOTE:
+		// this is a deliberate performance tradeoff (the huge voxel terrain now
+		// enters the shadow map, so shadows are lower-res and cost more GPU);
+		// to put the terrain back to receive-only, set the lights'
+		// shadow_caster_mask back to 1.
 		// Render layer: GeometryInstance3D exposes the bitmask as `Layers` in C#
 		// (maps to the `layer` scene property). Layer 2 = 1 << 1.
 		_meshInstance.Layers = VoxelWorld.TerrainRenderLayer;

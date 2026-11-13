@@ -34,14 +34,15 @@ public enum VoxelMeshMode
 public partial class VoxelWorld : Node3D
 {
 	/// <summary>
-	/// The render layer every terrain chunk mesh is placed on (layer 2). This
-	/// is what lets the <c>DirectionalLight3D</c> sun cast real-time shadows of
-	/// non-terrain entities (player, machines, drops — all on the default layer
-	/// 1) ONTO the terrain without the terrain itself casting a shadow: the sun's
-	/// shadow <c>CasterMask</c> is layer 1 only, so the layer-2 terrain never
-	/// enters the shadow map, but it still receives the shadow (the Caster Mask
-	/// does not gate receiving). Keep in sync with the DirectionalLight3D's
-	/// <c>Shadow &gt; Caster Mask</c> in <c>Scenes/Main.tscn</c>.
+	/// The render layer every terrain chunk mesh is placed on (layer 2). The
+	/// sun/moon <c>DirectionalLight3D</c>s have their shadow <c>CasterMask</c>
+	/// set to layers 1+2 (=3), so the terrain BOTH receives AND casts real-time
+	/// shadows (hills/cliffs/caves cast), and the layer-1 entities (player,
+	/// machines, drops) cast too. (The Caster Mask does not gate receiving, so
+	/// the terrain always receives shadows.) This is a deliberate performance
+	/// tradeoff — the huge voxel terrain now enters the shadow map. To make the
+	/// terrain receive-only again, set the lights' <c>Shadow &gt; Caster Mask</c>
+	/// in <c>Scenes/Main.tscn</c> back to 1 (layer 1 only).
 	/// </summary>
 	public const int TerrainRenderLayer = 2;
 
