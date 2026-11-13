@@ -489,6 +489,7 @@ public partial class SkyCycle : Node
 		bool sunAbove = (float)System.Math.Sin(arcAngle) >= 0f;
 		_sun.Visible = sunAbove;
 		_sun.LightEnergy = Mathf.Lerp(NightSunEnergy, DaySunEnergy, sunUp);
+		_sun.ShadowEnabled = sunAbove;
 
 		// --- Moon (second directional light, night only) ---
 		// The moon is ENABLED only while the sun is BELOW the horizon
@@ -522,10 +523,12 @@ public partial class SkyCycle : Node
 				// MoonEnergy at the zenith) so it softly fades in at moonrise
 				// and out at moonset rather than popping.
 				_moon.LightEnergy = MoonEnergy * Mathf.Max(0f, sinM);
+				_moon.ShadowEnabled = true;
 			}
 			else
 			{
 				_moon.LightEnergy = 0f;
+				_moon.ShadowEnabled = false;
 			}
 		}
 
