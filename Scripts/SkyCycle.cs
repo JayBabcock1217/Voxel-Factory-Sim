@@ -243,14 +243,41 @@ public partial class SkyCycle : Node
 	/// DaySeconds + NightSeconds), not the day/night SPLIT. The day and night
 	/// are always equal in real time (each = half the cycle).
 	///
-	/// This is the SINGLE source of truth for the phase→arc mapping; both
-	/// ApplyPhase (sun + moon) and DayAmount use it so they always agree.
+	/// This is the SINGLE source of truth for the sun's phase→arc mapping; both
+	/// ApplyPhase (sun) and DayAmount use it so they always agree. The moon has
+	/// its own PhaseToMoonArc (see below) so it travels in the SAME direction as
+	/// the sun (east→west) rather than the opposite way.
 	/// </summary>
 	private float PhaseToArcAngle(float phase)
 	{
 		// θ = 2π·phase − π/2. At phase 0 this is −π/2 (nadir); at 0.5 it's π/2
 		// (zenith). The sine of θ gives the sun's altitude directly.
 		return 2f * Mathf.Pi * phase - Mathf.Pi / 2f;
+	}
+
+	/// <summary>
+	/// Maps a phase in [0,1) to the MOON's arc angle θ_moon (in radians). The
+	/// moon is up during the NIGHT window (phase ∈ [0.75, 1) ∪ [0, 0.25), i.e.
+	/// 18:00 → 06:00), and its arc is designed so it travels in the SAME
+	/// direction as the sun (east → west), not the opposite way. The moon:
+	///   * rises in the EAST at 18:00 (phase 0.75)
+	///   * is at its ZENITH at 00:00 (phase 0, midnight)
+	///   * sets in the WEST at 06:00 (phase 0.25)
+	/// Its altitude (how high it is) follows a sine hump over the night,
+	/// peaking at midnight. The arc angle is θ_moon = π·nightT where nightT is
+	/// the progress through the night (0 at 18:00, 0.5 at 00:00, 1 at 06:00),
+	/// so θ_moon sweeps 0 → π across the night.
+	/// </summary>
+	private float PhaseToMoonArc(float phase)
+	{
+		const float NightStartPhase = 0.75f; // 18:00 (sunset) — moon rises here
+		const float NightLenPhase = 0.5f;     // night spans 12h = 0.5 of the cycle
+		// Night progress 0..1 from 18:00 (phase 0.75) through midnight (phase 0)
+		// to 06:00 (phase 0.25). Handle the wraparound past phase 1.0.
+		float nightT = (_phase >= NightStartPhase)
+			? (_phase - NightStartPhase) / NightLenPhase
+			: (_phase + 1f - NightStartPhase) / NightLenPhase;
+		return nightT * Mathf.Pi; // 0 at 18:00, π/2 at 00:00, π at 06:00
 	}
 
 	// ------------------------------------------------------------------
@@ -454,48 +481,34 @@ public partial class SkyCycle : Node
 
 		// --- Moon (second directional light, night only) ---
 		// The moon is ENABLED only while the sun is BELOW the horizon
-		// (sin(θ) < 0) and DISABLED by day, so it never double-lights the scene.
-		// When the sun is disabled, the moon becomes the first enabled
-		// directional light (LIGHT0) and drives the sky shader's day/night
-		// blend — so the moon's forward must point DOWN (y < 0) to keep the sky
-		// in "night" mode, and the sky shader then renders the moon's disc
-		// toward -LIGHT0_DIRECTION (up in the sky).
-		//
-		// On the fixed 24h clock the NIGHT window is phase [0.75, 1) ∪ [0,
-		// 0.25) (18:00 → 06:00). The moon arcs across it: φ = 0 at sunset
-		// (18:00, phase 0.75, rising), φ = π/2 at midnight (phase 0, zenith,
-		// shining straight down), φ = π at sunrise (06:00, phase 0.25,
-		// setting). We measure the night progress from 0.75 forward through 1.0
-		// and wrapping to 0.25. Its energy fades to 0 at the horizon (soft in/out).
-		const float NightStartPhase = 0.75f; // sunset (18:00)
-		const float NightLenPhase = 0.5f;     // night spans 0.5 of the cycle (12h)
+		// (sun altitude < 0, i.e. phase ∈ [0.75, 1) ∪ [0, 0.25) = 18:00–06:00)
+		// and DISABLED while the sun is up, so the two never double-light the
+		// scene. The moon's arc (PhaseToMoonArc) sweeps 0→π across the night
+		// (0 at 18:00 moonrise, π/2 at 00:00 zenith, π at 06:00 moonset). We
+		// use the SAME basis convention as the sun — forward (-Z) along
+		// (-cosθ, +sinθ, 0) — so the moon travels in the SAME direction as the
+		// sun (east→west across the sky), not the opposite way.
 		if (_moon != null)
 		{
 			bool moonUp = !sunAbove;
 			_moon.Visible = moonUp;
 			if (moonUp)
 			{
-				// Night progress 0..1 from sunset (0.75) through midnight (0) to
-				// sunrise (0.25). Handle the wraparound past phase 1.0.
-				float nightT = (_phase >= NightStartPhase)
-					? (_phase - NightStartPhase) / NightLenPhase
-					: (_phase + 1f - NightStartPhase) / NightLenPhase;
-				float phi = nightT * Mathf.Pi; // 0..π over the night
-				float cosP = Mathf.Cos(phi);
-				float sinP = Mathf.Sin(phi);
-				// Moon forward: (cosφ, -sinφ, 0). At midnight φ=π/2 → (0,-1,0)
-				// (shining straight down onto the ground). y = -sinφ ≤ 0 → the
-				// sky shader stays in night mode; -forward.y = sinφ ≥ 0 → the
-				// moon disc renders up in the sky.
-				Vector3 mFwd = new Vector3(cosP, -sinP, 0f);
+				float moonArc = PhaseToMoonArc(_phase);
+				float cosM = Mathf.Cos(moonArc);
+				float sinM = Mathf.Sin(moonArc);
+				// Same basis convention as the sun: forward (-Z) along
+				// (-cosθ, +sinθ, 0). This makes the moon sweep across the sky
+				// in the same direction as the sun (east→west).
+				Vector3 mFwd = new Vector3(-cosM, sinM, 0f);
 				Vector3 mZ = -mFwd;
-				Vector3 mX = new Vector3(sinP, cosP, 0f);
+				Vector3 mX = new Vector3(sinM, cosM, 0f);
 				Vector3 mY = mZ.Cross(mX);
 				_moon.GlobalBasis = new Basis(mX, mY, mZ);
 				// Fade the moon's energy with its altitude (0 at the horizon,
-				// MoonEnergy at the zenith) so it softly fades in at sunset and
-				// out at sunrise rather than popping on/off.
-				_moon.LightEnergy = MoonEnergy * sinP;
+				// MoonEnergy at the zenith) so it softly fades in at moonrise
+				// and out at moonset rather than popping.
+				_moon.LightEnergy = MoonEnergy * Mathf.Max(0f, sinM);
 			}
 			else
 			{
