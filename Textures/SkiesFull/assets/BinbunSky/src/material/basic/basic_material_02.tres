@@ -1,6 +1,6 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://b6xhov8nh4yhm"]
 
-[ext_resource type="Shader" uid="uid://kgjsu8n7pyom" path="res://assets/BinbunSky/src/shader/main.gdshader" id="1_cysbe"]
+[ext_resource type="Shader" uid="uid://kgjsu8n7pyom" path="res://Textures/SourceCode/shader/main.gdshader" id="1_cysbe"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_ar8vl"]
 noise_type = 0

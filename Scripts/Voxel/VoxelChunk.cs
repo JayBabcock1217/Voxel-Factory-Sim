@@ -43,6 +43,47 @@ public partial class VoxelChunk : Node3D
 	/// <summary>The chunk's visual mesh instance (exposed for rendering settings like wireframe).</summary>
 	public MeshInstance3D MeshInstance => _meshInstance;
 
+	/// <summary>
+	/// True while this chunk is showing its temporary LOD-1 placeholder mesh
+	/// (a coarse heightfield of its own XZ area) instead of its real full-res
+	/// mesh. Set when the placeholder is attached, cleared when the real mesh
+	/// is built. See <see cref="VoxelWorld.AttachLod1Placeholder"/>.
+	/// </summary>
+	public bool Lod1PlaceholderShowing { get; private set; } = false;
+
+	/// <summary>
+	/// True once a LOD-1 placeholder mesh has been attached to this chunk at
+	/// least this session (stays true even after the real mesh replaces it, so
+	/// the world knows the placeholder was used). Diagnostic only.
+	/// </summary>
+	public bool Lod1PlaceholderAttached { get; private set; } = false;
+
+	/// <summary>
+	/// Replaces this chunk's current mesh with the given LOD-1 placeholder
+	/// heightfield and marks it as showing. Called by the world right after the
+	/// chunk is queued for generation, so the player sees terrain immediately
+	/// (the real full-res mesh replaces it when generation + meshing finish).
+	/// </summary>
+	public void SetLod1Placeholder(ArrayMesh mesh)
+	{
+		if (_meshInstance == null || mesh == null)
+		{
+			return;
+		}
+		_meshInstance.Mesh = mesh;
+		Lod1PlaceholderShowing = true;
+		Lod1PlaceholderAttached = true;
+	}
+
+	/// <summary>
+	/// Clears the LOD-1 placeholder state (the real full-res mesh is now
+	/// showing). Called when the chunk's real mesh build completes.
+	/// </summary>
+	public void ClearLod1Placeholder()
+	{
+		Lod1PlaceholderShowing = false;
+	}
+
 	/// <summary>The last collision-enabled state actually applied to the shape.</summary>
 	public bool CollisionEnabled { get; private set; }
 
@@ -2320,6 +2361,9 @@ public partial class VoxelChunk : Node3D
 		if (appliedMesh)
 		{
 			NeedsMesh = false;
+			// The real full-res mesh is now showing (sub-cell nodes or the whole-chunk
+			// mesh, depending on mode): the temporary LOD-1 placeholder is gone.
+			ClearLod1Placeholder();
 		}
 	}
 

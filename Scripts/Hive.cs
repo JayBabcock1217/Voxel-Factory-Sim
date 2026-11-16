@@ -178,16 +178,18 @@ public partial class Hive : FunctionalFoliage
 			return;
 		}
 
-		// The hive only activates (spawns zombies) when its chunk is FULL-RES
-		// (within RenderDistanceChunks of the player). Beyond that, the terrain
-		// is low-res LOD (heightfield, no per-voxel collision) — zombies can't
-		// stand on or path across LOD terrain. The hive keeps running (baseline
-		// resolution, depletion tracking) but skips spawning until the player
-		// is close enough. The spawn timer does NOT advance while dormant, so
-		// a dormant hive doesn't burn its interval on a no-op tick.
-		if (World != null && !World.IsFullResChunkAt(GlobalPosition))
+		// The hive only activates (spawns zombies) when its chunk is FULL-RES AND
+		// DONE GENERATING: present, data-ready, meshed, and collision-ready. This
+		// is stricter than IsFullResChunkAt (which only checks RANGE): a chunk can
+		// be in range yet still be an LOD-1 placeholder or mid-generation, in which
+		// case zombies can't stand on or path across it. Beyond the render distance
+		// the chunk isn't loaded at all, which this also rejects. The hive keeps
+		// running (baseline resolution, depletion tracking) but skips spawning until
+		// its chunk is solid, walkable geometry. The spawn timer does NOT advance
+		// while dormant, so a dormant hive doesn't burn its interval on a no-op tick.
+		if (World != null && !World.IsFullResChunkReady(GlobalPosition))
 		{
-			return; // dormant: not close enough to the player
+			return; // dormant: its chunk isn't full-res + done generating yet
 		}
 
 		// If the baseline hasn't been resolved yet (the hive's voxels weren't

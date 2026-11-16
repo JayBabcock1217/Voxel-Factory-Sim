@@ -51,6 +51,8 @@ public sealed class CommandRegistry
 		_registered = true;
 		Register(new HelpCommand());
 		Register(new SetTimeCommand());
+		Register(new LodDebugCommand());
+		Register(new LodDistanceCommand());
 	}
 
 	/// <summary>Registers a command (replaces any prior command with the same name).</summary>

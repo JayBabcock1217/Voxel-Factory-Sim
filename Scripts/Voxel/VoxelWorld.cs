@@ -1190,17 +1190,7 @@ public partial class VoxelWorld : Node3D
 	/// <summary>Maximum LOD region meshes to build concurrently on the thread pool.</summary>
 	private const int MaxConcurrentLodBuilds = 4;
 
-	/// <summary>
-	/// Connector-strip state: the root node holding every <see cref="LodConnector"/>
-	/// and the (side, edge) -> connector map. Managed by <see cref="UpdateConnectors"/>
-	/// (called from <see cref="UpdateLod"/>); the strips bridge the gap between the
-	/// full-res square's outer edge and the LOD inner boundary. Visual-only.
-	/// </summary>
-	private Node3D _connectorRoot;
-	private readonly Dictionary<(int, int), LodConnector> _connectors = new();
 
-	/// <summary>Maximum connector strip meshes to build concurrently on the thread pool.</summary>
-	private const int MaxConcurrentConnectorBuilds = 4;
 
 	public override void _ExitTree()
 	{
@@ -1316,9 +1306,6 @@ public partial class VoxelWorld : Node3D
 
 		_lodRoot = new Node3D { Name = "LodChunks" };
 		AddChild(_lodRoot);
-
-		_connectorRoot = new Node3D { Name = "Connectors" };
-		AddChild(_connectorRoot);
 
 		// Backfill any known "special" materials (e.g. the torch) that a saved
 		// .tres created before they existed would be missing. Without this, a
@@ -1680,12 +1667,6 @@ public partial class VoxelWorld : Node3D
 			foreach (LodChunk lod in _lodChunks.Values)
 			{
 				lod.Invalidate();
-			}
-			// The connector strips share the same per-material tiling, so they
-			// invalidate too.
-			foreach (LodConnector connector in _connectors.Values)
-			{
-				connector.Invalidate();
 			}
 		}
 	}
@@ -2479,15 +2460,10 @@ public partial class VoxelWorld : Node3D
 		if (LodEnabled)
 		{
 			UpdateLod(playerNode.GlobalPosition);
-			// The connector strips bridge the gap between the full-res square's
-			// outer edge and the LOD inner boundary. They only make sense when
-			// LOD is on (they meet the LOD); when LOD is off, free them too.
-			UpdateConnectors(playerNode.GlobalPosition);
 		}
-		else if (_lodChunks.Count > 0 || _connectors.Count > 0)
+		else if (_lodChunks.Count > 0)
 		{
 			FreeAllLod();
-			FreeAllConnectors();
 		}
 	}
 
@@ -3541,6 +3517,23 @@ public partial class VoxelWorld : Node3D
 	}
 
 	/// <summary>
+	/// True when <paramref name="coord"/> is the chunk the player spawns in
+	/// (derived from the spawn anchor). Used to EXCLUDE the spawn chunk from the
+	/// LOD-1 placeholder: that chunk generates full-res immediately (the player
+	/// needs it right away) and must not show a coarse placeholder mesh.
+	/// </summary>
+	private bool IsSpawnChunk(Vector2I coord)
+	{
+		if (_spawnChunk.X < 0)
+		{
+			int sx = Mathf.FloorToInt(_spawnAnchor.X / VoxelSize);
+			int sz = Mathf.FloorToInt(_spawnAnchor.Z / VoxelSize);
+			_spawnChunk = ChunkCoordOf(sx, sz);
+		}
+		return coord == _spawnChunk;
+	}
+
+	/// <summary>
 	/// Maps (chunkCoord, seed) into a deterministic integer in [0, N). A plain
 	/// 2D integer hash (no floating point, no noise) so the result is identical
 	/// on every run and platform for the same inputs.
@@ -4146,12 +4139,6 @@ public partial class VoxelWorld : Node3D
 		{
 			lod.Invalidate();
 		}
-		// The connector strips sample the same terrain functions, so they are
-		// stale too — invalidate them so they rebuild from the new config.
-		foreach (LodConnector connector in _connectors.Values)
-		{
-			connector.Invalidate();
-		}
 	}
 
 	// ------------------------------------------------------------------
@@ -4630,6 +4617,18 @@ public partial class VoxelWorld : Node3D
 		_chunkRoot.AddChild(chunk);
 		_chunks[coord] = chunk;
 		_generatingBudget++;
+
+		// LOD-1 placeholder: the moment this chunk is queued for generation, give
+		// it a temporary coarse level-1 heightfield mesh so the player sees terrain
+		// IMMEDIATELY (the real full-res mesh replaces it when generation + meshing
+		// finish, via the normal Rebuild path). The SPAWN chunk is excluded — it
+		// generates full-res right away (the player needs it immediately), so we
+		// don't waste a placeholder on it (and it must not show a coarse mesh the
+		// player would stand on).
+		if (LodEnabled && !IsSpawnChunk(coord))
+		{
+			AttachLod1Placeholder(coord, chunk);
+		}
 
 		int wx0 = coord.X * ChunkSizeXZ;
 		int wz0 = coord.Y * ChunkSizeXZ;
@@ -5128,20 +5127,223 @@ public partial class VoxelWorld : Node3D
 		return System.Math.Max(dx, dz) <= RenderDistanceChunks;
 	}
 
+	/// <summary>
+	/// True when the full-res chunk containing world position <paramref name="pos"/>
+	/// is fully built: present in <see cref="_chunks"/>, its voxel data generated
+	/// (<see cref="VoxelChunk.DataReady"/>), meshed (<see cref="VoxelChunk.NeedsMesh"/>
+	/// clear), not mid-rebuild (<see cref="VoxelChunk.MeshBuildInFlight"/> clear),
+	/// and with a live collision shape (<see cref="VoxelChunk.CollisionReady"/>).
+	///
+	/// This is the "done generating" gate AI uses to decide whether terrain at
+	/// <paramref name="pos"/> is solid, walkable geometry. It is intentionally
+	/// DIFFERENT from <see cref="IsFullResChunkAt"/>, which only checks RANGE
+	/// (within <see cref="RenderDistanceChunks"/> of the player) and is true even
+	/// for a chunk that is still generating or not yet meshed. AI (hives, zombies)
+	/// must not activate on a chunk that is merely in range — it may be an
+	/// LOD-1 placeholder or an un-meshed chunk with no collision to stand on.
+	/// </summary>
+	public bool IsFullResChunkReady(Vector3 pos)
+	{
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		if (!_chunks.TryGetValue(ChunkCoordOf(vx, vz), out VoxelChunk chunk))
+		{
+			return false;
+		}
+		return chunk.DataReady && !chunk.NeedsMesh && !chunk.MeshBuildInFlight && chunk.CollisionReady;
+	}
+
+	/// <summary>
+	/// Builds a temporary level-1 LOD heightfield mesh for a SINGLE full-res
+	/// chunk's XZ area (ChunkSizeXZ × ChunkSizeXZ voxels) and attaches it to the
+	/// chunk's mesh instance, so the player sees terrain immediately while the
+	/// chunk's real voxels are still generating on the thread pool.
+	///
+	/// This reuses the exact same deterministic terrain functions the full-res
+	/// chunks and the far LOD use (<c>TerrainGenerator.SurfaceHeight</c> + tree
+	/// silhouettes), so the placeholder matches the real terrain's silhouette and
+	/// the swap to the full-res mesh is seamless (no height step). It is a top
+	/// surface heightfield only — no caves, no collision (the real mesh +
+	/// collision replace it when generation finishes).
+	///
+	/// The placeholder is built SYNCHRONOUSLY here because it is tiny (a single
+	/// chunk's area sampled at a coarse grid) and it must appear the same frame
+	/// the chunk is queued — deferring it to the thread pool would just move the
+	/// "empty" period onto the LOD-1 budget, which the far horizon starves.
+	///
+	/// The spawn chunk is excluded by the CALLER (it generates full-res
+	/// immediately; the player needs it right away).
+	/// </summary>
+	private void AttachLod1Placeholder(Vector2I coord, VoxelChunk chunk)
+	{
+		if (!LodEnabled)
+		{
+			return;
+		}
+
+		// A level-1 LOD region is 2×2 base chunks, but here we want the placeholder
+		// to cover EXACTLY this one chunk's area. We call the LOD generator with a
+		// "region" that is this chunk's XZ bounds: treat it as a level-1 region
+		// whose world min corner is the chunk's min corner and whose size is
+		// ChunkSizeXZ. The generator's regionSize = chunkSizeXZ * (1 << level), so
+		// to get regionSize == ChunkSizeXZ we'd need level 0 — but the generator
+		// requires level >= 1. Instead we build the heightfield DIRECTLY here for
+		// this chunk's area (same sampling as the generator, but sized to one chunk).
+		int cs = ChunkSizeXZ;
+		int wx0 = coord.X * cs;
+		int wz0 = coord.Y * cs;
+		// Coarse grid that spans the FULL chunk width so adjacent placeholders
+		// meet edge-to-edge (no gaps). The region must be exactly `cs` voxels
+		// wide: width = Res * Cell == cs. Pick the largest Cell <= 4 that divides
+		// cs evenly (keeps the grid coarse/cheap but fine enough to read the
+		// terrain) and derive Res. For cs=16: Cell=4, Res=4 (4x4 cells, 5x5
+		// nodes). For cs=32: Cell=4, Res=8.
+		int cell = 1;
+		for (int c = System.Math.Min(4, cs); c >= 1; c--)
+		{
+			if (cs % c == 0)
+			{
+				cell = c;
+				break;
+			}
+		}
+		int res = cs / cell; // integer by construction (cell divides cs)
+		if (res < 1) res = 1;
+
+		var data = new LodData
+		{
+			Res = res,
+			Wx0 = wx0,
+			Wz0 = wz0,
+			Cell = cell,
+		};
+		int n = data.Res + 1; // nodes per side
+		data.Heights = new short[n * n];
+		data.Materials = new byte[n * n];
+		for (int j = 0; j < n; j++)
+		{
+			int wz = wz0 + j * cell;
+			for (int i = 0; i < n; i++)
+			{
+				int wx = wx0 + i * cell;
+				int h = TerrainGenerator.SurfaceHeight(wx, wz, _config);
+				var biome = TerrainGenerator.DominantBiome(wx, wz, _config);
+				byte mat = (byte)(biome != null ? biome.SurfaceMaterial : VoxelMaterialIds.Grass);
+				// Tree canopies (same gate as the far LOD) so forests read correctly.
+				if (_config.Structures != null && biome != null && _config.ForestNoise != null)
+				{
+					foreach (var def in _config.Structures.ColumnStructures)
+					{
+						if (def.LodHeight(wx, wz, h, _config, _chunks, cs, out int delta, out int lm))
+						{
+							h += delta;
+							if (lm > 0) mat = (byte)lm;
+						}
+					}
+				}
+				data.Heights[i + n * j] = (short)h;
+				data.Materials[i + n * j] = mat;
+			}
+		}
+
+		var mesh = LodChunkGenerator.BuildMesh(data, VoxelSize, Palette);
+		chunk.SetLod1Placeholder(mesh);
+	}
+
+	/// <summary>
+	/// Builds a multi-line human-readable report of the LOD-1 placeholder system
+	/// and the hive-spawn gate, for console debugging. Each full-res chunk shows a
+	/// temporary level-1 LOD heightfield (its <c>Lod1Placeholder</c> flag) until
+	/// its real mesh is built. Read-only: it touches no engine nodes beyond
+	/// reading chunk flags, so it is safe to call from the pause-menu command.
+	/// </summary>
+	public string GetLodDebugReport()
+	{
+		var player = GetTree()?.GetFirstNodeInGroup("player") as Node3D;
+		Vector3 playerPos = player != null ? player.GlobalPosition : Vector3.Zero;
+		Vector2I playerChunk = ChunkCoordOf(playerPos);
+
+		int fullResLoaded = 0, fullResReady = 0, phShowing = 0, phAttached = 0;
+		foreach (VoxelChunk c in _chunks.Values)
+		{
+			fullResLoaded++;
+			bool ready = c.DataReady && !c.NeedsMesh && !c.MeshBuildInFlight && c.CollisionReady;
+			if (ready) fullResReady++;
+			if (c.Lod1PlaceholderAttached) phAttached++;
+			if (c.Lod1PlaceholderShowing) phShowing++;
+		}
+
+		int farTotal = _lodChunks.Count;
+		int farVisible = 0, farBuilt = 0;
+		foreach (LodChunk lod in _lodChunks.Values)
+		{
+			if (lod.Visible) farVisible++;
+			if (lod.Built) farBuilt++;
+		}
+
+		var sb = new System.Text.StringBuilder();
+		sb.Append("=== LOD-1 PLACEHOLDER DEBUG (per-chunk) ===\n");
+		sb.Append($"LodEnabled={LodEnabled}  RenderDistance={RenderDistanceChunks}  LodRes={LodMeshResolution}\n");
+		sb.Append($"Player pos={playerPos}  playerChunk={playerChunk}\n");
+		sb.Append($"FullRes: loaded={fullResLoaded} ready={fullResReady}\n");
+		sb.Append($"LOD1 placeholders: attached={phAttached} showing={phShowing} (these are chunks still showing their LOD-1 mesh)\n");
+		sb.Append($"FarLOD:   total={farTotal} visible={farVisible} built={farBuilt}\n");
+
+		// A sample of chunks near the player: their placeholder + readiness state.
+		sb.Append("--- Chunks near player (3x3) ---\n");
+		for (int dx = -1; dx <= 1; dx++)
+		{
+			for (int dz = -1; dz <= 1; dz++)
+			{
+				Vector2I cc = playerChunk + new Vector2I(dx, dz);
+				if (_chunks.TryGetValue(cc, out VoxelChunk c))
+				{
+					string st = c.Lod1PlaceholderShowing ? "LOD1-SHOWING"
+						: (c.DataReady && !c.NeedsMesh && !c.MeshBuildInFlight && c.CollisionReady ? "FULL-READY"
+						: (c.DataReady ? "full-meshing" : "generating"));
+					sb.Append($"  {cc} => {st} (phAttached={c.Lod1PlaceholderAttached})\n");
+				}
+				else
+				{
+					sb.Append($"  {cc} => NOT LOADED\n");
+				}
+			}
+		}
+
+		// The player's own chunk: is it ready (hive-gate relevant)?
+		if (_chunks.TryGetValue(playerChunk, out VoxelChunk pc))
+		{
+			bool ready = pc.DataReady && !pc.NeedsMesh && !pc.MeshBuildInFlight && pc.CollisionReady;
+			string state = ready ? "READY (hive can spawn)" : "NOT READY";
+			sb.Append($"PlayerChunk({playerChunk}) => {state} " +
+				$"(DataReady={pc.DataReady} NeedsMesh={pc.NeedsMesh} MeshInFlight={pc.MeshBuildInFlight} CollisionReady={pc.CollisionReady} LOD1showing={pc.Lod1PlaceholderShowing})\n");
+		}
+		else
+		{
+			sb.Append($"PlayerChunk({playerChunk}) => NOT LOADED (not in _chunks)\n");
+		}
+
+		sb.Append($"IsFullResChunkAt(player)={IsFullResChunkAt(playerPos)}  IsFullResChunkReady(player)={IsFullResChunkReady(playerPos)}\n");
+		return sb.ToString();
+	}
+
 	// ------------------------------------------------------------------
 	// Distant-Horizons-style LOD (visual-only distant terrain)
 	// ------------------------------------------------------------------
 
 	/// <summary>
-	/// The Euclidean distance (in base-chunk units) from the player to the
-	/// farthest corner of the full-res chunk square. Full-res chunks are
-	/// generated for Chebyshev distance ≤ <see cref="RenderDistanceChunks"/>
-	/// (a square of side 2R+1), so the corner is at R*√2 in Euclidean
-	/// distance. The LOD inner boundary must match this — NOT R — otherwise
-	/// the triangular gaps between the square's edges and its corners are
-	/// unrendered, leaving a visible hole between full-res chunks and LOD.
+	/// The Euclidean distance (in base-chunk units) from the player to the edge
+	/// of the full-res chunk square. Full-res chunks are generated for Chebyshev
+	/// distance ≤ <see cref="RenderDistanceChunks"/> (a square of side 2R+1), so
+	/// the flat edges are at Euclidean distance R. The LOD inner boundary is R
+	/// (NOT R*√2, the corner distance) so the LOD starts RIGHT AFTER the full-res
+	/// chunks, with no empty boundary ring. The LOD's level-1 regions will
+	/// overlap the full-res square's corner triangles, but that's fine: the
+	/// full-res chunks render on a higher render layer (layer 2) and are closer
+	/// to the camera in those spots, so they occlude the LOD — no z-fight, and
+	/// the gap is closed.
 	/// </summary>
-	private float LodInnerBoundary => RenderDistanceChunks * (float)System.Math.Sqrt(2.0);
+	private float LodInnerBoundary => RenderDistanceChunks;
 
 	/// <summary>
 	/// The LOD level the player wants at <paramref name="distChunks"/>
@@ -5181,8 +5383,8 @@ public partial class VoxelWorld : Node3D
 	/// LOD render distance: a region is only ever rendered while its center
 	/// is in [LodInnerBoundary, LodRenderDistanceChunks), so anything
 	/// inside the inner radius (full-res chunks own that space — the inner
-	/// radius is R*√2, the farthest corner of the full-res square) or beyond
-	/// the outer radius is never touched here. Scanning a full box out to
+	/// radius is R, the edge of the full-res square) or beyond the outer
+	/// radius is never touched here. Scanning a full box out to
 	/// LodRenderDistanceChunks would (a) create/keep level-1 regions whose
 	/// centers sit inside the full-res area — low-res heightfields popping in
 	/// right behind the player and z-fighting the full-res chunks — and (b)
@@ -5227,10 +5429,10 @@ public partial class VoxelWorld : Node3D
 			int prz = Mathf.FloorToInt(pz / regionSizeChunks);
 
 			// Level-k band [inner*B^(k-1), inner*B^k) — the Euclidean
-			// distances this level is responsible for. `inner` is the
-			// farthest corner of the full-res square (R*√2), NOT R, so the
-			// LOD tiles seamlessly against the square's edges with no gap.
-			// BOUND THE WALK BY THIS LEVEL'S OWN BAND EDGES, not the global
+			// distances this level is responsible for. `inner` is R (the edge
+			// of the full-res square) so the LOD starts right after the
+			// full-res chunks, with no empty boundary ring. BOUND THE WALK BY
+			// THIS LEVEL'S OWN BAND EDGES, not the global
 			// LodRenderDistanceChunks: a coarser level's band ends well before
 			// the LOD distance, and walking every level out to the LOD distance
 			// (the old code) made the per-frame scan O(LodDistance²) per level
@@ -5298,11 +5500,10 @@ public partial class VoxelWorld : Node3D
 		//     edge (centerDistance - size/2) is > LodRenderDistanceChunks away
 		//     — past the horizon.
 		//  2. Fully inside the full-res area (behind the player): the FARTHEST
-		//     point (centerDistance + size/2) is < LodInnerBoundary away, so
-		//     the WHOLE region is inside the full-res square (whose farthest
-		//     corner is at R*√2). The walk's shouldRender is false for such a
-		//     region (d2 < innerDistSq), so it can never render and only
-		//     overlaps (z-fights) the full-res chunks.
+		//     point (centerDistance + size/2) is < LodInnerBoundary (R) away, so
+		//     the WHOLE region is inside the full-res square. The walk's
+		//     shouldRender is false for such a region (d2 < innerDistSq), so it
+		//     can never render and only overlaps (z-fights) the full-res chunks.
 		//
 		// The behind test uses the FARTHEST point (centerDistance + size/2), NOT
 		// the near corner (centerDistance - size/2). Using the near corner was
@@ -5501,94 +5702,6 @@ public partial class VoxelWorld : Node3D
 		}
 	}
 
-	/// <summary>
-	/// Removes and frees every connector strip. Called when LOD is disabled (the
-	/// connectors only make sense against the LOD they bridge to).
-	/// </summary>
-	private void FreeAllConnectors()
-	{
-		if (_connectors.Count == 0)
-		{
-			return;
-		}
-
-		var all = _connectors.Values.ToList();
-		_connectors.Clear();
-		foreach (LodConnector connector in all)
-		{
-			connector.QueueFree();
-		}
-	}
-
-	/// <summary>
-	/// Maintains the four connector strips that bridge the gap between the
-	/// full-res chunk square's outer edge (distance R) and the LOD inner
-	/// boundary (distance R*sqrt(2)). Each strip covers ONE side of the square
-	/// (N/E/S/W). The strips are deterministic (same terrain functions as the
-	/// full-res chunks and LOD), so they are stable across frames — once built,
-	/// a strip is cached on its node and only rebuilt when invalidated (F-key
-	/// regenerate or a material-tiling change).
-	///
-	/// The strip's INNER edge sits on the full-res square's outer edge (so it
-	/// meets the full-res top layer column-for-column), and its OUTER edge sits
-	/// on the LOD inner boundary (so it meets the LOD heightfield). A skirt
-	/// drops from the inner edge to a base height, closing the open rim of the
-	/// full-res outer chunks. Visual-only — no collision.
-	///
-	/// Called every frame from <see cref="_Process"/> (when LOD is enabled). The
-	/// work is tiny (4 strips, each a small heightfield), and the build is
-	/// budget-capped + deferred to the thread pool, so the per-frame cost is
-	/// just a dictionary check + a budget count.
-	/// </summary>
-	private void UpdateConnectors(Vector3 playerPos)
-	{
-		// The connector geometry is anchored on the full-res square's outer edge,
-		// which is fixed in WORLD space (the square is centred on the player's
-		// spawn / current chunk, but the edge is at a fixed world offset). The
-		// strips don't move with the player — they are part of the world's
-		// boundary, not the player's view. So we don't re-position them; we just
-		// make sure the 4 strips exist and are built.
-		int cs = ChunkSizeXZ;
-		int R = RenderDistanceChunks;
-		int edge = R * cs; // the square's outer edge in world voxels
-		float lodInner = LodInnerBoundary; // = R * sqrt(2)
-
-		for (int side = 0; side < 4; side++)
-		{
-			var key = (side, edge);
-			if (!_connectors.TryGetValue(key, out LodConnector connector))
-			{
-				// First time this side is needed: create the strip node.
-				connector = new LodConnector { Name = $"Connector_{side}_{edge}" };
-				connector.Initialize(side, edge);
-				connector.Visible = true;
-				_connectorRoot.AddChild(connector);
-				_connectors[key] = connector;
-			}
-
-			// (Re)build if needed, within the concurrent-build budget. The
-			// budget counts builds in flight across all 4 strips; the build is
-			// deferred to the thread pool (LodConnector.Rebuild), so this is
-			// cheap.
-			if (!connector.Built && !connector.BuildInFlight)
-			{
-				int inFlight = 0;
-				foreach (LodConnector c in _connectors.Values)
-				{
-					if (c.BuildInFlight)
-					{
-						inFlight++;
-					}
-				}
-				if (inFlight >= MaxConcurrentConnectorBuilds)
-				{
-					break;
-				}
-				connector.Rebuild(cs, _config, Palette, VoxelSize, LodMeshResolution,
-					R, lodInner, _chunks);
-			}
-		}
-	}
 
 	/// <summary>
 	/// Flags every loaded orthogonal + diagonal neighbour of <paramref name="coord"/>

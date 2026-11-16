@@ -1,8 +1,8 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://bnw7o0eyxkd4e"]
 
-[ext_resource type="Shader" uid="uid://kgjsu8n7pyom" path="res://assets/BinbunSky/src/shader/main.gdshader" id="1_sf8hq"]
-[ext_resource type="Texture2D" uid="uid://cfp60l0lt2it5" path="res://assets/BinbunSky/src/textures/clouds/clouds_04.tres" id="2_akvsk"]
-[ext_resource type="Texture2D" uid="uid://y2rosh6pwqt3" path="res://assets/BinbunSky/src/textures/clouds/clouds_03.tres" id="3_348cr"]
+[ext_resource type="Shader" uid="uid://kgjsu8n7pyom" path="res://Textures/SourceCode/shader/main.gdshader" id="1_sf8hq"]
+[ext_resource type="Texture2D" uid="uid://cfp60l0lt2it5" path="res://Textures/SourceCode/textures/clouds/clouds_04.tres" id="2_akvsk"]
+[ext_resource type="Texture2D" uid="uid://y2rosh6pwqt3" path="res://Textures/SourceCode/textures/clouds/clouds_03.tres" id="3_348cr"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_h2yge"]
 noise_type = 2

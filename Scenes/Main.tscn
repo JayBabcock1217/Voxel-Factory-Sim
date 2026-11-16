@@ -39,16 +39,12 @@ environment = SubResource("Environment_world")
 transform = Transform3D(-0.8660253, -0.35355338, 0.3535538, 0, 0.70710725, 0.7071064, -0.50000024, 0.612372, -0.6123727, 0, 0, 0)
 shadow_enabled = true
 shadow_caster_mask = 3
-groups = ["sun_light"]
 
-[node name="MoonLight" type="DirectionalLight3D" parent="Enviornment" unique_id=9000000001]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
-enabled = false
+[node name="MoonLight" type="DirectionalLight3D" parent="Enviornment" unique_id=410065409]
 light_color = Color(0.6, 0.7, 1, 1)
 light_energy = 0.15
 shadow_enabled = true
 shadow_caster_mask = 3
-groups = ["moon_light"]
 
 [node name="VoxelWorld" type="Node3D" parent="Enviornment" unique_id=1700323618]
 script = ExtResource("2_voxelworld")
