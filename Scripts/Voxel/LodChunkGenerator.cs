@@ -25,6 +25,28 @@ public sealed class LodData
 	public int Wx0; // world voxel X of the region's min corner
 	public int Wz0; // world voxel Z of the region's min corner
 	public int Cell; // voxel spacing between grid nodes (regionSize / Res)
+
+	/// <summary>
+	/// Bitmask of the region's four sides that get a flat vertical "skirt"
+	/// (a wall from the surface edge down to <see cref="SkirtBaseHeight"/>):
+	/// bit 0 = -X side, bit 1 = +X side, bit 2 = -Z side, bit 3 = +Z side.
+	/// Used by the LOD-1 per-chunk placeholders: when a side of the chunk
+	/// touches a full-resolution chunk that is already built, the placeholder
+	/// closes the seam with a flat side facing that chunk (the heightfield's
+	/// top surface ends at the boundary, so without the skirt there is an
+	/// open gap down to the void). Zero (the default) means no skirts — the
+	/// distant LOD regions share boundary nodes with their neighbours, so the
+	/// top surface is continuous and they need none.
+	/// </summary>
+	public int SkirtSides;
+
+	/// <summary>
+	/// Height (in voxels) the skirts extend down to. Kept at 0 (world floor):
+	/// the wall is only ever seen in the thin seam between the placeholder's
+	/// edge and a full-res chunk, and extending to the floor guarantees no
+	/// light leaks through even where the surface is high.
+	/// </summary>
+	public int SkirtBaseHeight;
 }
 
 /// <summary>
@@ -157,6 +179,18 @@ public static class LodChunkGenerator
 		int nodes = res + 1;
 		int lastMaterial = palette.MaterialCount;
 
+		// Guard against a structurally broken LodData (null/short Heights or
+		// Materials, or Res < 1). The top-surface loop and EmitSkirts both index
+		// these arrays by (Res+1)²; a mismatch would throw IndexOutOfRange and
+		// crash the engine. Returning an empty mesh is safe: the chunk simply
+		// shows no placeholder this frame (the next refresh rebuilds it).
+		if (res < 1
+			|| data.Heights == null || data.Heights.Length < nodes * nodes
+			|| data.Materials == null || data.Materials.Length < nodes * nodes)
+		{
+			return new ArrayMesh();
+		}
+
 		var positions = new List<Vector3>[lastMaterial];
 		var normals = new List<Vector3>[lastMaterial];
 		var uvs = new List<Vector2>[lastMaterial];
@@ -188,6 +222,12 @@ public static class LodChunkGenerator
 				EmitTriangle(positions, normals, uvs, v00, v11, v01, m00, m11, m01, palette);
 			}
 		}
+
+		// Flat vertical skirts on sides that face a full-resolution chunk
+		// (see LodData.SkirtSides): a wall strip from the surface edge down to
+		// SkirtBaseHeight, closing the seam between this coarse heightfield and
+		// the neighbour's solid mesh. Distant LOD regions leave SkirtSides=0.
+		EmitSkirts(data, voxelSize, palette, positions, normals, uvs);
 
 		// One flat-shaded surface per material (mirrors MeshBuilder).
 		var mesh = new ArrayMesh();
@@ -222,8 +262,169 @@ public static class LodChunkGenerator
 	private static Vector3 NodePosition(LodData data, float voxelSize, int i, int j)
 	{
 		int nodes = data.Res + 1;
-		int h = data.Heights[i + nodes * j];
+		int idx = i + nodes * j;
+		// Defensive: a malformed LodData (e.g. Heights resized out from under a
+		// concurrent build) must never crash the engine with an out-of-bounds
+		// read. Clamp to the last valid node; the worst case is a slightly wrong
+		// height at one corner, not an exception that kills the whole frame.
+		if (data.Heights == null || idx < 0 || idx >= data.Heights.Length)
+		{
+			idx = System.Math.Max(0, data.Heights != null ? data.Heights.Length - 1 : 0);
+		}
+		int h = data.Heights[idx];
 		return new Vector3(data.Wx0 + i * data.Cell, h, data.Wz0 + j * data.Cell) * voxelSize;
+	}
+
+	/// <summary>
+	/// Safe per-node material read: returns the material at grid node (i, j),
+	/// or 0 (air → the triangle is dropped) if the index is out of bounds. A
+	/// malformed LodData must never crash the engine; worst case is a skirt
+	/// wall rendered without its edge material.
+	/// </summary>
+	private static byte SafeMaterial(LodData data, int i, int j)
+	{
+		int nodes = data.Res + 1;
+		int idx = i + nodes * j;
+		if (data.Materials == null || idx < 0 || idx >= data.Materials.Length)
+		{
+			return 0;
+		}
+		return data.Materials[idx];
+	}
+
+	/// <summary>
+	/// Emits one skirt-wall triangle with self-correcting winding. The corner
+	/// order (a, b, c) is given; if (b-a)x(c-a) points AWAY from the region
+	/// interior (inX,inZ), b and c are swapped so the cross points INTO the
+	/// region. EmitTriangle then negates the cross to store the OUTWARD normal
+	/// (toward the full-res neighbour / finer LOD), making the wall front-facing
+	/// to anyone looking at the seam from outside the region.
+	/// </summary>
+	private static void EmitSkirtTriangle(
+		List<Vector3>[] positions, List<Vector3>[] normals, List<Vector2>[] uvs,
+		Vector3 a, Vector3 b, Vector3 c,
+		byte ma, byte mb, byte mc,
+		int inX, int inZ,
+		VoxelMaterialPalette palette)
+	{
+		Vector3 cross = (b - a).Cross(c - a);
+		bool flip = (cross.X * inX + cross.Z * inZ) < 0;
+		if (flip)
+		{
+			// Swap b and c (and their materials) so the cross points into the
+			// region.
+			Vector3 tmpV = b;
+			byte tmpM = mb;
+			b = c;
+			mb = mc;
+			c = tmpV;
+			mc = tmpM;
+		}
+		EmitTriangle(positions, normals, uvs, a, b, c, ma, mb, mc, palette);
+	}
+
+	/// <summary>
+	/// Emits the flat vertical skirt walls for every side set in
+	/// <see cref="LodData.SkirtSides"/>. Each side's wall is a quad strip along
+	/// that boundary edge: for every pair of adjacent edge nodes it drops two
+	/// triangles from the surface heights down to <see cref="LodData.SkirtBaseHeight"/>.
+	/// The wall's normal points OUTWARD from the region (toward the
+	/// full-resolution neighbour), so it reads as a flat cliff face, and its
+	/// material is the surface material of the edge it hangs from.
+	///
+	/// Winding: Godot front faces are clockwise, i.e. (b-a)x(c-a) points INTO
+	/// the solid — the same convention the top-surface triangles use — so the
+	/// wall is visible from outside (the side facing the neighbour) and
+	/// back-face-culled from inside the region.
+	/// </summary>
+	private static void EmitSkirts(
+		LodData data, float voxelSize, VoxelMaterialPalette palette,
+		List<Vector3>[] positions, List<Vector3>[] normals, List<Vector2>[] uvs)
+	{
+		int sides = data.SkirtSides;
+		if (sides == 0)
+		{
+			return;
+		}
+		int nodes = data.Res + 1;
+		int baseY = data.SkirtBaseHeight;
+
+		for (int side = 0; side < 4; side++)
+		{
+			if ((sides & (1 << side)) == 0)
+			{
+				continue;
+			}
+
+			// (fx, fz) fixes the boundary edge; (sx, sz) walks along it (always
+			// in the +index direction so i0/j0 start at 0 and i1/j1 stay in
+			// bounds), and (inX, inZ) is the unit direction pointing INTO the
+			// region (the solid) from this edge — the cross product of each wall
+			// triangle must point this way so EmitTriangle stores the OUTWARD
+			// normal (toward the full-res neighbour).
+			//   side 0: -X edge (fx=0,    walk +Z)  into region = +X
+			//   side 1: +X edge (fx=res,  walk +Z)  into region = -X
+			//   side 2: -Z edge (fz=0,    walk +X)  into region = +Z
+			//   side 3: +Z edge (fz=res,  walk +X)  into region = -Z
+			int fx, fz, sx, sz, inX, inZ;
+			switch (side)
+			{
+				case 0: fx = 0; fz = 0; sx = 0; sz = 1; inX = 1; inZ = 0; break;
+				case 1: fx = data.Res; fz = 0; sx = 0; sz = 1; inX = -1; inZ = 0; break;
+				case 2: fx = 0; fz = 0; sx = 1; sz = 0; inX = 0; inZ = 1; break;
+				default: fx = 0; fz = data.Res; sx = 1; sz = 0; inX = 0; inZ = -1; break;
+			}
+
+			for (int k = 0; k < data.Res; k++)
+			{
+				int i0 = fx + k * sx;
+				int j0 = fz + k * sz;
+				int i1 = fx + (k + 1) * sx;
+				int j1 = fz + (k + 1) * sz;
+
+				// Defensive: a malformed LodData (Res inconsistent with the
+				// Heights/Materials arrays) must never index out of bounds and
+				// crash the engine. If the edge node is out of the grid, skip
+				// this skirt quad (the top surface already validated the data,
+				// so this only fires if the data is genuinely broken).
+				if (i0 < 0 || j0 < 0 || i0 >= nodes || j0 >= nodes
+					|| i1 < 0 || j1 < 0 || i1 >= nodes || j1 >= nodes)
+				{
+					continue;
+				}
+
+				Vector3 top0 = NodePosition(data, voxelSize, i0, j0);
+				Vector3 top1 = NodePosition(data, voxelSize, i1, j1);
+				Vector3 bot0 = new Vector3(top0.X, baseY, top0.Z) * voxelSize;
+				Vector3 bot1 = new Vector3(top1.X, baseY, top1.Z) * voxelSize;
+
+				// The wall's material is the surface material of the edge it
+				// hangs from (majority vote of the two edge nodes). Safe access
+				// — out-of-bounds returns 0 (air) so the triangle is dropped.
+				byte ma = SafeMaterial(data, i0, j0);
+				byte mb = SafeMaterial(data, i1, j1);
+
+				// Emit the quad as two triangles sharing the top0→bot1 diagonal.
+				// The quad's corners are top0, top1 (top edge) and bot0, bot1
+				// (bottom edge), where bot0 is below top0 and bot1 is below top1.
+				// Splitting along top0→bot1 gives:
+				//   tri A: top0, top1, bot1
+				//   tri B: top0, bot1, bot0
+				// which share the top0→bot1 edge and cover the full quad.
+				//
+				// Winding: Godot front faces are CLOCKWISE, i.e. (b-a)x(c-a)
+				// points INTO the solid. For a skirt wall, the "solid" is the
+				// region interior (direction inX,inZ). So we need
+				// (b-a)x(c-a) to point toward (inX,inZ). We compute the cross
+				// for each triangle and flip the corner order if it points the
+				// wrong way. EmitTriangle negates the cross to store the outward
+				// normal.
+				EmitSkirtTriangle(positions, normals, uvs,
+					top0, top1, bot1, ma, mb, mb, inX, inZ, palette);
+				EmitSkirtTriangle(positions, normals, uvs,
+					top0, bot1, bot0, ma, mb, ma, inX, inZ, palette);
+			}
+		}
 	}
 
 	/// <summary>

@@ -1050,6 +1050,7 @@ public partial class VoxelWorld : Node3D
 	// The chunk the player spawns in (Chebyshev reference for the hive spawn
 	// exclusion). Computed from _spawnAnchor on first use; -1,-1 until set.
 	private Vector2I _spawnChunk = new(-1, -1);
+	private readonly System.Collections.Generic.HashSet<Vector2I> _malformedLod1Logged = new(); // one-time diagnostic
 
 	/// <summary>
 	/// Every voxel the player has edited this session, keyed by world voxel
@@ -2047,6 +2048,22 @@ public partial class VoxelWorld : Node3D
 			}
 		}
 
+		// A full-res chunk that just became built (data + mesh + collision)
+		// changes the skirt state of any LOD-1 placeholder neighbour AND any
+		// level-1 distant LOD region: they need a flat side facing the
+		// newly-built chunk. Similarly, a finer LOD region becoming built
+		// changes the skirt state of the coarser regions around it.
+		//
+		// DEFERRED: the refresh is scheduled via CallDeferred so it fires AFTER
+		// the deferred ApplyBuildResult calls (which are what flip a neighbour's
+		// NeedsMesh/CollisionReady flags). If the refresh ran synchronously here,
+		// it would see the neighbour as not-ready (the build is still in flight)
+		// and skip the skirt — the "sometimes, in some directions" bug. By
+		// deferring, the refresh runs after the neighbour's flags have flipped,
+		// so it always catches the transition. Idempotent and cheap: it only
+		// re-meshes a region whose neighbour mask actually changed.
+		CallDeferred(nameof(RefreshLodSkirtsDeferred));
+
 		// Item drops from edited voxels only spawn once the chunk update for
 		// the edited chunk has finished (see PendingDrops) — otherwise the drop
 		// would visibly rest in mid-air until the surface re-meshes.
@@ -2465,6 +2482,10 @@ public partial class VoxelWorld : Node3D
 		{
 			FreeAllLod();
 		}
+		// NOTE: RefreshLod1PlaceholderSkirts() is called from the full-res mesh
+		// budget loop (which runs every frame, LOD on or off) — a full-res chunk
+		// becoming ready there is the only thing that changes a placeholder's
+		// skirt mask, so refreshing in that loop is the single correct spot.
 	}
 
 	// ------------------------------------------------------------------
@@ -5174,6 +5195,29 @@ public partial class VoxelWorld : Node3D
 	/// The spawn chunk is excluded by the CALLER (it generates full-res
 	/// immediately; the player needs it right away).
 	/// </summary>
+	/// <summary>
+	/// Builds (or rebuilds) the temporary LOD-1 placeholder mesh for a full-res
+	/// chunk and attaches it to the chunk's mesh instance, so the player sees
+	/// terrain immediately while the chunk's real voxels are still generating.
+	///
+	/// The placeholder is a coarse top-surface heightfield of exactly this one
+	/// chunk's XZ area (Res*Cell == ChunkSizeXZ, so adjacent placeholders meet
+	/// edge-to-edge). It reuses the same deterministic terrain functions the
+	/// full-res chunks and far LOD use (SurfaceHeight + tree silhouettes), so
+	/// the swap to the full-res mesh is seamless (no height step).
+	///
+	/// Flat skirts: for each of the chunk's four sides whose orthogonal
+	/// neighbour is a FULL-RES chunk already built (data + mesh + collision),
+	/// the placeholder gets a flat vertical wall on that side (see
+	/// <see cref="LodData.SkirtSides"/>), so the coarse surface closes the seam
+	/// against the neighbour's solid mesh instead of leaving an open gap down
+	/// to the void. Sides facing other placeholders (or unloaded chunks) stay
+	/// open — the neighbouring heightfield continues the surface there.
+	///
+	/// Called from <see cref="StartGeneration"/> (initial attach, spawn chunk
+	/// excluded by the caller) and from <see cref="RefreshLod1PlaceholderSkirts"/>
+	/// (rebuild when a neighbour becomes full-res).
+	/// </summary>
 	private void AttachLod1Placeholder(Vector2I coord, VoxelChunk chunk)
 	{
 		if (!LodEnabled)
@@ -5181,14 +5225,25 @@ public partial class VoxelWorld : Node3D
 			return;
 		}
 
-		// A level-1 LOD region is 2×2 base chunks, but here we want the placeholder
-		// to cover EXACTLY this one chunk's area. We call the LOD generator with a
-		// "region" that is this chunk's XZ bounds: treat it as a level-1 region
-		// whose world min corner is the chunk's min corner and whose size is
-		// ChunkSizeXZ. The generator's regionSize = chunkSizeXZ * (1 << level), so
-		// to get regionSize == ChunkSizeXZ we'd need level 0 — but the generator
-		// requires level >= 1. Instead we build the heightfield DIRECTLY here for
-		// this chunk's area (same sampling as the generator, but sized to one chunk).
+		var data = SampleLod1PlaceholderData(coord);
+
+		// Detect which sides touch an already-built full-res chunk and skirt them.
+		data.SkirtSides = Lod1PlaceholderSkirtSides(coord);
+		data.SkirtBaseHeight = 0; // extend the wall to the world floor
+
+		var mesh = LodChunkGenerator.BuildMesh(data, VoxelSize, Palette);
+		chunk.SetLod1Placeholder(mesh, data.SkirtSides);
+	}
+
+	/// <summary>
+	/// Samples the coarse heightfield for ONE full-res chunk's XZ area into a
+	/// fresh <see cref="LodData"/> (heights + per-node materials, no skirts).
+	/// The grid spans the full chunk width (Res*Cell == ChunkSizeXZ) so adjacent
+	/// placeholders share boundary nodes. Pure and cheap (a handful of nodes),
+	/// so it runs synchronously on the main thread.
+	/// </summary>
+	private LodData SampleLod1PlaceholderData(Vector2I coord)
+	{
 		int cs = ChunkSizeXZ;
 		int wx0 = coord.X * cs;
 		int wz0 = coord.Y * cs;
@@ -5245,9 +5300,157 @@ public partial class VoxelWorld : Node3D
 				data.Materials[i + n * j] = mat;
 			}
 		}
+		return data;
+	}
 
-		var mesh = LodChunkGenerator.BuildMesh(data, VoxelSize, Palette);
-		chunk.SetLod1Placeholder(mesh);
+	/// <summary>
+	/// Bitmask of the four sides of the full-res chunk at <paramref name="coord"/>
+	/// whose orthogonal neighbour is an already-BUILT full-res chunk (data +
+	/// mesh + collision ready, per <see cref="IsFullResChunkReadyAt"/>). bit 0
+	/// = -X, bit 1 = +X, bit 2 = -Z, bit 3 = +Z. A set bit means the LOD-1
+	/// placeholder should close that side with a flat vertical skirt.
+	/// </summary>
+	private int Lod1PlaceholderSkirtSides(Vector2I coord)
+	{
+		int mask = 0;
+		if (IsFullResChunkReadyAt(coord + new Vector2I(-1, 0))) mask |= 1; // -X
+		if (IsFullResChunkReadyAt(coord + new Vector2I(+1, 0))) mask |= 2; // +X
+		if (IsFullResChunkReadyAt(coord + new Vector2I(0, -1))) mask |= 4; // -Z
+		if (IsFullResChunkReadyAt(coord + new Vector2I(0, +1))) mask |= 8; // +Z
+		return mask;
+	}
+
+	/// <summary>
+	/// True when the full-res chunk at <paramref name="coord"/> is loaded and
+	/// fully built (data + mesh + collision). The chunk-coordinate form of
+	/// <see cref="IsFullResChunkReady"/> (which takes a world position).
+	/// </summary>
+	private bool IsFullResChunkReadyAt(Vector2I coord)
+	{
+		return _chunks.TryGetValue(coord, out VoxelChunk c)
+			&& c.DataReady && !c.NeedsMesh && !c.MeshBuildInFlight && c.CollisionReady;
+	}
+
+	/// <summary>
+	/// Renders a skirt bitmask (bit 0=-X, 1=+X, 2=-Z, 3=+Z) as a short label
+	/// like "X+Z-" for the loddebug report. "none" when the mask is 0.
+	/// </summary>
+	private static string SkirtMaskLabel(int mask)
+	{
+		if (mask == 0)
+		{
+			return "none";
+		}
+		var sb = new System.Text.StringBuilder();
+		if ((mask & 1) != 0) sb.Append('-').Append('X');
+		if ((mask & 2) != 0) sb.Append('+').Append('X');
+		if ((mask & 4) != 0) sb.Append('-').Append('Z');
+		if ((mask & 8) != 0) sb.Append('+').Append('Z');
+		return sb.ToString();
+	}
+
+	/// <summary>
+	/// Deferred wrapper: runs <see cref="RefreshLod1PlaceholderSkirts"/> and
+	/// <see cref="RefreshLodSkirts"/> after the deferred ApplyBuildResult calls
+	/// have fired (which is when a neighbour's NeedsMesh/CollisionReady flags
+	/// flip). Scheduled via CallDeferred from the budget loop so the refresh
+	/// always sees the updated flags.
+	/// </summary>
+	private void RefreshLodSkirtsDeferred()
+	{
+		RefreshLod1PlaceholderSkirts();
+		RefreshLodSkirts();
+	}
+
+	/// <summary>
+	/// Re-builds the skirt of every distant LOD region whose set of finer-level
+	/// neighbours changed since it was last built. Called (via
+	/// <see cref="RefreshLodSkirtsDeferred"/>) after the deferred ApplyBuildResult
+	/// calls have fired, so it always sees the updated neighbour flags. As finer
+	/// regions become built (or full-res chunks become ready, for level-1
+	/// regions), the coarser region gains a flat skirt on the newly-built side
+	/// so the seam stays closed. Cheap: it is a dictionary scan of the (few
+	/// hundred) LOD regions, and the expensive re-mesh only happens when a
+	/// neighbour's readiness flips.
+	/// </summary>
+	private void RefreshLodSkirts()
+	{
+		if (!LodEnabled)
+		{
+			return;
+		}
+		// Enumerate a copy: a region can be freed (FreeLod removes it from
+		// _lodChunks) by the cleanup pass in the same _Process frame.
+		foreach (KeyValuePair<(int, Vector2I), LodChunk> kv in _lodChunks.ToList())
+		{
+			LodChunk lod = kv.Value;
+			if (!GodotObject.IsInstanceValid(lod) || !lod.IsInsideTree())
+			{
+				continue;
+			}
+			int newSides = LodRegionSkirtSides(kv.Key.Item1, kv.Key.Item2);
+			if (newSides != lod.SkirtSides)
+			{
+				lod.RebuildSkirts(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, newSides);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Rebuilds the LOD-1 placeholder skirt of every showing placeholder whose
+	/// set of full-res neighbours changed since it was last built. Called every
+	/// frame from the full-res mesh budget loop in <see cref="_Process"/> (NOT
+	/// the LOD branch): full-res chunks mesh regardless of whether the distant
+	/// LOD is enabled, and a full-res chunk becoming ready is the only event
+	/// that changes a placeholder's skirt mask. As neighbours finish building
+	/// around a still-placeholder chunk, it gains a flat skirt on the newly-built
+	/// side so the seam stays closed. Cheap: it is a dictionary scan of the (few
+	/// dozen) showing placeholders, and the expensive re-mesh only happens when
+	/// a neighbour's readiness flips.
+	/// </summary>
+	private void RefreshLod1PlaceholderSkirts()
+	{
+		// Enumerate a copy: a chunk can be freed (FreeChunk removes it from
+		// _chunks) by the unload pass in the same _Process frame, and mutating
+		// the dictionary mid-iteration would throw. A stale (already-freed)
+		// chunk is skipped — its Lod1PlaceholderShowing is moot once freed.
+		foreach (KeyValuePair<Vector2I, VoxelChunk> kv in _chunks.ToList())
+		{
+			VoxelChunk chunk = kv.Value;
+			if (!GodotObject.IsInstanceValid(chunk) || !chunk.Lod1PlaceholderShowing)
+			{
+				continue;
+			}
+			int sides = Lod1PlaceholderSkirtSides(kv.Key);
+			if (sides != chunk.Lod1SkirtSides)
+			{
+				// DIAGNOSTIC (temporary): log every skirt change so we can
+				// confirm the refresh is detecting the full-res transitions.
+				GD.PushWarning($"[VoxelWorld] LOD1 skirt change chunk {kv.Key}: {SkirtMaskLabel(chunk.Lod1SkirtSides)} -> {SkirtMaskLabel(sides)}");
+				var data = SampleLod1PlaceholderData(kv.Key);
+				data.SkirtSides = sides;
+				data.SkirtBaseHeight = 0;
+				// DIAGNOSTIC (temporary): if the sampled LodData is malformed,
+				// log it ONCE per chunk so we can find the root cause of the
+				// IndexOutOfRange spam. A well-formed chunk has Res*Cell ==
+				// ChunkSizeXZ and Heights/Materials of length (Res+1)².
+				int n = data.Res + 1;
+				if (data.Res < 1 || data.Res * data.Cell != ChunkSizeXZ
+					|| data.Heights == null || data.Heights.Length != n * n
+					|| data.Materials == null || data.Materials.Length != n * n)
+				{
+					if (_malformedLod1Logged.Add(kv.Key))
+					{
+						GD.PushError($"[VoxelWorld] Malformed Lod1 placeholder for chunk {kv.Key}: " +
+							$"Res={data.Res} Cell={data.Cell} ChunkSizeXZ={ChunkSizeXZ} " +
+							$"Res*Cell={data.Res * data.Cell} HeightsLen={data.Heights?.Length} " +
+							$"MaterialsLen={data.Materials?.Length} expected={(int)(n * n)} " +
+							$"Wx0={data.Wx0} Wz0={data.Wz0} SkirtSides={sides}");
+					}
+				}
+				chunk.SetLod1Placeholder(LodChunkGenerator.BuildMesh(data, VoxelSize, Palette), sides);
+			}
+		}
 	}
 
 	/// <summary>
@@ -5263,21 +5466,33 @@ public partial class VoxelWorld : Node3D
 		Vector3 playerPos = player != null ? player.GlobalPosition : Vector3.Zero;
 		Vector2I playerChunk = ChunkCoordOf(playerPos);
 
-		int fullResLoaded = 0, fullResReady = 0, phShowing = 0, phAttached = 0;
+		int fullResLoaded = 0, fullResReady = 0, phShowing = 0, phAttached = 0, phSkirted = 0;
+		int phNodeVisible = 0, phNodeMeshNull = 0; // live node state (ground truth)
 		foreach (VoxelChunk c in _chunks.Values)
 		{
 			fullResLoaded++;
 			bool ready = c.DataReady && !c.NeedsMesh && !c.MeshBuildInFlight && c.CollisionReady;
 			if (ready) fullResReady++;
 			if (c.Lod1PlaceholderAttached) phAttached++;
-			if (c.Lod1PlaceholderShowing) phShowing++;
+			if (c.Lod1PlaceholderShowing)
+			{
+				phShowing++;
+				if (c.Lod1SkirtSides != 0) phSkirted++;
+				var node = c.Lod1PlaceholderInstance;
+				if (node != null && node.Visible) phNodeVisible++;
+				else if (node != null && node.Mesh == null) phNodeMeshNull++;
+			}
 		}
 
 		int farTotal = _lodChunks.Count;
-		int farVisible = 0, farBuilt = 0;
+		int farVisible = 0, farBuilt = 0, farVisibleButUnbuilt = 0;
 		foreach (LodChunk lod in _lodChunks.Values)
 		{
-			if (lod.Visible) farVisible++;
+			if (lod.Visible)
+			{
+				farVisible++;
+				if (!lod.Built) farVisibleButUnbuilt++; // a HOLE: visible with no mesh
+			}
 			if (lod.Built) farBuilt++;
 		}
 
@@ -5286,8 +5501,9 @@ public partial class VoxelWorld : Node3D
 		sb.Append($"LodEnabled={LodEnabled}  RenderDistance={RenderDistanceChunks}  LodRes={LodMeshResolution}\n");
 		sb.Append($"Player pos={playerPos}  playerChunk={playerChunk}\n");
 		sb.Append($"FullRes: loaded={fullResLoaded} ready={fullResReady}\n");
-		sb.Append($"LOD1 placeholders: attached={phAttached} showing={phShowing} (these are chunks still showing their LOD-1 mesh)\n");
-		sb.Append($"FarLOD:   total={farTotal} visible={farVisible} built={farBuilt}\n");
+		sb.Append($"LOD1 placeholders: attached={phAttached} showing={phShowing} skirted={phSkirted} (skirted = has a flat side facing a full-res neighbour)\n");
+		sb.Append($"LOD1 node state: visible={phNodeVisible} meshNull={phNodeMeshNull} (of the {phShowing} showing; visible should equal showing, meshNull should be 0)\n");
+		sb.Append($"FarLOD:   total={farTotal} visible={farVisible} built={farBuilt} visibleButUnbuilt={farVisibleButUnbuilt} (visibleButUnbuilt is a HOLE count; should be 0)\n");
 
 		// A sample of chunks near the player: their placeholder + readiness state.
 		sb.Append("--- Chunks near player (3x3) ---\n");
@@ -5301,7 +5517,10 @@ public partial class VoxelWorld : Node3D
 					string st = c.Lod1PlaceholderShowing ? "LOD1-SHOWING"
 						: (c.DataReady && !c.NeedsMesh && !c.MeshBuildInFlight && c.CollisionReady ? "FULL-READY"
 						: (c.DataReady ? "full-meshing" : "generating"));
-					sb.Append($"  {cc} => {st} (phAttached={c.Lod1PlaceholderAttached})\n");
+					string skirt = c.Lod1PlaceholderShowing
+						? $" skirt={SkirtMaskLabel(c.Lod1SkirtSides)}"
+						: "";
+					sb.Append($"  {cc} => {st} (phAttached={c.Lod1PlaceholderAttached}{skirt})\n");
 				}
 				else
 				{
@@ -5554,7 +5773,12 @@ public partial class VoxelWorld : Node3D
 				{
 					continue;
 				}
-				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks);
+				// Compute the skirt mask: sides that border a finer LOD level
+				// (or, for level 1, the full-res square) get a flat skirt to
+				// close the seam between the coarser heightfield and the finer
+				// detail.
+				int skirt = LodRegionSkirtSides(lod.Level, lod.Coord);
+				lod.Rebuild(ChunkSizeXZ, _config, Palette, VoxelSize, LodMeshResolution, _chunks, skirt);
 				inFlight++;
 			}
 		}
@@ -5626,9 +5850,19 @@ public partial class VoxelWorld : Node3D
 			// to its current value — would fire the engine's visibility-change
 			// path (and, with multi-bounce occlusion, a shadow re-evaluation)
 			// thousands of times per second for no visual change.
-			if (lod.Visible != shouldRender)
+			//
+			// CRITICAL: a region must NOT be visible until it has a built mesh.
+			// A MeshInstance3D with a null mesh renders NOTHING, so a visible
+			// but unbuilt region is a HOLE — you see straight through the far
+			// LOD to the void. The build budget (MaxConcurrentLodBuilds) fills
+			// the ring slowly, so at load-in most of the far LOD is unbuilt;
+			// showing those would be thousands of holes. Gate visibility on
+			// `Built`: the region appears the frame its mesh lands (ApplyBuildResult
+			// flips Built), which is exactly when it has something to show.
+			bool shouldBeVisible = shouldRender && lod.Built;
+			if (lod.Visible != shouldBeVisible)
 			{
-				lod.Visible = shouldRender;
+				lod.Visible = shouldBeVisible;
 			}
 			if (shouldRender && !lod.Built && !lod.BuildInFlight)
 			{
@@ -5639,7 +5873,11 @@ public partial class VoxelWorld : Node3D
 		{
 			lod = new LodChunk { Name = $"Lod_{level}_{rc.X}_{rc.Y}" };
 			lod.Initialize(level, rc);
-			lod.Visible = true;
+			// Start HIDDEN: the region has no mesh yet (Initialize creates an
+			// empty MeshInstance3D). It becomes visible the frame its build
+			// completes (ApplyBuildResult flips Built, and the per-frame pass
+			// above then shows it). Showing it now would be a hole.
+			lod.Visible = false;
 			_lodRoot.AddChild(lod);
 			_lodChunks[(level, rc)] = lod;
 			if (!lod.Built && !lod.BuildInFlight)
@@ -5647,6 +5885,58 @@ public partial class VoxelWorld : Node3D
 				buildCandidates.Add((lod, d2));
 			}
 		}
+	}
+
+	/// <summary>
+	/// Bitmask of the four sides of a level-<paramref name="level"/> distant LOD
+	/// region that border a FINER level (level-1) region — those sides get a flat
+	/// skirt to close the seam between the coarser heightfield and the finer
+	/// detail. For level-1 regions, the "finer" neighbour is the full-res square
+	/// (a side borders a full-res chunk if that chunk is loaded + ready).
+	///
+	/// A level-k region at coord <c>rc</c> covers base chunks
+	/// <c>[rc.X*2^k, (rc.X+1)*2^k) × [rc.Y*2^k, (rc.Y+1)*2^k)</c>. Its four sides
+	/// border:
+	///   -X side: level-(k-1) region at (rc.X*2-1, rc.Y*2 .. rc.Y*2+1)
+	///   +X side: level-(k-1) region at (rc.X*2+1, rc.Y*2 .. rc.Y*2+1)
+	///   -Z side: level-(k-1) region at (rc.X*2 .. rc.X*2+1, rc.Y*2-1)
+	///   +Z side: level-(k-1) region at (rc.X*2 .. rc.X*2+1, rc.Y*2+1)
+	///
+	/// A side gets a skirt bit if the finer region on that side exists AND is
+	/// built (or, for level 1, if the full-res chunk on that side is ready).
+	/// </summary>
+	private int LodRegionSkirtSides(int level, Vector2I rc)
+	{
+		int mask = 0;
+		if (level == 1)
+		{
+			// Level-1 regions border the full-res square. A side gets a skirt if
+			// the full-res chunk(s) on that side are loaded + ready.
+			int cx0 = rc.X * 2;
+			int cz0 = rc.Y * 2;
+			if (IsFullResChunkReadyAt(new Vector2I(cx0 - 1, cz0)) || IsFullResChunkReadyAt(new Vector2I(cx0 - 1, cz0 + 1))) mask |= 1; // -X
+			if (IsFullResChunkReadyAt(new Vector2I(cx0 + 1, cz0)) || IsFullResChunkReadyAt(new Vector2I(cx0 + 1, cz0 + 1))) mask |= 2; // +X
+			if (IsFullResChunkReadyAt(new Vector2I(cx0, cz0 - 1)) || IsFullResChunkReadyAt(new Vector2I(cx0 + 1, cz0 - 1))) mask |= 4; // -Z
+			if (IsFullResChunkReadyAt(new Vector2I(cx0, cz0 + 1)) || IsFullResChunkReadyAt(new Vector2I(cx0 + 1, cz0 + 1))) mask |= 8; // +Z
+		}
+		else
+		{
+			// Level-k (k>=2) regions border level-(k-1) regions.
+			int childLevel = level - 1;
+			int cx0 = rc.X * 2;
+			int cz0 = rc.Y * 2;
+			if (IsLodBuilt(childLevel, new Vector2I(cx0 - 1, cz0)) || IsLodBuilt(childLevel, new Vector2I(cx0 - 1, cz0 + 1))) mask |= 1; // -X
+			if (IsLodBuilt(childLevel, new Vector2I(cx0 + 1, cz0)) || IsLodBuilt(childLevel, new Vector2I(cx0 + 1, cz0 + 1))) mask |= 2; // +X
+			if (IsLodBuilt(childLevel, new Vector2I(cx0, cz0 - 1)) || IsLodBuilt(childLevel, new Vector2I(cx0 + 1, cz0 - 1))) mask |= 4; // -Z
+			if (IsLodBuilt(childLevel, new Vector2I(cx0, cz0 + 1)) || IsLodBuilt(childLevel, new Vector2I(cx0 + 1, cz0 + 1))) mask |= 8; // +Z
+		}
+		return mask;
+	}
+
+	/// <summary>True when the level-<paramref name="level"/> LOD region at <paramref name="rc"/> exists and is built.</summary>
+	private bool IsLodBuilt(int level, Vector2I rc)
+	{
+		return _lodChunks.TryGetValue((level, rc), out LodChunk lod) && lod.Built;
 	}
 
 	/// <summary>

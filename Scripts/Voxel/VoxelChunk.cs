@@ -36,12 +36,20 @@ public partial class VoxelChunk : Node3D
 	public bool DataReady { get; set; } = false;
 
 	private MeshInstance3D _meshInstance;
+	private MeshInstance3D _lod1PlaceholderInstance; // dedicated node for the LOD-1 placeholder (see SetLod1Placeholder)
 	private CollisionShape3D _shape;
 	private ConcavePolygonShape3D _builtShape;
 	private bool _collisionReady;
 
 	/// <summary>The chunk's visual mesh instance (exposed for rendering settings like wireframe).</summary>
 	public MeshInstance3D MeshInstance => _meshInstance;
+
+	/// <summary>
+	/// The dedicated LOD-1 placeholder mesh instance (its own node, a sibling of
+	/// <see cref="MeshInstance"/>), exposed for diagnostics so the loddebug
+	/// report can confirm the placeholder is actually visible and has a mesh.
+	/// </summary>
+	public MeshInstance3D Lod1PlaceholderInstance => _lod1PlaceholderInstance;
 
 	/// <summary>
 	/// True while this chunk is showing its temporary LOD-1 placeholder mesh
@@ -59,29 +67,47 @@ public partial class VoxelChunk : Node3D
 	public bool Lod1PlaceholderAttached { get; private set; } = false;
 
 	/// <summary>
+	/// The skirt bitmask the currently-attached LOD-1 placeholder was built
+	/// with (bit per side facing a full-res chunk, see
+	/// <see cref="LodData.SkirtSides"/>). The world compares this against the
+	/// live neighbour state to decide whether the placeholder needs a re-mesh.
+	/// </summary>
+	public int Lod1SkirtSides { get; internal set; } = 0;
+
+	/// <summary>
 	/// Replaces this chunk's current mesh with the given LOD-1 placeholder
 	/// heightfield and marks it as showing. Called by the world right after the
 	/// chunk is queued for generation, so the player sees terrain immediately
 	/// (the real full-res mesh replaces it when generation + meshing finish).
 	/// </summary>
-	public void SetLod1Placeholder(ArrayMesh mesh)
+	public void SetLod1Placeholder(ArrayMesh mesh, int skirtSides = 0)
 	{
-		if (_meshInstance == null || mesh == null)
+		if (_lod1PlaceholderInstance == null || mesh == null)
 		{
 			return;
 		}
-		_meshInstance.Mesh = mesh;
+		// The placeholder lives on its OWN MeshInstance3D (a sibling of the real
+		// _meshInstance), so it is not clobbered when the sub-cell full-res build
+		// hides _meshInstance. Showing it is a plain visibility flip + mesh swap.
+		_lod1PlaceholderInstance.Mesh = mesh;
+		_lod1PlaceholderInstance.Visible = true;
 		Lod1PlaceholderShowing = true;
 		Lod1PlaceholderAttached = true;
+		Lod1SkirtSides = skirtSides;
 	}
 
 	/// <summary>
 	/// Clears the LOD-1 placeholder state (the real full-res mesh is now
-	/// showing). Called when the chunk's real mesh build completes.
+	/// showing). Hides the dedicated placeholder node (the real mesh — whole-chunk
+	/// or sub-cell — takes over). Called when the chunk's real mesh build completes.
 	/// </summary>
 	public void ClearLod1Placeholder()
 	{
 		Lod1PlaceholderShowing = false;
+		if (_lod1PlaceholderInstance != null)
+		{
+			_lod1PlaceholderInstance.Visible = false;
+		}
 	}
 
 	/// <summary>The last collision-enabled state actually applied to the shape.</summary>
@@ -390,6 +416,20 @@ public partial class VoxelChunk : Node3D
 		// (maps to the `layer` scene property). Layer 2 = 1 << 1.
 		_meshInstance.Layers = VoxelWorld.TerrainRenderLayer;
 		AddChild(_meshInstance);
+
+		// DEDICATED node for the temporary LOD-1 placeholder mesh. It is a
+		// sibling of _meshInstance (NOT the same node) because in sub-cell mode
+		// the real full-res build HIDEs _meshInstance (sets its Mesh to null and
+		// renders via the sub-cell child nodes). If the placeholder lived on
+		// _meshInstance it would vanish the moment the chunk went full-res. This
+		// node is shown only while the placeholder is showing (see
+		// SetLod1Placeholder / ClearLod1Placeholder) and is independent of the
+		// real mesh's visibility. Same render layer as the terrain so it is
+		// lit/shadowed identically to the full-res chunks.
+		_lod1PlaceholderInstance = new MeshInstance3D { Name = "Lod1Placeholder" };
+		_lod1PlaceholderInstance.Layers = VoxelWorld.TerrainRenderLayer;
+		_lod1PlaceholderInstance.Visible = false;
+		AddChild(_lod1PlaceholderInstance);
 
 		var body = new StaticBody3D { Name = "Collision" };
 		AddChild(body);

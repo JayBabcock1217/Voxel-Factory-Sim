@@ -35,6 +35,7 @@ public partial class LodChunk : Node3D
 	private MeshInstance3D _meshInstance;
 	private Task _meshBuild;
 	private ArrayMesh _pendingMesh;
+	private int _pendingSkirtSides;
 
 	/// <summary>
 	/// Bumped by <see cref="Invalidate"/>. A build snapshots it on start and
@@ -85,9 +86,17 @@ public partial class LodChunk : Node3D
 	/// solid-base check so LOD canopies match what full-res chunks actually
 	/// plant.
 	/// </param>
+	/// <summary>
+	/// The skirt bitmask this region was last built with (bit per side facing a
+	/// finer LOD level or a full-res chunk). The world compares this against the
+	/// live neighbour state to decide whether the region needs a re-mesh (see
+	/// <see cref="VoxelWorld.RefreshLodSkirts"/>).
+	/// </summary>
+	public int SkirtSides { get; private set; } = 0;
+
 	public void Rebuild(
 		int chunkSizeXZ, GenConfig cfg, VoxelMaterialPalette palette, float voxelSize, int lodResolution,
-		Dictionary<Vector2I, VoxelChunk> chunks = null)
+		Dictionary<Vector2I, VoxelChunk> chunks = null, int skirtSides = 0)
 	{
 		if (!NeedsMesh || _meshBuild != null)
 		{
@@ -106,12 +115,15 @@ public partial class LodChunk : Node3D
 			}
 
 			var data = LodChunkGenerator.GenerateData(level, coord, chunkSizeXZ, lodResolution, cfg, chunks);
+			data.SkirtSides = skirtSides;
+			data.SkirtBaseHeight = 0;
 			var mesh = LodChunkGenerator.BuildMesh(data, voxelSize, palette);
 
 			// Written here, read only in ApplyBuildResult after the task
 			// completes (happens-before via task completion + the deferred
 			// call on a later frame). No lock needed.
 			_pendingMesh = mesh;
+			_pendingSkirtSides = skirtSides;
 			_pendingGeneration = generation;
 
 			// Marshal the cheap engine wiring back to the main thread. The
@@ -126,6 +138,54 @@ public partial class LodChunk : Node3D
 			{
 				// The region was freed between the validity check above and
 				// this call; the mesh is discarded with the node.
+			}
+		});
+	}
+
+	/// <summary>
+	/// Re-builds this region's mesh with a new skirt mask (the same heightfield,
+	/// but with flat skirts on the sides that now border a finer LOD level or a
+	/// full-res chunk). No-ops if the mask is unchanged or a build is in flight.
+	/// Called by <see cref="VoxelWorld.RefreshLodSkirts"/> when a finer region
+	/// becomes built next to this one.
+	/// </summary>
+	public void RebuildSkirts(
+		int chunkSizeXZ, GenConfig cfg, VoxelMaterialPalette palette, float voxelSize, int lodResolution,
+		int newSkirtSides)
+	{
+		if (newSkirtSides == SkirtSides || _meshBuild != null)
+		{
+			return;
+		}
+
+		int level = Level;
+		Vector2I coord = Coord;
+		int generation = _generation;
+		NeedsMesh = true;
+
+		_meshBuild = Task.Run(() =>
+		{
+			if (!GodotObject.IsInstanceValid(this))
+			{
+				return;
+			}
+
+			var data = LodChunkGenerator.GenerateData(level, coord, chunkSizeXZ, lodResolution, cfg, null);
+			data.SkirtSides = newSkirtSides;
+			data.SkirtBaseHeight = 0;
+			var mesh = LodChunkGenerator.BuildMesh(data, voxelSize, palette);
+
+			_pendingMesh = mesh;
+			_pendingSkirtSides = newSkirtSides;
+			_pendingGeneration = generation;
+
+			try
+			{
+				CallDeferred(nameof(ApplyBuildResult));
+			}
+			catch (Exception)
+			{
+				// Region freed; the mesh is discarded with the node.
 			}
 		});
 	}
@@ -167,5 +227,6 @@ public partial class LodChunk : Node3D
 
 		Built = true;
 		NeedsMesh = false;
+		SkirtSides = _pendingSkirtSides;
 	}
 }
