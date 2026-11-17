@@ -1050,7 +1050,6 @@ public partial class VoxelWorld : Node3D
 	// The chunk the player spawns in (Chebyshev reference for the hive spawn
 	// exclusion). Computed from _spawnAnchor on first use; -1,-1 until set.
 	private Vector2I _spawnChunk = new(-1, -1);
-	private readonly System.Collections.Generic.HashSet<Vector2I> _malformedLod1Logged = new(); // one-time diagnostic
 
 	/// <summary>
 	/// Every voxel the player has edited this session, keyed by world voxel
@@ -1794,19 +1793,6 @@ public partial class VoxelWorld : Node3D
 		// have chunks generate ahead of them.
 		EnqueueSpiralRing(livePlayerChunk, RenderDistanceChunks);
 		PumpGenerationQueue(livePlayerChunk);
-
-		// PERIODIC DIAGNOSTIC (one log per second): dump the generation state so
-		// we can see EXACTLY what's happening when chunks stop generating. This
-		// catches the case the stall log misses — the queue being EMPTY (nothing
-		// to pump) rather than the budget being full. Remove once the bug is found.
-		{
-			float now = (float)Time.GetTicksMsec() * 0.001f;
-			if (now - _lastGenDiag >= 1.0f)
-			{
-				_lastGenDiag = now;
-				GD.PushWarning($"[GenDiag] budget={_generatingBudget}/{MaxConcurrentGenerations} queue={_genQueue.Count} loaded={_chunks.Count} renderDist={RenderDistanceChunks} playerChunk={livePlayerChunk} playerPos={playerNode.GlobalPosition}");
-			}
-		}
 
 		// One-time spawn: voxel data is generated asynchronously, but mesh +
 		// collision are only built in Rebuild() under the ChunksPerFrame budget.
@@ -4738,28 +4724,11 @@ public partial class VoxelWorld : Node3D
 	/// and the goal is explicit — nearest-to-player-first — not a fixed spiral,
 	/// so the re-sort is the feature, not a bug.
 	/// </summary>
-	private bool _genStallLogged;
-
-	// Last time the periodic [GenDiag] log fired (for the 1-per-second cadence).
-	private float _lastGenDiag;
-
 	private void PumpGenerationQueue(Vector2I playerChunk)
 	{
 		if (_genQueue.Count == 0)
 		{
-			_genStallLogged = false;
 			return;
-		}
-
-		// STALL DIAGNOSTIC: the queue has work to do, but if the budget is
-		// already at its cap we can't start anything. That means the in-flight
-		// set is full — either 8 chunks are legitimately generating (normal) or
-		// a budget slot leaked (a bug). Log the state ONCE so we can tell the
-		// two apart if generation appears to stop.
-		if (_generatingBudget >= MaxConcurrentGenerations && !_genStallLogged)
-		{
-			_genStallLogged = true;
-			GD.PushWarning($"[VoxelWorld] Gen stall: budget={_generatingBudget}/{MaxConcurrentGenerations}, queue={_genQueue.Count}, loaded={_chunks.Count}, playerChunk={playerChunk}");
 		}
 
 		// Nearest-to-the-player's-current-chunk first, BIASed toward the view
@@ -5424,30 +5393,9 @@ public partial class VoxelWorld : Node3D
 			int sides = Lod1PlaceholderSkirtSides(kv.Key);
 			if (sides != chunk.Lod1SkirtSides)
 			{
-				// DIAGNOSTIC (temporary): log every skirt change so we can
-				// confirm the refresh is detecting the full-res transitions.
-				GD.PushWarning($"[VoxelWorld] LOD1 skirt change chunk {kv.Key}: {SkirtMaskLabel(chunk.Lod1SkirtSides)} -> {SkirtMaskLabel(sides)}");
 				var data = SampleLod1PlaceholderData(kv.Key);
 				data.SkirtSides = sides;
 				data.SkirtBaseHeight = 0;
-				// DIAGNOSTIC (temporary): if the sampled LodData is malformed,
-				// log it ONCE per chunk so we can find the root cause of the
-				// IndexOutOfRange spam. A well-formed chunk has Res*Cell ==
-				// ChunkSizeXZ and Heights/Materials of length (Res+1)².
-				int n = data.Res + 1;
-				if (data.Res < 1 || data.Res * data.Cell != ChunkSizeXZ
-					|| data.Heights == null || data.Heights.Length != n * n
-					|| data.Materials == null || data.Materials.Length != n * n)
-				{
-					if (_malformedLod1Logged.Add(kv.Key))
-					{
-						GD.PushError($"[VoxelWorld] Malformed Lod1 placeholder for chunk {kv.Key}: " +
-							$"Res={data.Res} Cell={data.Cell} ChunkSizeXZ={ChunkSizeXZ} " +
-							$"Res*Cell={data.Res * data.Cell} HeightsLen={data.Heights?.Length} " +
-							$"MaterialsLen={data.Materials?.Length} expected={(int)(n * n)} " +
-							$"Wx0={data.Wx0} Wz0={data.Wz0} SkirtSides={sides}");
-					}
-				}
 				chunk.SetLod1Placeholder(LodChunkGenerator.BuildMesh(data, VoxelSize, Palette), sides);
 			}
 		}

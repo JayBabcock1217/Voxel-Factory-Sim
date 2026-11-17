@@ -390,8 +390,6 @@ public partial class SkyCycle : Node
 		ApplyPhase();
 	}
 
-	private double _lastCycleLogSec;
-
 	public override void _Process(double delta)
 	{
 		if (!IsRunning)
@@ -401,23 +399,6 @@ public partial class SkyCycle : Node
 		float dt = (float)delta;
 		_phase = PosMod(_phase + dt / FullCycleSeconds, 1f);
 		ApplyPhase();
-
-		// Diagnostic (temporary): confirm the cycle is advancing and applying.
-		// Logs once per second with the current phase + sun state.
-		if (Time.GetTicksMsec() / 1000.0 - _lastCycleLogSec >= 1.0)
-		{
-			_lastCycleLogSec = Time.GetTicksMsec() / 1000.0;
-			// Print the sun/moon FORWARD vectors (-Z of their basis). The sky
-			// shader reads LIGHT0_DIRECTION = -forward (direction FROM the
-			// light source), so during the day the sun's forward points DOWN
-			// (y<0) and LIGHT0_DIRECTION points UP (y>0) = day mode.
-			Vector3 fwd = _sun != null ? -_sun.GlobalBasis.Z : Vector3.Zero;
-			Vector3 mFwd = _moon != null ? -_moon.GlobalBasis.Z : Vector3.Zero;
-			GD.Print($"[SkyCycle] phase={_phase:F3} dayAmt={DayAmount:F3} " +
-				$"sun(on={(_sun != null && _sun.Visible)},E={(_sun != null ? _sun.LightEnergy.ToString("F2") : "NULL")},fwd=({fwd.X:F2},{fwd.Y:F2},{fwd.Z:F2})) " +
-				$"moon(on={(_moon != null && _moon.Visible)},E={(_moon != null ? _moon.LightEnergy.ToString("F2") : "NULL")},fwd=({mFwd.X:F2},{mFwd.Y:F2},{mFwd.Z:F2})) " +
-				$"amb={(_environment != null ? _environment.AmbientLightEnergy.ToString("F2") : "NULL")}");
-		}
 	}
 
 	// ------------------------------------------------------------------

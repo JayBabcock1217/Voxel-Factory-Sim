@@ -140,7 +140,6 @@ public partial class Zombie : CharacterBody3D
 	private bool _aggroed;
 	private bool _spawned;
 	private bool _isBreaking;
-	private bool _warnedGate;
 
 	// The current path (list of world-voxel waypoints) and the index of the
 	// next waypoint to walk to. The zombie follows waypoints in order,
@@ -322,12 +321,6 @@ public partial class Zombie : CharacterBody3D
 		bool builtCollision = _world.HasBuiltCollisionAt(GlobalPosition);
 		if (!fullRes || !builtCollision)
 		{
-			// Diagnostic: log once which gate is blocking activation.
-			if (!_warnedGate)
-			{
-				_warnedGate = true;
-				GD.PushWarning($"[Zombie] Spawn gate blocked at {GlobalPosition}: fullRes={fullRes}, builtCollision={builtCollision}, surfaceY={surfaceY}");
-			}
 			return; // chunk not ready yet; retry next frame
 		}
 

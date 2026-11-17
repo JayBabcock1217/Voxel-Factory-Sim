@@ -18,15 +18,6 @@ namespace FactorySim.Voxel;
 [GlobalClass]
 public partial class VoxelMaterialConfig : Resource
 {
-	/// <summary>
-	/// TEMP DIAGNOSTIC: true while <see cref="_Ready"/> runs (remove after
-	/// verifying texture loading). The engine re-sets exported properties via
-	/// the generated property bridge when the resource enters the scene tree;
-	/// we log Texture writes that happen while ready so we can see whether the
-	/// .tres's texture assignments reach C# at all.
-	/// </summary>
-	private bool _readyDiagnostic;
-
 	/// <summary>Fired whenever the material set changes (a def's entry edited, or the array swapped).</summary>
 	public event Action<VoxelMaterialEntry> PropertyChanged;
 
