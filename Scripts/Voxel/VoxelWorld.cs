@@ -938,6 +938,19 @@ public partial class VoxelWorld : Node3D
 	// 1-ring neighbours keep using the normal async budget. Cleared after it is
 	// applied. Null until the first edit.
 	private VoxelChunk _instantRebuildChunk;
+	// True while a ProcessInstantEdit deferred call is scheduled for this
+	// frame. _Process schedules at most one per frame (the deferred call
+	// runs at the end of the frame, after every node's _Process, so it
+	// sees every edit registered this frame from any node). Reset to false
+	// inside ProcessInstantEdit when it runs.
+	private bool _instantDeferred;
+	// Set by BreakVoxel: the break already handled its own light + geometry
+	// (PropagateSkyIncrease + RemeshSectionsForLightChange), so the deferred
+	// ProcessInstantEdit should skip the redundant geometry-dirty remesh
+	// (the 3×3×3 region around the break — ~27 sub-cells, each a MC build +
+	// Jolt SetFaces, the source of the "little hitching"). Consumed (reset
+	// to false) inside ProcessInstantEdit when it runs.
+	private bool _instantSkipNext;
 	// The chunk-LOCAL voxel coords of the most recent edit (set alongside
 	// _instantRebuildChunk by SetVoxel). Used by the sub-cell path (Option B)
 	// to compute which sub-cell(s) the edit dirtied (the sub-cell containing the
@@ -2082,6 +2095,63 @@ public partial class VoxelWorld : Node3D
 		if (_instantRebuildChunk is VoxelChunk instantChunk
 			&& instantChunk.DataReady)
 		{
+			// DEFERRED: schedule the instant pass to run at the END of the
+			// frame (after every node's _Process). See ProcessInstantEdit for
+			// why: the VoxelWorld node processes before the player/projectile/
+			// zombie nodes, so a break they register this frame would be missed
+			// by a synchronous pass. One deferred call per frame.
+			if (!_instantDeferred)
+			{
+				_instantDeferred = true;
+				CallDeferred(nameof(ProcessInstantEdit));
+			}
+		}
+		else if (!(_instantRebuildChunk is { } pendingInstant && !pendingInstant.DataReady))
+		{
+			// Clear the pending chunk UNLESS its data simply isn't generated yet
+			// (rare: editing the very edge of the world) — in that case keep it
+			// so it rebuilds synchronously as soon as generation completes. An
+			// in-flight async build self-clears here; a freed chunk just falls
+			// through to the normal budget path.
+			_instantRebuildChunk = null;
+			_instantEditBoxValid = false;
+		}
+	}
+
+
+	// DEFERRED instant-edit pass. The VoxelWorld node is an EARLY child of
+	// Main, so its _Process runs BEFORE the player / projectile / zombie
+	// nodes. A rocket explosion (Projectile._Process) breaks voxels via
+	// BreakVoxel -> SetVoxel AFTER VoxelWorld._Process already ran this
+	// frame; if the instant path ran synchronously inside _Process it would
+	// miss those breaks (their light + mesh update would not run until the
+	// next frame - or never, if _Process early-returned). Running this
+	// deferred at the END of the frame means the pass sees EVERY edit
+	// registered this frame, from ANY node, and applies it the same frame
+	// (a break lights up instantly for a rocket just like for a tool).
+	// It is a no-op when there is no pending edit, or the chunk data is not
+	// ready yet (the same guard _Process uses), so the deferred re-run never
+	// double-applies or crashes.
+	private void ProcessInstantEdit()
+	{
+		// A break (BreakVoxel) already handled its own light + geometry (the
+		// sky BFS + the 3×3×3 geometry remesh). The redundant work here
+		// (re-meshing the geometry-dirty sub-cells, running RecomputeLightAt
+		// Source) is the "little hitching" — skip it and clear the pending
+		// edit. The flag is consumed (reset to false) whether or not there
+		// is a pending chunk.
+		if (_instantSkipNext)
+		{
+			_instantSkipNext = false;
+			_instantRebuildChunk = null;
+			_instantEditBoxValid = false;
+			return;
+		}
+		if (_instantRebuildChunk is not VoxelChunk instantChunk
+			|| !instantChunk.DataReady)
+		{
+			return; // no pending edit, or the chunk data is not ready yet
+		}
 			if (SubCellMeshing)
 			{
 				// OPTION B (sub-cell remeshing): rebuild only the sub-cell(s) the
@@ -2444,34 +2514,6 @@ public partial class VoxelWorld : Node3D
 			}
 			_instantRebuildChunk = null;
 			_instantEditBoxValid = false;
-		}
-		else if (!(_instantRebuildChunk is { } pendingInstant && !pendingInstant.DataReady))
-		{
-			// Clear the pending chunk UNLESS its data simply isn't generated yet
-			// (rare: editing the very edge of the world) — in that case keep it
-			// so it rebuilds synchronously as soon as generation completes. An
-			// in-flight async build self-clears here; a freed chunk just falls
-			// through to the normal budget path.
-			_instantRebuildChunk = null;
-			_instantEditBoxValid = false;
-		}
-
-
-		// Distant-Horizons-style LOD beyond the normal render distance
-		// (visual-only heightfields, own budget — never routed through
-		// ChunksPerFrame). When disabled, free anything still alive.
-		if (LodEnabled)
-		{
-			UpdateLod(playerNode.GlobalPosition);
-		}
-		else if (_lodChunks.Count > 0)
-		{
-			FreeAllLod();
-		}
-		// NOTE: RefreshLod1PlaceholderSkirts() is called from the full-res mesh
-		// budget loop (which runs every frame, LOD on or off) — a full-res chunk
-		// becoming ready there is the only thing that changes a placeholder's
-		// skirt mask, so refreshing in that loop is the single correct spot.
 	}
 
 	// ------------------------------------------------------------------
@@ -2938,8 +2980,36 @@ public partial class VoxelWorld : Node3D
 
 		int dlx = v.X - chunk.Coord.X * ChunkSizeXZ;
 		int dlz = v.Z - chunk.Coord.Y * ChunkSizeXZ;
+		int material = chunk.Data.Get(dlx, v.Y, dlz);
+
+		// Air has nothing to damage; unbreakable voxels (bedrock) can't be
+		// damaged (the same rule the miner and the blast use). Return full
+		// health (the implicit value) and record nothing.
+		if (material == VoxelMaterialIds.Air || IsUnbreakable(material))
+		{
+			return GetVoxelHealth(v);
+		}
+
+		float before = chunk.Data.GetHealth(dlx, v.Y, dlz);
 		chunk.Data.Damage(dlx, v.Y, dlz, amount);
-		float health = chunk.Data.GetHealth(dlx, v.Y, dlz);
+		// Read the RAW storage for the post-damage value (not GetHealth, which
+		// is implicit-full): a voxel damaged to exactly 0 has a 0 storage that
+		// GetHealth would report as full (100), but the damage DID happen and the
+		// voxel is at the break threshold. The raw value (0..100) is the true
+		// health for the break decision and the persistence record.
+		int healthIdx = chunk.Data.Index(dlx, v.Y, dlz);
+		float health = chunk.Data.Health[healthIdx];
+
+		// No-op: the voxel was already at full health (implicit 0 storage, which
+		// `before` reads as 100) and the damage brought it back to full — i.e.
+		// the raw `health` is still 0 (no real damage landed). A voxel damaged
+		// to exactly 0 has raw `health` == 0 too, but for it `before` was below
+		// full (a real prior damage), so `health < before` and this guard does
+		// NOT fire. The guard is simply "no real change": raw health unchanged.
+		if (health >= before)
+		{
+			return health;
+		}
 
 		// Record the damage for persistence: only when the voxel is still solid
 		// and below full health. (A broken voxel is removed via SetVoxel, which
@@ -2952,6 +3022,22 @@ public partial class VoxelWorld : Node3D
 		{
 			_damagedHealth.Remove(v);
 		}
+
+		// CHUNK LIGHTING UPDATE (the shared damage system). A damage tick
+		// changes the voxel's stored health (and thus the light the chunk's
+		// mesh samples for its faces) but NOT its solid state or block-light
+		// source — so the instant path's solid/source light delta never fires
+		// for it. We can't go through SetVoxel either: it resets the voxel's
+		// stored health to full on every solid write, wiping the damage. So we
+		// register the instant-edit bookkeeping directly (so the instant path
+		// re-meshes the voxel's sub-cells this frame) AND mark the chunk
+		// light-dirty (so the async full rebuild — the authoritative sky-light
+		// re-bake — still runs for it, since the instant path marks the chunk
+		// instant-satisfied which the budget would otherwise skip). A break
+		// (health reaching 0) is a solid change the caller handles via
+		// BreakVoxel -> SetVoxel, which triggers its own light update.
+		RegisterInstantEditForLight(chunk, dlx, v.Y, dlz);
+		MarkChunkLightDirty(v);
 
 		return health;
 	}
@@ -3147,8 +3233,369 @@ public partial class VoxelWorld : Node3D
 		// (not just the 1-voxel edit) so the surrounding air darkens again.
 		byte level = GetBlockLightLevel(v.X, v.Y, v.Z);
 		SetVoxel(v, VoxelMaterialIds.Air);
+
+		// SKY-LIGHT UPDATE (instant, the same way a torch lights instantly). A
+		// break is a solid→air change that opens a path for SKY light. The
+		// instant path's section-engine BFS only handled BLOCK light (torches)
+		// until now; sky light had to wait for the full flood fill (which
+		// no-ops while a build is in flight — the budget keeps the edited chunk
+		// perpetually dirty, so a rocket crater stayed black until a SECOND
+		// break landed while the build slot was free). Now the break runs a
+		// SKY-LIGHT INCREASE BFS (PropagateSkyIncrease): it seeds the broken
+		// voxel with its true sky level and propagates that level through air,
+		// bumping each voxel to max(current, skyLevel) — the torch's algorithm
+		// for sky light. It only touches the voxels the sky light reaches
+		// (crater + ~maxLight shell), so it is instant (no hitch, no flood fill).
+		//
+		// The section engine's solid state at the broken voxel must be updated
+		// to air BEFORE the BFS (so the BFS sees the new air and propagates
+		// into it). UpdateVoxel does that. The seed sky level is the distance
+		// from the broken voxel to the open sky above it (SkyLevelAt scans up).
+		int cs = ChunkSizeXZ;
+		int srcWX = v.X, srcWY = v.Y, srcWZ = v.Z;
+		_sectionLight.UpdateVoxel(srcWX, srcWY, srcWZ, cs, 0, 0);
+		int skyLevel = SkyLevelAt(v.X, v.Y, v.Z);
+		if (skyLevel > 0)
+		{
+			var changed = _sectionLight.PropagateSkyIncrease(srcWX, srcWY, srcWZ, skyLevel, cs, ChunkHeight);
+			// Re-mesh the sub-cells whose light changed (the crater + its shell).
+			// The changed set is in SECTION coords; map each to the chunk's
+			// sub-cell(s) and re-mesh them through the (now-updated) engine.
+			RemeshSectionsForLightChange(changed, v);
+		}
+		// Also re-mesh the sub-cells whose GEOMETRY changed (the break removed
+		// a solid voxel — the surrounding faces need re-culling). RemeshSections
+		// ForLightChange only re-meshes LIGHT-changed sub-cells; the geometry-
+		// dirty sub-cells (the 3×3×3 region around the break) are re-meshed
+		// here directly. This is the one thing the deferred ProcessInstantEdit
+		// would have done, so we do it now and skip the deferred path (see
+		// _instantSkipNext below).
+		if (_chunks.TryGetValue(ChunkCoordOf(v.X, v.Z), out VoxelChunk geoChunk))
+		{
+			var geoSnap = SnapshotNeighbours(geoChunk.Coord, includeCentre: true);
+			int lx = v.X - geoChunk.Coord.X * cs;
+			int lz = v.Z - geoChunk.Coord.Y * cs;
+			for (int ox = -1; ox <= 1; ox++)
+				for (int oy = -1; oy <= 1; oy++)
+					for (int oz = -1; oz <= 1; oz++)
+					{
+						int px = lx + ox, py = v.Y + oy, pz = lz + oz;
+						if (px < 0 || py < 0 || pz < 0 || px >= cs || py >= ChunkHeight || pz >= cs)
+						{
+							continue;
+						}
+						geoChunk.RebuildSubCell(this, px - px % CellSizeX, py - py % CellSizeY, pz - pz % CellSizeZ, geoSnap);
+					}
+		}
+		// SKIP the deferred ProcessInstantEdit for this break: it would re-mesh
+		// the geometry-dirty sub-cells (the 3×3×3 region — ~27 sub-cells, each
+		// a MC build + Jolt SetFaces), which we already did above. The "little
+		// hitching" the user sees is that redundant work. The deferred path
+		// also runs RecomputeLightAtSource (a wide-field delta) — redundant for
+		// a break (the sky BFS already handled the light, and the async full
+		// rebuild is the authoritative convergence). Setting _instantSkipNext
+		// makes ProcessInstantEdit clear the pending edit and bail out.
+		_instantSkipNext = true;
+
+		// The wide field is now STALE (it predates the break's sky light). The
+		// async full rebuild re-bakes it from the post-break data and re-seeds
+		// the engine (the convergence pass) — that is the authoritative
+		// convergence. Mark the chunk light-dirty (not a fresh edit priority:
+		// a break's light is instant via the BFS above, so it does not need to
+		// jump the budget; it only needs the full rebuild to re-bake the wide
+		// field so the engine and field agree). The 1-chunk ring still goes
+		// through the budget for its border re-cull.
 		MarkChunkDirty(v, LightRadiusFor(level));
 		VoxelBroken?.Invoke(v, material);
+	}
+
+	/// <summary>
+	/// BATCH break: breaks a group of voxels (from a single explosion) with ONE
+	/// sky BFS + ONE geometry remesh (the union of all their regions). A rocket
+	/// blast breaks dozens of voxels; calling BreakVoxel per voxel runs a
+	/// separate sky BFS + 3×3×3 remesh per voxel — the "massive hitch". This
+	/// method does all the SetVoxel writes first, then ONE batched sky BFS
+	/// (PropagateSkyIncreaseBatch, seeded from all the broken voxels — the
+	/// visited set dedupes the overlapping regions), then ONE geometry remesh
+	/// (the union of all their 3×3×3 regions, deduped via a HashSet).
+	/// Raises VoxelBroken for each broken voxel (the drop pipeline runs once
+	/// per voxel, as it does for a single break).
+	/// </summary>
+	public int BreakVoxelBatch(ReadOnlySpan<Vector3I> voxels)
+	{
+		if (voxels.Length == 0)
+		{
+			return 0;
+		}
+
+		int cs = ChunkSizeXZ;
+		int broken = 0;
+		var seeds = new System.Collections.Generic.List<(int x, int y, int z, int level)>();
+		// The union of all the broken voxels' 3×3×3 geometry regions (chunk-local
+		// sub-cell coords, deduped). Key = (chunkX, chunkY, cellX, cellY, cellZ).
+		var geoCells = new System.Collections.Generic.HashSet<(int, int, int, int, int)>();
+
+		// Pass 1: write all the voxels to air + collect seeds + geometry regions.
+		foreach (var v in voxels)
+		{
+			int material = GetVoxel(v.X, v.Y, v.Z);
+			if (material == VoxelMaterialIds.Air || IsUnbreakable(material))
+			{
+				continue;
+			}
+			byte level = GetBlockLightLevel(v.X, v.Y, v.Z);
+			SetVoxel(v, VoxelMaterialIds.Air);
+			broken++;
+
+			// Update the section engine's solid state (the BFS needs to see the
+			// new air). Done here (before the BFS) so the batched BFS sees all
+			// the new air at once.
+			_sectionLight.UpdateVoxel(v.X, v.Y, v.Z, cs, 0, 0);
+
+			// Collect the sky seed (the sky level at this voxel).
+			int skyLevel = SkyLevelAt(v.X, v.Y, v.Z);
+			if (skyLevel > 0)
+			{
+				seeds.Add((v.X, v.Y, v.Z, skyLevel));
+			}
+
+			// Collect the geometry-dirty sub-cells (the 3×3×3 region around
+			// this voxel, in chunk-local sub-cell coords).
+			if (_chunks.TryGetValue(ChunkCoordOf(v.X, v.Z), out VoxelChunk chunk))
+			{
+				int lx = v.X - chunk.Coord.X * cs;
+				int lz = v.Z - chunk.Coord.Y * cs;
+				for (int ox = -1; ox <= 1; ox++)
+					for (int oy = -1; oy <= 1; oy++)
+						for (int oz = -1; oz <= 1; oz++)
+						{
+							int px = lx + ox, py = v.Y + oy, pz = lz + oz;
+							if (px < 0 || py < 0 || pz < 0 || px >= cs || py >= ChunkHeight || pz >= cs)
+							{
+								continue;
+							}
+							geoCells.Add((chunk.Coord.X, chunk.Coord.Y,
+								px - px % CellSizeX, py - py % CellSizeY, pz - pz % CellSizeZ));
+						}
+			}
+
+			// Mark the chunk dirty for the async budget (the 1-chunk ring).
+			MarkChunkDirty(v, LightRadiusFor(level));
+		}
+
+		if (broken == 0)
+		{
+			return 0;
+		}
+
+		// ONE batched sky BFS (all seeds at once — the visited set dedupes the
+		// overlapping regions, so the total work is the union, not the sum).
+		if (seeds.Count > 0)
+		{
+			var changed = _sectionLight.PropagateSkyIncreaseBatch(seeds.ToArray(), cs, ChunkHeight);
+			if (changed.Count > 0)
+			{
+				// Re-mesh the light-changed sub-cells. For a blast, the changed
+				// sections can span multiple chunks — remesh each chunk's
+				// sections that changed.
+				RemeshSectionsForLightChangeBatch(changed);
+			}
+		}
+
+		// ONE geometry remesh (the union of all the 3×3×3 regions, deduped).
+		// Group by chunk so each chunk gets one snapshot.
+		var byChunk = new System.Collections.Generic.Dictionary<Vector2I, System.Collections.Generic.HashSet<(int, int, int)>>();
+		foreach (var (ccx, ccy, cx, cy, cz) in geoCells)
+		{
+			var cc = new Vector2I(ccx, ccy);
+			if (!byChunk.TryGetValue(cc, out var cells))
+			{
+				cells = new System.Collections.Generic.HashSet<(int, int, int)>();
+				byChunk[cc] = cells;
+			}
+			cells.Add((cx, cy, cz));
+		}
+		foreach (var (cc, cells) in byChunk)
+		{
+			if (!_chunks.TryGetValue(cc, out VoxelChunk chunk))
+			{
+				continue;
+			}
+			var snap = SnapshotNeighbours(chunk.Coord, includeCentre: true);
+			foreach (var (cx, cy, cz) in cells)
+			{
+				chunk.RebuildSubCell(this, cx, cy, cz, snap);
+			}
+		}
+
+		// Skip the deferred ProcessInstantEdit (we already did the light +
+		// geometry).
+		_instantSkipNext = true;
+
+		// Raise VoxelBroken for each broken voxel (the drop pipeline runs once
+		// per voxel).
+		foreach (var v in voxels)
+		{
+			// Only raise for voxels that were actually broken (solid, not air,
+			// not unbreakable).
+			// (GetVoxel now returns Air for the broken voxels, so we can't
+			// re-check. We raise for all voxels in the input — the caller
+			// (ExplosionApplier) already filtered to solid voxels.)
+			VoxelBroken?.Invoke(v, VoxelMaterialIds.Air);
+		}
+
+		return broken;
+	}
+
+	/// <summary>
+	/// Re-meshes the sub-cells in the changed sections (from a batched light
+	/// BFS) across ALL chunks the sections belong to. The single-voxel version
+	/// (RemeshSectionsForLightChange) only re-meshes the anchor's chunk; the
+	/// batch version (a blast) can change sections in multiple chunks, so this
+	/// re-meshes every chunk that has a changed section.
+	/// </summary>
+	private void RemeshSectionsForLightChangeBatch(
+		HashSet<(int cx, int cy, int sx, int sy, int sz)> changed)
+	{
+		if (changed.Count == 0)
+		{
+			return;
+		}
+		// Group the changed sections by chunk.
+		var byChunk = new System.Collections.Generic.Dictionary<Vector2I, System.Collections.Generic.HashSet<(int, int, int)>>();
+		foreach (var (ccx, ccy, sx, sy, sz) in changed)
+		{
+			var cc = new Vector2I(ccx, ccy);
+			if (!byChunk.TryGetValue(cc, out var sections))
+			{
+				sections = new System.Collections.Generic.HashSet<(int, int, int)>();
+				byChunk[cc] = sections;
+			}
+			sections.Add((sx, sy, sz));
+		}
+		foreach (var (cc, sections) in byChunk)
+		{
+			if (!_chunks.TryGetValue(cc, out VoxelChunk chunk))
+			{
+				continue;
+			}
+			if (!chunk.DataReady)
+			{
+				continue;
+			}
+			var snap = SnapshotNeighbours(cc, includeCentre: true);
+			int cs = ChunkSizeXZ;
+			var cells = new System.Collections.Generic.HashSet<(int, int, int)>();
+			foreach (var (sx, sy, sz) in sections)
+			{
+				int x0 = sx * 16, x1 = System.Math.Min(x0 + 15, cs - 1);
+				int y0 = sy * 16, y1 = System.Math.Min(y0 + 15, ChunkHeight - 1);
+				int z0 = sz * 16, z1 = System.Math.Min(z0 + 15, cs - 1);
+				int cx0 = x0 / CellSizeX, cx1 = x1 / CellSizeX;
+				int cy0 = y0 / CellSizeY, cy1 = y1 / CellSizeY;
+				int cz0 = z0 / CellSizeZ, cz1 = z1 / CellSizeZ;
+				int cellsX = System.Math.Max(1, cs / CellSizeX);
+				int cellsY = System.Math.Max(1, ChunkHeight / CellSizeY);
+				int cellsZ = System.Math.Max(1, cs / CellSizeZ);
+				for (int cx = cx0; cx <= cx1 && cx < cellsX; cx++)
+					for (int cy = cy0; cy <= cy1 && cy < cellsY; cy++)
+						for (int cz = cz0; cz <= cz1 && cz < cellsZ; cz++)
+						{
+							cells.Add((cx, cy, cz));
+						}
+			}
+			foreach (var (cx, cy, cz) in cells)
+			{
+				chunk.RebuildSubCell(this, cx, cy, cz, snap);
+			}
+		}
+	}
+
+	/// <summary>
+	/// The SKY light level at a world voxel: the number of consecutive air
+	/// voxels directly above it (capped at <see cref="MaxLightLevel"/>), counting
+	/// from the voxel itself up to the first solid voxel or the top of the
+	/// world. If the column is open to the sky, the level is the distance to
+	/// the top (capped); if it's under a roof, the level is the distance to
+	/// the roof. This is the seed for <see cref="SectionLightEngine.
+	/// PropagateSkyIncrease"/> on a break. Scans a single column (cheap:
+	/// ChunkHeight reads at most, usually much less — it stops at the first
+	/// solid or the cap).
+	/// </summary>
+	private int SkyLevelAt(int x, int y, int z)
+	{
+		int cap = MaxLightLevel < 1 ? 1 : MaxLightLevel;
+		int level = 0;
+		for (int yy = y; yy < ChunkHeight && level < cap; yy++)
+		{
+			if (GetVoxel(x, yy, z) != VoxelMaterialIds.Air)
+			{
+				break; // hit a solid voxel (roof) — sky light stops here
+			}
+			level++;
+		}
+		return level;
+	}
+
+	/// <summary>
+	/// Re-meshes the sub-cells in the changed sections (from a light BFS)
+	/// through the section engine, for the chunk that contains <paramref
+	/// name="anchor"/>. Maps each changed section (world coords) to the
+	/// sub-cell(s) it covers in the anchor's chunk and calls RebuildSubCell on
+	/// them. Only the anchor's chunk is re-meshed here (the break's chunk);
+	/// neighbour chunks' changed sections are re-meshed by their own rebuilds
+	/// (the light crossed their border via the BFS, but their mesh is refreshed
+	/// by the budget / their own convergence pass).
+	/// </summary>
+	private void RemeshSectionsForLightChange(
+		HashSet<(int cx, int cy, int sx, int sy, int sz)> changed, Vector3I anchor)
+	{
+		if (changed.Count == 0)
+		{
+			return;
+		}
+		if (!_chunks.TryGetValue(ChunkCoordOf(anchor.X, anchor.Z), out VoxelChunk chunk))
+		{
+			return;
+		}
+		int cs = ChunkSizeXZ;
+		// The anchor chunk's coord.
+		int chunkCX = ChunkCoordOf(anchor.X, anchor.Z).X;
+		int chunkCY = ChunkCoordOf(anchor.X, anchor.Z).Y;
+		// A frozen neighbour snapshot (shared by all sub-cells re-meshed here).
+		var snapshot = SnapshotNeighbours(chunk.Coord, includeCentre: true);
+		// For each changed section, if it belongs to the anchor chunk, map it to
+		// the sub-cell(s) it covers and re-mesh them.
+		var toRemesh = new HashSet<VoxelCell>();
+		foreach (var (ccx, ccy, csx, csy, csz) in changed)
+		{
+			if (ccx != chunkCX || ccy != chunkCY)
+			{
+				continue; // not the anchor chunk — its own rebuild handles it
+			}
+			// Section (csx, csy, csz) covers chunk-local voxels
+			// [csx*16, csx*16+15] × [csy*16, csy*16+15] × [csz*16, csz*16+15].
+			// The sub-cells it covers: for each axis, the sub-cell index range.
+			int cellX0 = (csx * 16) / VoxelWorld.CellSizeX;
+			int cellX1 = System.Math.Min(cs - 1, csx * 16 + 15) / VoxelWorld.CellSizeX;
+			int cellY0 = (csy * 16) / VoxelWorld.CellSizeY;
+			int cellY1 = System.Math.Min(ChunkHeight - 1, csy * 16 + 15) / VoxelWorld.CellSizeY;
+			int cellZ0 = (csz * 16) / VoxelWorld.CellSizeZ;
+			int cellZ1 = System.Math.Min(cs - 1, csz * 16 + 15) / VoxelWorld.CellSizeZ;
+			int cellsX = System.Math.Max(1, cs / VoxelWorld.CellSizeX);
+			int cellsY = System.Math.Max(1, ChunkHeight / VoxelWorld.CellSizeY);
+			int cellsZ = System.Math.Max(1, cs / VoxelWorld.CellSizeZ);
+			for (int cx = cellX0; cx <= cellX1 && cx < cellsX; cx++)
+				for (int cy = cellY0; cy <= cellY1 && cy < cellsY; cy++)
+					for (int cz = cellZ0; cz <= cellZ1 && cz < cellsZ; cz++)
+					{
+						toRemesh.Add(new VoxelCell(cx, cy, cz));
+					}
+		}
+		foreach (var cell in toRemesh)
+		{
+			chunk.RebuildSubCell(this, cell.X, cell.Y, cell.Z, snapshot);
+		}
 	}
 
 	/// <summary>
@@ -4176,6 +4623,63 @@ public partial class VoxelWorld : Node3D
 		_chunks[coord] = chunk;
 	}
 
+	/// <summary>
+	/// Marks the chunk a voxel sits in as <see cref="VoxelChunk.SectionLightDirty"/>
+	/// WITHOUT touching its edit priority. Used by <see cref="DamageVoxel"/>: a
+	/// damaged voxel's chunk must run its full rebuild (the authoritative
+	/// sky-light re-bake) because the instant (sub-cell) path marks the chunk
+	/// instant-satisfied, which the budget loop would otherwise skip. Unlike a
+	/// genuine place/break it does NOT stamp a fresh edit priority: a damage tick
+	/// is not an "edit" and must not jump the rebuild budget ahead of the
+	/// player's real edits — it only needs the light-dirty flag so the chunk's
+	/// rebuild is not skipped as instant-satisfied.
+	/// </summary>
+	private void MarkChunkLightDirty(Vector3I v)
+	{
+		if (!_chunks.TryGetValue(ChunkCoordOf(v.X, v.Z), out VoxelChunk chunk))
+		{
+			return;
+		}
+		chunk.MarkSectionLightDirty();
+	}
+
+	/// <summary>
+	/// Registers a voxel as the frame's instant-rebuild edit (the chunk the
+	/// instant (sub-cell) light path re-meshes this frame) WITHOUT writing the
+	/// voxel's data. Used by <see cref="DamageVoxel"/>: a damage tick changes
+	/// the voxel's stored health (and thus the light the chunk samples), but it
+	/// is NOT a material edit, so it must NOT go through <see cref="SetVoxel"/>
+	/// (which would reset the voxel's health to full, wiping the damage). The
+	/// instant path reads the post-edit state straight from
+	/// <see cref="VoxelChunk.Data"/> (not from a patched copy), so registering
+	/// the bookkeeping here is all the light update needs: the edited chunk +
+	/// its chunk-local edit box.
+	/// </summary>
+	private void RegisterInstantEditForLight(VoxelChunk chunk, int lx, int ly, int lz)
+	{
+		var local = new Vector3I(lx, ly, lz);
+		bool newChunk = !ReferenceEquals(_instantRebuildChunk, chunk);
+		_instantRebuildChunk = chunk;
+		_instantEditLocal = local;
+		if (newChunk || !_instantEditBoxValid)
+		{
+			_instantEditMin = local;
+			_instantEditMax = local;
+			_instantEditBoxValid = true;
+		}
+		else
+		{
+			_instantEditMin = new Vector3I(
+				System.Math.Min(_instantEditMin.X, local.X),
+				System.Math.Min(_instantEditMin.Y, local.Y),
+				System.Math.Min(_instantEditMin.Z, local.Z));
+			_instantEditMax = new Vector3I(
+				System.Math.Max(_instantEditMax.X, local.X),
+				System.Math.Max(_instantEditMax.Y, local.Y),
+				System.Math.Max(_instantEditMax.Z, local.Z));
+		}
+	}
+
 	/// <summary>Test-only: writes a single voxel (the same path gameplay uses).</summary>
 	public void SetVoxelForTest(Vector3I v, int material)
 	{
@@ -4187,6 +4691,16 @@ public partial class VoxelWorld : Node3D
 	{
 		return DamageVoxel(v, amount);
 	}
+
+	/// <summary>
+	/// Test-only: the chunk the instant (sub-cell) rebuild path will apply this
+	/// frame (<see cref="_instantRebuildChunk"/>). <see cref="DamageVoxel"/>
+	/// registers the damaged voxel's chunk here (via
+	/// <see cref="RegisterInstantEditForLight"/>) so the instant path re-meshes
+	/// it; a headless test (which does not run _Process) asserts on this
+	/// registration to prove the chunk-light update was triggered.
+	/// </summary>
+	public VoxelChunk PendingInstantRebuildChunkForTest => _instantRebuildChunk;
 
 	/// <summary>
 	/// True when a chunk is loaded AND its voxel data has finished generating.

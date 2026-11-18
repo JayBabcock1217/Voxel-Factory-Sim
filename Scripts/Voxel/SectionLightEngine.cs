@@ -453,6 +453,127 @@ public sealed class SectionLightEngine
 	}
 
 	/// <summary>
+	/// PROPAGATES A SKY-LIGHT INCREASE: a solid voxel was broken to air
+	/// (a rocket/weapon/tool break) at (worldX, worldY, worldZ), opening a new
+	/// path for sky light to reach. This is the SKY-light analogue of
+	/// <see cref="PropagateIncrease"/> (which handles block light / torches).
+	///
+	/// WHY IT EXISTS: the section engine had a BFS for BLOCK light (torches)
+	/// but NONE for SKY light — sky light was only ever computed by the full
+	/// flood fill (BuildLightFieldWide, a 3×3-chunk ~1.6M-voxel solve). So a
+	/// break (solid→air) could not re-light its crater instantly; it had to wait
+	/// for the async flood fill (or a synchronous one, which hitches). This BFS
+	/// gives sky light the same instant treatment torches get: it seeds the
+	/// broken voxel with its true sky level and propagates that level
+	/// outward/upward through air, bumping each voxel to MAX(current, skyLevel)
+	/// — Minecraft's max(sky, block) rule. It only touches the voxels the sky
+	/// light actually reaches (the crater + a shell of ~maxLight voxels), so it
+	/// is fast (instant), exactly like the torch BFS.
+	///
+	/// The seed level <paramref name="seedLevel"/> is the sky level at the
+	/// broken voxel (the caller computes it: the distance from the voxel to the
+	/// nearest open-to-sky column, clamped to [0, maxLight]). The BFS decays the
+	/// level by 1 per step (light propagation), crossing section/chunk borders.
+	/// Returns the set of sections whose light field changed (the caller
+	/// re-meshes the sub-cells in those sections).
+	/// </summary>
+	public HashSet<(int cx, int cy, int sx, int sy, int sz)> PropagateSkyIncrease(
+		int worldX, int worldY, int worldZ, int seedLevel,
+		int chunkSizeXZ, int chunkHeight)
+	{
+		var changed = new HashSet<(int, int, int, int, int)>();
+		if (seedLevel <= 0)
+		{
+			return changed; // no sky light to propagate (the break is deep in a cave)
+		}
+
+		// Seed the broken voxel itself (it's now air) with the sky level, and
+		// queue it. The BFS then propagates to its air neighbours at (level-1).
+		ClearQueue();
+		_visited.Clear();
+		WorldToSectionIndex(worldX, worldY, worldZ, chunkSizeXZ, out long key, out int localIdx);
+		if (_fields.ContainsKey(key))
+		{
+			// The broken voxel's own light becomes max(current, seedLevel).
+			int current = SampleLight(worldX, worldY, worldZ, chunkSizeXZ, chunkHeight);
+			int combined = current > seedLevel ? current : seedLevel;
+			SetLight(worldX, worldY, worldZ, combined, chunkSizeXZ);
+			_visited[(key, localIdx)] = seedLevel;
+			Enq(key, localIdx, seedLevel);
+			DecodeKey(key, out int cx, out int cz, out int sx, out int sy, out int sz);
+			if (combined != current)
+			{
+				changed.Add((cx, cz, sx, sy, sz));
+			}
+		}
+
+		// Run the increase BFS (the same one the torch uses): it propagates the
+		// level through air, crossing borders, bumping each voxel to
+		// max(current, level). The seed is the sky level (not a block level),
+		// but the propagation rule is identical (decay by 1, max with current).
+		RunBFSIncrease(chunkSizeXZ, chunkHeight, changed);
+
+		return changed;
+	}
+
+	/// <summary>
+	/// BATCH version of <see cref="PropagateSkyIncrease"/>: seeds MULTIPLE
+	/// broken voxels (from a single explosion) and runs ONE BFS. A rocket blast
+	/// breaks dozens of voxels; running a separate BFS per voxel (each
+	/// processing ~8,600 already-bright visits) is the "massive hitch". This
+	/// method seeds all of them in one shot and runs a single BFS — the
+	/// visited set dedupes the overlapping regions, so the total work is the
+	/// union of all the craters' light, not the sum.
+	/// </summary>
+	public HashSet<(int cx, int cy, int sx, int sy, int sz)> PropagateSkyIncreaseBatch(
+		ReadOnlySpan<(int x, int y, int z, int level)> seeds,
+		int chunkSizeXZ, int chunkHeight)
+	{
+		var changed = new HashSet<(int, int, int, int, int)>();
+		if (seeds.Length == 0)
+		{
+			return changed;
+		}
+
+		ClearQueue();
+		_visited.Clear();
+
+		// Seed ALL the broken voxels (one pass, no per-seed BFS).
+		foreach (var (wx, wy, wz, seedLevel) in seeds)
+		{
+			if (seedLevel <= 0)
+			{
+				continue;
+			}
+			WorldToSectionIndex(wx, wy, wz, chunkSizeXZ, out long key, out int localIdx);
+			if (!_fields.ContainsKey(key))
+			{
+				continue;
+			}
+			int current = SampleLight(wx, wy, wz, chunkSizeXZ, chunkHeight);
+			int combined = current > seedLevel ? current : seedLevel;
+			SetLight(wx, wy, wz, combined, chunkSizeXZ);
+			// Mark visited at the seed level (the BFS won't re-process it).
+			if (!_visited.TryGetValue((key, localIdx), out int prev) || seedLevel > prev)
+			{
+				_visited[(key, localIdx)] = seedLevel;
+			}
+			Enq(key, localIdx, seedLevel);
+			DecodeKey(key, out int cx, out int cz, out int sx, out int sy, out int sz);
+			if (combined != current)
+			{
+				changed.Add((cx, cz, sx, sy, sz));
+			}
+		}
+
+		// ONE BFS for all seeds (the visited set dedupes the overlapping
+		// regions — the total work is the union, not the sum).
+		RunBFSIncrease(chunkSizeXZ, chunkHeight, changed);
+
+		return changed;
+	}
+
+	/// <summary>
 	/// Seeds the air neighbors of a solid source voxel at the given level.
 	/// Used by PropagateIncrease. Marks each seeded neighbor in the visited map
 	/// so the BFS (RunBFSIncrease) won't re-process it at the same or lower

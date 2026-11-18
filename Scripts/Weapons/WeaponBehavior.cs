@@ -93,7 +93,7 @@ public partial class WeaponBehavior : Resource
 	/// <summary>Rocket launcher damage per shot.</summary>
 	[Export(PropertyHint.Range, "0,1000,0.5")] public float RocketDamagePerShot { get; set; } = 100f;
 	/// <summary>Rocket launcher blast radius (voxels). 0 = point damage.</summary>
-	[Export(PropertyHint.Range, "0,16,1")] public int RocketBlastRadius { get; set; } = 2;
+	[Export(PropertyHint.Range, "0,16,1")] public int RocketBlastRadius { get; set; } = 5;
 	/// <summary>Rocket launcher projectile speed (world units/sec).</summary>
 	[Export(PropertyHint.Range, "0,500,1")] public float RocketProjectileSpeed { get; set; } = 26f;
 	/// <summary>Rocket launcher projectile gravity (m/s²).</summary>

@@ -405,19 +405,18 @@ public partial class Machine : StaticBody3D
 	}
 
 	/// <summary>
-	/// Builds (or re-builds) this machine's FACE-PORT indicators — one small flat
-	/// marker on each face whose <see cref="MachineDefinition.Directions"/> entry
-	/// is <see cref="MachinePort.Input"/> or <see cref="MachinePort.Output"/>.
-	/// Input faces get an input-colored marker, output faces an output-colored
-	/// one, and disabled faces get nothing.
+	/// Builds (or re-builds) this machine's FACE-PORT indicators — one arrow on
+	/// each face whose <see cref="MachineDefinition.Directions"/> entry is
+	/// <see cref="MachinePort.Input"/> or <see cref="MachinePort.Output"/>.
+	/// Input faces get an input-colored arrow pointing INTO the face, output
+	/// faces an output-colored arrow pointing OUT OF the face, and disabled
+	/// faces get nothing. The arrow shape (rather than a flat plate) makes the
+	/// flow direction unambiguous at a glance — no color memorization required.
 	///
-	/// Each indicator is a thin <see cref="BoxMesh"/> plate sitting just OUTSIDE
-	/// the machine's face (offset by half a voxel along that face's axis), in the
-	/// machine's LOCAL space — so the machine's placement-rotation Basis turns
-	/// the whole set and every plate stays glued to the correct world face. The
-	/// plate is small (a corner of the face, not the whole face) and unshaded
-	/// emissive (reads in any light, no shadow cost), keeping it SUPER CHEAP: a
-	/// primitive mesh per enabled face, shared materials, set up once at build.
+	/// Each arrow is a small <see cref="PrimitiveMesh"/> cone in the machine's
+	/// LOCAL space, so the machine's placement-rotation Basis turns the whole
+	/// set and every arrow stays glued to the correct world face. It is unshaded
+	/// emissive (reads in any light, no shadow cost) and set up once at build.
 	///
 	/// The set of indicators is driven entirely by the DEV-set definition config
 	/// (<see cref="MachineDefinition.Directions"/>), NOT per-instance state, so
@@ -448,6 +447,13 @@ public partial class Machine : StaticBody3D
 			return;
 		}
 
+		// A small cone (built once, shared by every arrow) reads as an arrow.
+		// Its tip is along local +Y and its base is at -Y. We orient each arrow
+		// so the tip points the right way for its port:
+		//   INPUT  → tip INTO the face (along -dir): "items go in here."
+		//   OUTPUT → tip OUT of the face (along +dir): "items come out here."
+		var cone = BuildArrowMesh();
+
 		for (int face = 0; face < MachineFace.Count; face++)
 		{
 			MachinePort port = face < directions.Length ? directions[face] : MachinePort.Disabled;
@@ -460,42 +466,29 @@ public partial class Machine : StaticBody3D
 			// Vector3I constructor in this SDK, so build it from the components).
 			Vector3I dirI = MachineFace.FaceDirections[face];
 			Vector3 dir = new Vector3(dirI.X, dirI.Y, dirI.Z);
-			// A thin plate (a flat box) sized to a corner of the face. The thin
-			// dimension runs ALONG the face's outward axis so the plate sits just
-			// proud of the surface; the two in-face dimensions are the plate's
-			// width/height. Kept small so it reads as a marker, not a panel.
-			var plateSize = new Vector3(0.22f, 0.22f, 0.06f);
-			// Orient the plate so its thin axis is the face normal:
-			//   +X/-X face → thin in X; +Y/-Y face → thin in Y; +Z/-Z face → thin in Z.
-			switch (face)
-			{
-				case 0: // +X
-				case 1: // -X
-					plateSize = new Vector3(0.06f, 0.22f, 0.22f);
-					break;
-				case 2: // +Y
-				case 3: // -Y
-					plateSize = new Vector3(0.22f, 0.06f, 0.22f);
-					break;
-				// 4 (+Z) / 5 (-Z): default plateSize (thin in Z)
-			}
-			var plate = new BoxMesh { Size = plateSize };
 
-			// Position the plate at the face, pushed slightly OUTSIDE the surface
+			// The arrow's tip direction in the machine's local space:
+			//   OUTPUT → +dir (out of the face)
+			//   INPUT  → -dir (into the face)
+			Vector3 tipDir = port == MachinePort.Output ? dir : -dir;
+			var arrowBasis = AlignYToDir(tipDir);
+
+			// Position the arrow at the face, pushed slightly OUTSIDE the surface
 			// (half a voxel along the face normal + a hair past the surface) so it
 			// sits proud of the machine body without z-fighting the mesh.
-			Vector3 pos = dir * (0.5f * voxelSize + 0.04f * voxelSize);
+			Vector3 pos = dir * (0.5f * voxelSize + 0.03f * voxelSize);
 
 			var indicator = new MeshInstance3D
 			{
 				Name = $"FacePort_{MachineFace.Label(MachineFace.FaceDirections[face])}",
-				Mesh = plate,
+				Mesh = cone,
 				MaterialOverride = port == MachinePort.Input
 					? InputIndicatorMaterial
 					: OutputIndicatorMaterial,
 				CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
 			};
 			indicator.Position = pos;
+			indicator.Basis = arrowBasis;
 			indicator.Scale = new Vector3(voxelSize, voxelSize, voxelSize);
 			AddChild(indicator);
 			_faceIndicators[face] = indicator;
@@ -504,6 +497,63 @@ public partial class Machine : StaticBody3D
 		// Apply the current global visibility so a freshly-built machine respects
 		// the F2 toggle state.
 		ApplyIndicatorVisibility();
+	}
+
+	/// <summary>
+	/// Builds a small cone mesh (an arrow) whose tip is along local +Y and whose
+	/// base (a flat circle) is at local -Y. Built once and shared by every face
+	/// indicator on every machine. Uses <see cref="SurfaceTool"/> (the same path
+	/// the LOD heightfields use) because <see cref="PrimitiveMesh"/> does not
+	/// expose cone radius/height in this Godot SDK.
+	/// </summary>
+	private static ArrayMesh BuildArrowMesh()
+	{
+		const int sides = 12;
+		const float baseRadius = 0.11f;
+		const float tipY = 0.15f;    // tip at +Y
+		const float baseY = -0.09f;  // base circle at -Y
+
+		var tool = new SurfaceTool();
+		tool.Begin(Mesh.PrimitiveType.Triangles);
+
+		for (int s = 0; s < sides; s++)
+		{
+			float a0 = Mathf.Tau * s / sides;
+			float a1 = Mathf.Tau * (s + 1) / sides;
+			var p0 = new Vector3(baseRadius * Mathf.Cos(a0), baseY, baseRadius * Mathf.Sin(a0));
+			var p1 = new Vector3(baseRadius * Mathf.Cos(a1), baseY, baseRadius * Mathf.Sin(a1));
+			var tip = new Vector3(0f, tipY, 0f);
+			// Two triangles per side: the cone's lateral face (tip, p0, p1) and
+			// the base cap (p0, p1, center) so the arrow's back is solid.
+			tool.AddVertex(p0);
+			tool.AddVertex(tip);
+			tool.AddVertex(p1);
+			var center = new Vector3(0f, baseY, 0f);
+			tool.AddVertex(p0);
+			tool.AddVertex(p1);
+			tool.AddVertex(center);
+		}
+		return tool.Commit();
+	}
+
+	/// <summary>
+	/// Builds a <see cref="Basis"/> whose local +Y axis (the cone's tip) points
+	/// along <paramref name="dir"/>. The remaining axes are chosen so the cone's
+	/// flat base faces "up" relative to the world, making the arrow read as a 2D
+	/// glyph on the face rather than a 3D spike.
+	/// </summary>
+	private static Basis AlignYToDir(Vector3 dir)
+	{
+		Vector3 target = dir.Normalized();
+		// Pick a hint not parallel to target to build the cross.
+		Vector3 hint = Math.Abs(target.Y) < 0.9f ? Vector3.Up : Vector3.Right;
+		// x = target × hint (perpendicular to target); z = target × x.
+		Vector3 x = target.Cross(hint).Normalized();
+		Vector3 z = target.Cross(x).Normalized();
+		// Re-orthogonalize x against (z, target) to keep the basis orthonormal.
+		x = z.Cross(target).Normalized();
+		// Basis columns are local X, Y, Z in world space; Y = target (the tip).
+		return new Basis(x, target, z);
 	}
 
 	/// <summary>

@@ -150,6 +150,23 @@ public partial class InventoryUI : CanvasLayer
 	private Label _hotbarAmmoCount;
 	private static readonly Color HotbarAmmoCountColor = new Color(0.92f, 0.92f, 0.92f);
 
+	// The player's health + stamina bars: a pair of horizontal ColorRects drawn
+	// just ABOVE the hotbar (health on the left, stamina on the right). They are
+	// the always-visible vitals readout, mirroring the hotbar's manual
+	// positioning. Filled by BuildVitalsBars(); their fill ratio is driven by the
+	// Player's HealthChanged / StaminaChanged events (wired lazily in _Process).
+	private ColorRect _healthBarBg;
+	private ColorRect _healthBarFill;
+	private ColorRect _staminaBarBg;
+	private ColorRect _staminaBarFill;
+	private Label _healthBarLabel;
+	private Label _staminaBarLabel;
+	private Player _playerRef; // cached player (looked up lazily; null until found)
+	private static readonly Color HealthBarColor = new Color(0.85f, 0.18f, 0.18f);   // red
+	private static readonly Color StaminaBarColor = new Color(0.25f, 0.8f, 0.3f);    // green
+	private static readonly Color BarBackColor = new Color(0f, 0f, 0f, 0.55f);
+	private static readonly Color BarBorderColor = new Color(0f, 0f, 0f, 0.8f);
+
 	// The slot-grid section (the Control that holds the storage grid + hotbar
 	// row). Kept so the ammo slots (children of it) can be positioned relative to
 	// the grid. The hotbar row's X origin (so each hotbar slot's position is known).
@@ -217,6 +234,10 @@ public partial class InventoryUI : CanvasLayer
 
 	public override void _Process(double delta)
 	{
+		// The player may spawn AFTER this UI builds (the world loads first), so
+		// resolve + wire the vitals events lazily, once per frame until found.
+		EnsurePlayerWired();
+
 		// Refresh slot visuals only when something actually changed.
 		if (_dirty)
 		{
@@ -480,6 +501,9 @@ public partial class InventoryUI : CanvasLayer
 		{
 			_hotbarTooltip.Visible = !open;
 		}
+		// The health/stamina bars sit just above the hotbar too, so they hide
+		// with it while the inventory panel is open.
+		_syncVitalsVisibility();
 		if (_root != null)
 		{
 			// Stop = eat clicks while open (the player must not click through);
@@ -1108,6 +1132,195 @@ public partial class InventoryUI : CanvasLayer
 		_hotbarTooltip.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
 		_hotbarTooltip.AddThemeConstantOverride("outline_size", 4);
 		_root.AddChild(_hotbarTooltip);
+
+		// The health + stamina bars sit just above the hotbar (health left,
+		// stamina right), spanning the hotbar's width.
+		BuildVitalsBars(hbPos, hbW);
+	}
+
+	/// <summary>
+	/// Builds the player's health + stamina bars: two horizontal bars drawn just
+	/// above the hotbar, health on the left and stamina on the right, spanning the
+	/// hotbar's width. Each is a dark background ColorRect with a colored fill
+	/// ColorRect (its width = fraction × bar width) and a small value label. The
+	/// fills are updated by the Player's HealthChanged / StaminaChanged events
+	/// (wired lazily in <see cref="_Process"/>).
+	/// </summary>
+	private void BuildVitalsBars(Vector2 hotbarPos, float hotbarWidth)
+	{
+		float barH = 14f;
+		float barGap = 8f;          // gap between the two bars
+		float totalW = hotbarWidth;
+		float barW = (totalW - barGap) / 2f;
+
+		// The held-item tooltip sits just above the hotbar (28px up, 20px tall),
+		// so the vitals bars go ABOVE it with a small gap: 28 (tooltip bottom)
+		// + 20 (tooltip height) + 6 (gap) + 14 (bar height) = 68px above the
+		// hotbar's top. This keeps the bars clear of the hotbar info panel.
+		float y = hotbarPos.Y - 68f;
+
+		// --- Health (left) ---
+		_healthBarBg = new ColorRect
+		{
+			Name = "HealthBarBg",
+			Color = BarBackColor,
+			Position = new Vector2(hotbarPos.X, y),
+			Size = new Vector2(barW, barH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_healthBarBg.AddThemeStyleboxOverride("normal", MakeBarStyle(BarBorderColor));
+		_root.AddChild(_healthBarBg);
+
+		_healthBarFill = new ColorRect
+		{
+			Name = "HealthBarFill",
+			Color = HealthBarColor,
+			Position = Vector2.Zero,
+			Size = new Vector2(barW, barH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_healthBarBg.AddChild(_healthBarFill);
+
+		_healthBarLabel = new Label
+		{
+			Name = "HealthBarLabel",
+			Text = "",
+			Position = new Vector2(4f, 0f),
+			Size = new Vector2(barW - 8f, barH),
+			HorizontalAlignment = HorizontalAlignment.Left,
+			VerticalAlignment = VerticalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_healthBarLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
+		_healthBarLabel.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
+		_healthBarLabel.AddThemeConstantOverride("outline_size", 3);
+		_healthBarLabel.AddThemeFontSizeOverride("font_size", 11);
+		_healthBarBg.AddChild(_healthBarLabel);
+
+		// --- Stamina (right) ---
+		float xRight = hotbarPos.X + barW + barGap;
+		_staminaBarBg = new ColorRect
+		{
+			Name = "StaminaBarBg",
+			Color = BarBackColor,
+			Position = new Vector2(xRight, y),
+			Size = new Vector2(barW, barH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_staminaBarBg.AddThemeStyleboxOverride("normal", MakeBarStyle(BarBorderColor));
+		_root.AddChild(_staminaBarBg);
+
+		_staminaBarFill = new ColorRect
+		{
+			Name = "StaminaBarFill",
+			Color = StaminaBarColor,
+			Position = Vector2.Zero,
+			Size = new Vector2(barW, barH),
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_staminaBarBg.AddChild(_staminaBarFill);
+
+		_staminaBarLabel = new Label
+		{
+			Name = "StaminaBarLabel",
+			Text = "",
+			Position = new Vector2(4f, 0f),
+			Size = new Vector2(barW - 8f, barH),
+			HorizontalAlignment = HorizontalAlignment.Left,
+			VerticalAlignment = VerticalAlignment.Center,
+			MouseFilter = Control.MouseFilterEnum.Ignore,
+		};
+		_staminaBarLabel.AddThemeColorOverride("font_color", new Color(0.95f, 0.95f, 0.95f));
+		_staminaBarLabel.AddThemeColorOverride("font_outline_color", new Color(0f, 0f, 0f, 0.8f));
+		_staminaBarLabel.AddThemeConstantOverride("outline_size", 3);
+		_staminaBarLabel.AddThemeFontSizeOverride("font_size", 11);
+		_staminaBarBg.AddChild(_staminaBarLabel);
+
+		// Show the bars with the hotbar (hide them while the inventory panel is
+		// open, mirroring the hotbar's SetOpenVisuals behavior).
+		_syncVitalsVisibility();
+	}
+
+	/// <summary>A flat style with a thin border for the vitals-bar backgrounds.</summary>
+	private static StyleBoxFlat MakeBarStyle(Color borderColor)
+	{
+		return new StyleBoxFlat
+		{
+			BgColor = BarBackColor,
+			BorderWidthLeft = 1,
+			BorderWidthTop = 1,
+			BorderWidthRight = 1,
+			BorderWidthBottom = 1,
+			BorderColor = borderColor,
+		};
+	}
+
+	/// <summary>
+	/// Shows or hides the vitals bars together with the hotbar (they are hidden
+	/// while the inventory panel is open, since the panel's bottom row serves as
+	/// the hotbar then). Called from <see cref="SetOpenVisuals"/>.
+	/// </summary>
+	private void _syncVitalsVisibility()
+	{
+		bool show = !IsOpen();
+		if (_healthBarBg != null) _healthBarBg.Visible = show;
+		if (_staminaBarBg != null) _staminaBarBg.Visible = show;
+	}
+
+	/// <summary>
+	/// Updates the vitals-bar fill widths + labels from the player's current
+	/// health/stamina. Called from the Player's HealthChanged / StaminaChanged
+	/// events and once per frame until the player reference is found.
+	/// </summary>
+	private void UpdateVitalsBars()
+	{
+		if (_playerRef == null)
+		{
+			return;
+		}
+		float hpFrac = Mathf.Clamp(_playerRef.Health / _playerRef.MaxHealth, 0f, 1f);
+		float spFrac = Mathf.Clamp(_playerRef.Stamina / _playerRef.MaxStamina, 0f, 1f);
+
+		if (_healthBarFill != null)
+		{
+			float w = _healthBarBg != null ? _healthBarBg.Size.X * hpFrac : 0f;
+			_healthBarFill.Size = new Vector2(w, _healthBarFill.Size.Y);
+		}
+		if (_healthBarLabel != null)
+		{
+			_healthBarLabel.Text = $"{Mathf.CeilToInt(_playerRef.Health)} / {Mathf.CeilToInt(_playerRef.MaxHealth)}";
+		}
+		if (_staminaBarFill != null)
+		{
+			float w = _staminaBarBg != null ? _staminaBarBg.Size.X * spFrac : 0f;
+			_staminaBarFill.Size = new Vector2(w, _staminaBarFill.Size.Y);
+		}
+		if (_staminaBarLabel != null)
+		{
+			_staminaBarLabel.Text = $"{Mathf.CeilToInt(_playerRef.Stamina)} / {Mathf.CeilToInt(_playerRef.MaxStamina)}";
+		}
+	}
+
+	/// <summary>
+	/// Lazily resolves the player (it may not exist yet when the UI builds, since
+	/// the player spawns after the world loads) and wires the vitals events.
+	/// Safe to call every frame: it no-ops once the player is cached and wired.
+	/// </summary>
+	private void EnsurePlayerWired()
+	{
+		if (_playerRef != null)
+		{
+			return;
+		}
+		var p = GetTree().GetFirstNodeInGroup("player") as Player;
+		if (p == null)
+		{
+			return; // player not spawned yet; retry next frame
+		}
+		_playerRef = p;
+		p.HealthChanged += _ => UpdateVitalsBars();
+		p.StaminaChanged += _ => UpdateVitalsBars();
+		UpdateVitalsBars(); // initial paint
 	}
 
 	// ------------------------------------------------------------------

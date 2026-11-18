@@ -1,4 +1,5 @@
 using Godot;
+using System;
 using System.Collections.Generic;
 using FactorySim.Items;
 
@@ -63,6 +64,35 @@ public partial class Player : CharacterBody3D
 	/// <summary>Path to the camera that pitches with the mouse.</summary>
 	[Export] public NodePath CameraPath { get; set; } = new("Camera3D");
 
+	[ExportGroup("Health")]
+	/// <summary>Maximum health points. The player starts at this value.</summary>
+	[Export(PropertyHint.Range, "1,1000,1")] public float MaxHealth { get; set; } = 100f;
+
+	/// <summary>Whether health regenerates over time (after a delay following damage).</summary>
+	[Export] public bool HealthRegenEnabled { get; set; } = true;
+
+	/// <summary>Health points recovered per second while regenerating.</summary>
+	[Export(PropertyHint.Range, "0,100,0.5")] public float HealthRegenRate { get; set; } = 5f;
+
+	/// <summary>Seconds to wait after taking damage before health regen begins.</summary>
+	[Export(PropertyHint.Range, "0,60,0.5")] public float HealthRegenDelay { get; set; } = 4f;
+
+	[ExportGroup("Stamina")]
+	/// <summary>Maximum stamina points. The player starts at this value.</summary>
+	[Export(PropertyHint.Range, "1,1000,1")] public float MaxStamina { get; set; } = 100f;
+
+	/// <summary>Whether stamina regenerates over time (after a delay following use).</summary>
+	[Export] public bool StaminaRegenEnabled { get; set; } = true;
+
+	/// <summary>Stamina points recovered per second while regenerating.</summary>
+	[Export(PropertyHint.Range, "0,100,0.5")] public float StaminaRegenRate { get; set; } = 12f;
+
+	/// <summary>Seconds to wait after using stamina (sprinting) before stamina regen begins.</summary>
+	[Export(PropertyHint.Range, "0,60,0.5")] public float StaminaRegenDelay { get; set; } = 1.5f;
+
+	/// <summary>Stamina consumed per second while sprinting.</summary>
+	[Export(PropertyHint.Range, "0,100,0.5")] public float SprintStaminaDrain { get; set; } = 15f;
+
 	private Camera3D _camera;
 	private float _yaw;
 	private float _pitch;
@@ -74,6 +104,13 @@ public partial class Player : CharacterBody3D
 	// Fly mode state
 	private bool _flying;
 	private float _lastSpacePressTime = -999f; // seconds since _Ready (via Time)
+
+	// Health / stamina state (current values + regen timers).
+	private float _health;
+	private float _stamina;
+	private float _healthRegenTimer; // counts down after damage; regen starts at 0
+	private float _staminaRegenTimer; // counts down after use; regen starts at 0
+	private bool _sprinting; // true while sprinting (drives stamina drain)
 
 	/// <summary>
 	/// When false the character is frozen: no movement input, no mouse look,
@@ -133,6 +170,129 @@ public partial class Player : CharacterBody3D
 			var vel = Velocity;
 			vel.Y = 0f;
 			Velocity = vel;
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Health / stamina
+	// ------------------------------------------------------------------
+
+	/// <summary>Current health (0–<see cref="MaxHealth"/>).</summary>
+	public float Health => _health;
+
+	/// <summary>Current stamina (0–<see cref="MaxStamina"/>).</summary>
+	public float Stamina => _stamina;
+
+	/// <summary>True while the player is alive (health > 0).</summary>
+	public bool IsAlive => _health > 0f;
+
+	/// <summary>
+	/// Raises when the player takes damage (with the new health). The HUD and
+	/// any damage-feedback system can listen to this.
+	/// </summary>
+	public event Action<float> HealthChanged;
+
+	/// <summary>
+	/// Raises when the player's stamina changes (with the new stamina). The HUD
+	/// listens to this to keep the stamina bar in sync.
+	/// </summary>
+	public event Action<float> StaminaChanged;
+
+	/// <summary>
+	/// Damages the player by <paramref name="amount"/> health points. Clamped at
+	/// 0; at 0 the player is dead (<see cref="IsAlive"/> is false). Triggers the
+	/// health-regen delay (regen won't start until <see cref="HealthRegenDelay"/>
+	/// seconds have passed). Fires <see cref="HealthChanged"/>.
+	/// </summary>
+	public void TakeDamage(float amount)
+	{
+		if (amount <= 0f || !IsAlive)
+		{
+			return;
+		}
+		_health = Mathf.Max(0f, _health - amount);
+		// Reset the regen delay: health won't come back until HealthRegenDelay
+		// seconds have passed without further damage.
+		_healthRegenTimer = HealthRegenDelay;
+		HealthChanged?.Invoke(_health);
+	}
+
+	/// <summary>
+	/// Fully restores the player's health and stamina (used on spawn / load).
+	/// Resets the regen timers so the player is in a clean state.
+	/// </summary>
+	public void RestoreVitals()
+	{
+		_health = MaxHealth;
+		_stamina = MaxStamina;
+		_healthRegenTimer = 0f;
+		_staminaRegenTimer = 0f;
+		HealthChanged?.Invoke(_health);
+		StaminaChanged?.Invoke(_stamina);
+	}
+
+	/// <summary>
+	/// Tries to spend <paramref name="amount"/> stamina. Returns true and
+	/// deducts if the player has enough; false (no deduction) if not. Sprinting
+	/// uses this each physics tick. Triggers the stamina-regen delay.
+	/// </summary>
+	public bool TrySpendStamina(float amount)
+	{
+		if (amount <= 0f)
+		{
+			return true;
+		}
+		if (_stamina < amount)
+		{
+			return false;
+		}
+		_stamina = Mathf.Max(0f, _stamina - amount);
+		_staminaRegenTimer = StaminaRegenDelay;
+		StaminaChanged?.Invoke(_stamina);
+		return true;
+	}
+
+	/// <summary>
+	/// Per-tick health/stamina update: drains stamina while sprinting, and
+	/// regenerates health/stamina (after their respective delays) when enabled.
+	/// Called from <see cref="_PhysicsProcess"/>.
+	/// </summary>
+	private void UpdateVitals(float dt)
+	{
+		// --- Stamina drain (sprinting) ---
+		if (_sprinting && IsOnFloor() && !_flying && _stamina > 0f)
+		{
+			_stamina = Mathf.Max(0f, _stamina - SprintStaminaDrain * dt);
+			_staminaRegenTimer = StaminaRegenDelay;
+			StaminaChanged?.Invoke(_stamina);
+		}
+
+		// --- Health regen ---
+		if (HealthRegenEnabled && _health > 0f && _health < MaxHealth)
+		{
+			if (_healthRegenTimer > 0f)
+			{
+				_healthRegenTimer -= dt;
+			}
+			else
+			{
+				_health = Mathf.Min(MaxHealth, _health + HealthRegenRate * dt);
+				HealthChanged?.Invoke(_health);
+			}
+		}
+
+		// --- Stamina regen ---
+		if (StaminaRegenEnabled && _stamina < MaxStamina && !_sprinting)
+		{
+			if (_staminaRegenTimer > 0f)
+			{
+				_staminaRegenTimer -= dt;
+			}
+			else
+			{
+				_stamina = Mathf.Min(MaxStamina, _stamina + StaminaRegenRate * dt);
+				StaminaChanged?.Invoke(_stamina);
+			}
 		}
 	}
 
@@ -210,6 +370,10 @@ public partial class Player : CharacterBody3D
 		// Safety net for stale scene data: a `= null` export override loads as exactly 0,
 		// which would leave the player floating in zero-g with a dead mouse.
 		SanitizeExports();
+
+		// Start at full health and stamina (the world's spawn/restore path may
+		// call RestoreVitals again, but this ensures a sane initial state).
+		RestoreVitals();
 
 		// VoxelWorld (and any other systems) locate the player via this group.
 		AddToGroup("player");
@@ -307,6 +471,13 @@ public partial class Player : CharacterBody3D
 		{
 			ApplyGravityOnly(dt);
 		}
+
+		// Track whether the player is sprinting this tick (drives stamina drain
+		// in UpdateVitals). Sprinting requires the sprint key held, being on the
+		// ground, and not flying.
+		_sprinting = Input.IsActionPressed("sprint") && IsOnFloor() && !_flying;
+
+		UpdateVitals(dt);
 
 		MoveAndSlide();
 	}
@@ -412,7 +583,11 @@ public partial class Player : CharacterBody3D
 			input = input.Normalized();
 		}
 
-		var speed = Input.IsActionPressed("sprint") ? SprintSpeed : WalkSpeed;
+		// Sprint only when the player has stamina (and isn't already drained).
+		// This is the GATE: when stamina hits 0, sprint speed is unavailable and
+		// the player falls back to walk speed until stamina regens.
+		bool canSprint = Input.IsActionPressed("sprint") && _stamina > 0f && IsOnFloor() && !_flying;
+		var speed = canSprint ? SprintSpeed : WalkSpeed;
 		var accel = (IsOnFloor() ? Acceleration : AirAcceleration) * dt;
 
 		var targetVelocity = GlobalBasis * (input * speed);
@@ -513,6 +688,11 @@ public partial class Player : CharacterBody3D
 		if (DoubleTapWindow <= 0f) { DoubleTapWindow = 0.3f; fixes.Add("DoubleTapWindow -> 0.3"); }
 		if (MouseSensitivity <= 0f) { MouseSensitivity = 0.0022f; fixes.Add("MouseSensitivity -> 0.0022"); }
 		if (MaxPitchDegrees <= 0f) { MaxPitchDegrees = 89f; fixes.Add("MaxPitchDegrees -> 89"); }
+		if (MaxHealth <= 0f) { MaxHealth = 100f; fixes.Add("MaxHealth -> 100"); }
+		if (MaxStamina <= 0f) { MaxStamina = 100f; fixes.Add("MaxStamina -> 100"); }
+		if (HealthRegenRate < 0f) { HealthRegenRate = 5f; fixes.Add("HealthRegenRate -> 5"); }
+		if (StaminaRegenRate < 0f) { StaminaRegenRate = 12f; fixes.Add("StaminaRegenRate -> 12"); }
+		if (SprintStaminaDrain < 0f) { SprintStaminaDrain = 15f; fixes.Add("SprintStaminaDrain -> 15"); }
 
 		if (fixes.Count > 0)
 		{

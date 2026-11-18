@@ -803,6 +803,99 @@ public partial class VoxelChunk : Node3D
 	}
 
 	/// <summary>
+	/// DAMAGE-ONLY light update: re-solve the cached wide light field around a
+	/// damaged voxel WITHOUT patching the wide volumes. Unlike <see
+	/// cref="RecomputeLightAtSource"/> (which patches the edited voxel's NEW
+	/// solid + block-light state into the wide volumes first), this method
+	/// assumes the wide volumes ALREADY hold the correct solid/source state —
+	/// which is true for a damage tick (the voxel is still solid, not a light
+	/// source, so its wide state is unchanged) and for a break that the full
+	/// rebuild's re-bake has already folded in. It runs <see
+	/// cref="SkyLight.ComputeLocal"/> over a box centred on the voxel and returns
+	/// the sub-cells whose sampled light changed.
+	///
+	/// This is the chunk-light update for DAMAGE (the shared damage system:
+	/// tools, weapons, explosions, zombies). A damage tick changes neither the
+	/// voxel's solid state nor its block-light source, so the instant path's
+	/// solid/source light delta never fires — yet the chunk's wide field still
+	/// needs re-solving (the damaged voxel's faces are re-meshed and sample the
+	/// wide field; a crater opened to the sky changes the sky light). The caller
+	/// re-meshes the returned sub-cells.
+	/// </summary>
+	public System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> RecomputeDamageLight(
+		VoxelWorld world, int lpx, int lpy, int lpz,
+		int localX, int localY, int localZ, int radius)
+	{
+		var changed = new System.Collections.Generic.HashSet<VoxelWorld.VoxelCell>();
+		if (_cachedLightField == null || _cachedWideSolid == null)
+		{
+			return changed; // no light field yet (first build) — the full rebuild handles it
+		}
+
+		int ml = MaxLightFor();
+		int r = Mathf.Max(0, radius);
+		if (r < ml) r = ml; // the light can reach further than the damage radius
+
+		int half = lpx / 2 - 1;
+		int centerW = localX + half;
+		int centerY = localY + 1;
+		int centerZ = localZ + half;
+
+		// Box around the voxel in WIDE indices, clamped to the field bounds.
+		int bx0 = System.Math.Max(0, centerW - r);
+		int bx1 = System.Math.Min(lpx - 1, centerW + r);
+		int by0 = System.Math.Max(0, centerY - r);
+		int by1 = System.Math.Min(lpy - 1, centerY + r);
+		int bz0 = System.Math.Max(0, centerZ - r);
+		int bz1 = System.Math.Min(lpz - 1, centerZ + r);
+
+		// Snapshot the box's curved values, re-solve the whole box from scratch
+		// (the wide solid/block volumes already hold the correct state), re-apply
+		// the response curve over it, then diff against the snapshot.
+		int bx = bx1 - bx0 + 1, by = by1 - by0 + 1, bz = bz1 - bz0 + 1;
+		int total = bx * by * bz;
+		var before = new float[total];
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					before[ix + bx * (iy + by * iz)] = _cachedLightField[g];
+				}
+
+		SkyLight.ComputeLocal(_cachedWideSolid, _cachedWideBlock, _cachedLightField, _cachedBlockLit,
+			lpx, lpy, lpz, bx0, by0, bz0, bx1, by1, bz1, world.MaxLightLevel);
+		ApplyLightResponseBox(world, total, bx, by, bz, bx0, by0, bz0, lpx, lpy, lpz);
+
+		for (int iz = 0; iz < bz; iz++)
+			for (int iy = 0; iy < by; iy++)
+				for (int ix = 0; ix < bx; ix++)
+				{
+					int l = ix + bx * (iy + by * iz);
+					int g = (bx0 + ix) + lpx * ((by0 + iy) + lpy * (bz0 + iz));
+					if (System.Math.Abs(_cachedLightField[g] - before[l]) < 0.0005f)
+					{
+						continue; // unchanged
+					}
+					changedWideListAdd(changed, g, lpx, lpy, world);
+				}
+		return changed;
+	}
+
+	private void changedWideListAdd(
+		System.Collections.Generic.HashSet<VoxelWorld.VoxelCell> changed,
+		int g, int lpx, int lpy, VoxelWorld world)
+	{
+		int lpySz = world.ChunkHeight + 2;
+		int wz = g / (lpx * lpySz);
+		int rem = g - wz * (lpx * lpySz);
+		int wy = rem / lpx;
+		int wx = rem - wy * lpx;
+		int half = lpx / 2 - 1;
+		changed.UnionWith(LightSampleCellsForChunkLocal(world, wx - half, wy - 1, wz - half));
+	}
+
+	/// <summary>
 	/// EDITED-CHUNK light update: run the Starlight delta (<see
 	/// cref="SkyLight.ComputeDelta"/>) centred on a single edited voxel (the
 	/// <paramref name="wIndex"/> wide index of the edited voxel). Unlike <see
@@ -2270,20 +2363,28 @@ public partial class VoxelChunk : Node3D
 		// NORMALIZED field, before the curve) on the build thread, so nothing
 		// to do here.
 		//
-		// EXCEPTION: if this chunk's section light is DIRTY (the instant edit
-		// path ran — a torch was placed/broken), the INSTANT path already
-		// patched the cached wide field correctly (RecomputeLightAtSource ran
-		// the Starlight delta on the wide field, reading the torch from the
-		// live chunk data). The async build's re-baked field is STALE: its
-		// snapshot was taken at build LAUNCH (before the edit), so it does not
-		// include the torch's glow. Committing it would clobber the instant
-		// path's correct patch with the stale (dark) field — the "large
-		// portions of a chunk outside the torch's radius get turned completely
-		// black" bug. Skip the commit when the section light is dirty; the
-		// patched field (from the instant path) is the correct one. The
-		// convergence pass below re-registers the engine from the (patched)
-		// field, so the engine and field agree.
-		if (_pendingLight != null && !_sectionLightDirty)
+		// COMMIT UNCONDITIONALLY (no _sectionLightDirty guard). The old guard
+		// skipped the commit when the section light was dirty, on the theory
+		// that the instant path had already patched the wide field correctly
+		// and the async build's field was stale (pre-edit). That theory was
+		// correct for a TORCH placed via the instant path (the build's
+		// snapshot was taken before the torch was placed), but WRONG for a
+		// BREAK (a rocket/weapon breaking a voxel): the break's SetVoxel runs
+		// BEFORE the budget loop launches the build, so the build's snapshot
+		// IS post-edit and _pendingLight is the CORRECT, fully-converged
+		// field (the crater's sky light is in it). Skipping the commit left
+		// _cachedLightField holding the PRE-break (dark) field, and the
+		// convergence pass's single-voxel Starlight delta (which only patches
+		// the impact voxel, not the whole crater) could not restore the
+		// crater's light — the rocket left a permanently black hole.
+		//
+		// The torch case is still correct: if the build's field is stale
+		// (pre-torch), the convergence pass below runs the Starlight delta
+		// (patching the torch voxel into the wide volumes + propagating the
+		// glow into _cachedLightField) and then ReSeedLightFromWideField
+		// re-seeds the section engine from the CORRECTED field. So the
+		// engine and field agree regardless of which field was committed.
+		if (_pendingLight != null)
 		{
 			_cachedLightField = _pendingLight;
 			_cachedBlockLit = _pendingBlockLit;

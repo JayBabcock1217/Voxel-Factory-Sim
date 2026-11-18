@@ -223,15 +223,36 @@ public partial class Projectile : Node3D
 	private void Impact(Vector3I hitVoxel, Vector3 hitNormal)
 	{
 		_exploded = true;
-		// Point damage at the impact voxel, then a sphere blast for the rocket.
-		float remaining = _world.DamageVoxel(hitVoxel, _damage);
-		if (remaining <= 0f)
-		{
-			_world.BreakVoxel(hitVoxel);
-		}
+		// Point damage at the impact voxel, then a sphere blast around it. BOTH
+		// funnel through the SHARED damage system (VoxelWorld.DamageVoxel — the
+		// same method the tools and zombies use): DamageVoxel writes each voxel's
+		// health, persists it, and triggers the chunk lighting update, so a
+		// projectile-damaged voxel re-lits its chunk exactly like a tool-damaged
+		// one. The impact voxel takes the full _damage (so it always breaks); the
+		// blast adds a falloff crater around it. Unbreakable voxels (bedrock) are
+		// skipped by both (DamageVoxel drops their damage).
+		//
+		// The impact voxel is also inside the blast sphere (at distance 0), so
+		// the blast will damage + break it. We do NOT break it separately here —
+		// the blast's BreakVoxelBatch handles it in the same batch (one sky BFS
+		// + one geometry remesh for the whole blast, including the impact voxel).
+		// Breaking it separately would run a second BFS + remesh (the hitch).
 		if (_blastRadius > 0)
 		{
 			ExplosionApplier.Apply(_world, hitVoxel, _blastRadius, _damage);
+		}
+		else
+		{
+			// No blast radius: just point damage at the impact voxel.
+			int material = _world.GetVoxel(hitVoxel.X, hitVoxel.Y, hitVoxel.Z);
+			if (material != VoxelMaterialIds.Air && !_world.IsUnbreakable(material))
+			{
+				float healthAfter = _world.DamageVoxel(hitVoxel, _damage);
+				if (healthAfter <= 0f)
+				{
+					_world.BreakVoxel(hitVoxel);
+				}
+			}
 		}
 		RemoveProjectile();
 	}

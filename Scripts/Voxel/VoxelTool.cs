@@ -179,10 +179,20 @@ public partial class VoxelTool : Node3D
 	/// Keyed by world voxel so the damage PERSISTS: it is stored immediately
 	/// each frame, so if the player stops, moves to another voxel, or re-aims
 	/// at the same voxel later, the damage carried so far is retained and the
-	/// voxel breaks the moment its total reaches full health. This is the
-	/// source of truth for breaking — the voxel's stored health is reset by
-	/// edits (see VoxelWorld.SetVoxel), so it can't be read back to decide when
-	/// to break.
+	/// voxel breaks the moment its total reaches full health.
+	///
+	/// THE SHARED DAMAGE SYSTEM: this accumulator tracks how much damage THE
+	/// TOOL has dealt this voxel. When the tool breaks the voxel (total >= full
+	/// health) it funnels through VoxelWorld.BreakVoxel, which resets the
+	/// voxel's stored health — so the tool can't rely on the world's stored
+	/// health as the source of truth for ITS OWN damage (a tool-damaged voxel
+	/// the player then re-aims at would read a reset health and re-mine from
+	/// zero). The accumulator is the tool's private bookkeeping; the world's
+	/// health (written by VoxelWorld.DamageVoxel, the shared damage choke point
+	/// the weapons and zombies use) is what other sources see, and a voxel the
+	/// player damages with a tool is broken via the same BreakVoxel the weapons
+	/// use, so the break rule and the chunk lighting update are identical for
+	/// every source.
 	/// </summary>
 	private readonly System.Collections.Generic.Dictionary<Vector3I, float> _mineDamage = new();
 
@@ -1328,9 +1338,16 @@ public partial class VoxelTool : Node3D
 	/// stored immediately each frame, so it persists across frames and across
 	/// re-aiming: the moment the targeted voxel's total damage reaches its full
 	/// health (100%) the voxel breaks (is removed) and its entry is cleared.
-	/// This is the source of truth for breaking — the voxel's stored health is
-	/// reset to full by <see cref="VoxelWorld.SetVoxel"/> on every edit, so it
-	/// can't be read back to decide when to break.
+	///
+	/// THE SHARED DAMAGE SYSTEM: the tool's damage is tracked in _mineDamage
+	/// (the tool's private bookkeeping, because the tool can't read the world's
+	/// stored health back — a tool break resets it). But the BREAK itself funnels
+	/// through VoxelWorld.BreakVoxel — the same method the weapons and zombies
+	/// use — so the break rule, the VoxelBroken event (drops), and the chunk
+	/// lighting update are IDENTICAL for every damage source. When the player
+	/// mines a voxel the weapons or zombies have already damaged, the tool's
+	/// accumulator starts from the world's current health (the shared damage the
+	/// other source wrote), so damage from different sources combines.
 	/// </summary>
 	private void ApplyMiningDamage(float dt)
 	{
@@ -1349,9 +1366,15 @@ public partial class VoxelTool : Node3D
 			return;
 		}
 
-		// Refresh the target's damage from storage each frame (a fresh value
-		// when the player re-aimed at this voxel, its carried value otherwise).
-		float damage = _mineDamage.TryGetValue(_targetVoxel, out float stored) ? stored : 0f;
+		// Refresh the target's damage from storage each frame. The baseline is
+		// the tool's OWN accumulated damage on this voxel (a fresh value when
+		// the player re-aimed, its carried value otherwise) PLUS any damage the
+		// voxel already carried from other sources (weapons/zombies, written to
+		// the world's health by VoxelWorld.DamageVoxel) — so damage from
+		// different sources combines (the shared system).
+		float ownDamage = _mineDamage.TryGetValue(_targetVoxel, out float stored) ? stored : 0f;
+		float fromWorld = Mathf.Max(0f, VoxelHealth.MaxHealth - _world.GetVoxelHealth(_targetVoxel));
+		float damage = ownDamage + fromWorld;
 
 		float breakTime = 1.0f;
 		if (_world.MaterialConfig != null && _world.MaterialConfig.GetDef(material) is { } def && def.Entry != null)
@@ -1381,9 +1404,11 @@ public partial class VoxelTool : Node3D
 			return;
 		}
 
-		// Store immediately so the damage is persistent if the player stops or
-		// moves to another voxel this frame.
-		_mineDamage[_targetVoxel] = damage;
+		// Store the tool's OWN damage (not the combined total) so the next frame
+		// re-derives the other-source damage from the world's health (it may
+		// have changed since). `damage` above is ownDamage + fromWorld + this
+		// frame's tick, so the tool's share is `damage - fromWorld`.
+		_mineDamage[_targetVoxel] = damage - fromWorld;
 	}
 
 	/// <summary>

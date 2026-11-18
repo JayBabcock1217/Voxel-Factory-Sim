@@ -88,16 +88,16 @@ public partial class WeaponController : Node3D
 	private float _fireCooldown;
 	private bool _wasTriggerDown;
 
-	// Per-voxel weapon damage accumulator. MIRRORS THE TOOL'S WORKING PATTERN:
-	// the world's own voxel health (VoxelWorld.DamageVoxel / GetVoxelHealth) is
-	// unreliable as the source of truth for breaking, because VoxelWorld.SetVoxel
-	// resets a voxel's stored health to FULL on every edit — so a voxel the
-	// player has damaged gets its health wiped back to 100 (the "health 4 → 100
-	// loop"). The tool sidesteps this by keeping its OWN per-voxel damage
-	// accumulator (_mineDamage) and calling BreakVoxel when it reaches MaxHealth.
-	// The weapon does the same: it accumulates per-voxel damage here and breaks
-	// the voxel when the total reaches full health, instead of relying on the
-	// world's stored health.
+	// Per-voxel weapon damage accumulator. THE SHARED DAMAGE SYSTEM: weapon
+	// damage funnels through VoxelWorld.DamageVoxel — the SAME method the
+	// player's tools and zombies use. Each hit reads the voxel's CURRENT world
+	// health (which already includes any tool/weapon/zombie damage applied
+	// before it — so damage from different sources COMBINES), adds the shot's
+	// damage through DamageVoxel (which triggers the chunk lighting update for
+	// the damaged voxel), and breaks the voxel when its total reaches full
+	// health (VoxelHealth.MaxHealth). The accumulator remembers the total
+	// damage THIS weapon has dealt per voxel so a follow-up hit reads the right
+	// baseline; it is pruned each frame for voxels that broke (see _Process).
 	private readonly Dictionary<Vector3I, float> _voxelDamage = new();
 
 	/// <summary>RNG for the per-pellet angular spread (raycast weapons).</summary>
@@ -205,6 +205,24 @@ public partial class WeaponController : Node3D
 		bool triggerDown = Input.MouseMode == Input.MouseModeEnum.Captured
 			&& Input.IsMouseButtonPressed(MouseButton.Left);
 
+		// The shared voxel-damage system (VoxelWorld.DamageVoxel) now owns the
+		// per-voxel health, so a weapon-damaged voxel that is later re-aimed at
+		// by the player's tool carries its damage across (the tool reads the
+		// world's health). Stale entries (voxels broken by any source, or freed
+		// with their chunk) are pruned here each frame — cheap, and it keeps the
+		// world's health the single source of truth.
+		if (_voxelDamage.Count > 0)
+		{
+			foreach (var key in new List<Vector3I>(_voxelDamage.Keys))
+			{
+				int mat = _world.GetVoxel(key.X, key.Y, key.Z);
+				if (mat == VoxelMaterialIds.Air)
+				{
+					_voxelDamage.Remove(key);
+				}
+			}
+		}
+
 		var held = HeldItem;
 		int heldSlot = SelectedSlotIndex;
 		if (held.IsWeapon && held.WeaponType is { } weapon)
@@ -307,26 +325,29 @@ public partial class WeaponController : Node3D
 
 			if (hit)
 			{
-				// Apply damage to the per-voxel accumulator (the tool's pattern).
-				// Unbreakable voxels (bedrock) take no damage and never break.
+				// Apply damage through the SHARED system (VoxelWorld.DamageVoxel,
+				// the same method the tools and zombies use). Unbreakable voxels
+				// (bedrock) take no damage and never break. The baseline is the
+				// voxel's CURRENT world health (tool/weapon/zombie damage already
+				// applied combines with this shot); DamageVoxel writes the new
+				// health AND triggers the chunk lighting update for the voxel.
 				int mat = _world.GetVoxel(hitVoxel.X, hitVoxel.Y, hitVoxel.Z);
 				if (mat != VoxelMaterialIds.Air && !_world.IsUnbreakable(mat))
 				{
-					_voxelDamage.TryGetValue(hitVoxel, out float current);
-					float total = current + damage;
-					if (total >= VoxelHealth.MaxHealth)
+					float healthAfter = _world.DamageVoxel(hitVoxel, damage);
+					if (healthAfter <= 0f)
 					{
 						// The voxel is destroyed: break it (removes it, re-meshes
-						// the chunk, raises VoxelBroken). Clear its accumulator.
+						// the chunk, raises VoxelBroken for the drop pipeline).
+						// Clear its accumulator.
 						_world.BreakVoxel(hitVoxel);
 						_voxelDamage.Remove(hitVoxel);
 					}
 					else
 					{
-						_voxelDamage[hitVoxel] = total;
+						_voxelDamage[hitVoxel] = VoxelHealth.MaxHealth - healthAfter;
 					}
 				}
-
 			}
 		}
 	}

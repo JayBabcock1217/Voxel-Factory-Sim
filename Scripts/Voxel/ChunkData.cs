@@ -99,8 +99,18 @@ public sealed class ChunkData
 	}
 
 	/// <summary>Subtracts damage from a voxel's health (clamped at 0).</summary>
+	/// <remarks>
+	/// Does NOT route through <see cref="SetHealth"/>: that method clears the
+	/// storage to 0 when the *result* is at or above full health, which would
+	/// make a fully-damaged voxel (health exactly 0) indistinguishable from a
+	/// never-damaged one — <see cref="GetHealth"/> would then report full (100)
+	/// and the next damage would start from 100 again, so damage could never
+	/// accumulate to 0. Writing the raw clamped value (0..100) keeps a 0-health
+	/// voxel readable as 0 so accumulation reaches the break threshold.
+	/// </remarks>
 	public void Damage(int x, int y, int z, float amount)
 	{
-		SetHealth(x, y, z, GetHealth(x, y, z) - amount);
+		int i = Index(x, y, z);
+		Health[i] = System.Math.Max(0f, GetHealth(x, y, z) - amount);
 	}
 }
