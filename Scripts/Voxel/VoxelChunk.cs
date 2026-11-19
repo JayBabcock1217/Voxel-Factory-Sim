@@ -1670,7 +1670,8 @@ public partial class VoxelChunk : Node3D
 		{
 			_cachedLightField = MeshBuilder.BuildLightFieldWide(
 				data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, world.MaxLightLevel,
-				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock);
+				out _cachedBlockLit, out _cachedWideSolid, out _cachedWideBlock,
+				(wx, wy, wz) => world.IsDecoSolidForLight(new Vector3I(wx, wy, wz)));
 			MeshBuilder.ApplyLightResponse(_cachedLightField, world.MinLight, world.LightFalloff, world.DarknessGamma, _cachedBlockLit);
 		}
 		// The section engine's BFS just wrote block-light changes into this
@@ -1944,7 +1945,8 @@ public partial class VoxelChunk : Node3D
 				// curved result is correct; a curve-param change rebuilds all
 				// chunks and re-caches with the new curve.
 				float[] lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
-					out byte[] blockLit, out byte[] wideSolid, out byte[] wideBlock);
+					out byte[] blockLit, out byte[] wideSolid, out byte[] wideBlock,
+					(wx, wy, wz) => world.IsDecoSolidForLight(new Vector3I(wx, wy, wz)));
 				// Re-sync the Starlight delta's per-chunk raw-level state from
 				// the NORMALIZED field BEFORE the curve is applied (the curve is
 				// not the inverse of normalization; deriving raw from the curved
@@ -2111,7 +2113,8 @@ public partial class VoxelChunk : Node3D
 			// session-constant curve params, so caching the curved result is
 			// correct; a curve-param change rebuilds all chunks and re-caches.
 			lightField = MeshBuilder.BuildLightFieldWide(data, wx0, wz0, data.SizeX, data.SizeY, neighborQuery, maxLight,
-				out blockLit, out byte[] wideSolid, out byte[] wideBlock);
+				out blockLit, out byte[] wideSolid, out byte[] wideBlock,
+				(wx, wy, wz) => world.IsDecoSolidForLight(new Vector3I(wx, wy, wz)));
 			// Re-sync the Starlight delta's raw-level working state from the
 			// NORMALIZED field (before the curve is applied — the curve is not
 			// the inverse of normalization). Per-chunk buffer.

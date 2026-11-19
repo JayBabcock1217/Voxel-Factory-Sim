@@ -128,8 +128,27 @@ public static class VoxelMaterialIds
 	/// <summary>True when <paramref name="id"/> is an ammo item id.</summary>
 	public static bool IsAmmoId(int id) => id >= AmmoFirst && id <= AmmoLast;
 
+	// ------------------------------------------------------------------
+	// Deco item items (not placeable voxels in the terrain; they live in the
+	// inventory and, when placed, spawn a DecoVoxel node — the non-terrain
+	// voxel system: grass, walls, doors, windows). These ids are NOT solid
+	// materials: the world never stamps them and the mesh/palette builders
+	// never see them. They exist so a deco item is a first-class inventory
+	// item (like machines). The range starts at 500 (above the ammo block,
+	// 400-499) and is deliberately wide (up to 599) so many future deco types
+	// can be added without touching the range.
+	// ------------------------------------------------------------------
+	public const int DecoFirst = 500;
+	public const int DecoLast = 599;
+
+	/// <summary>The grass deco item id (spawns a GrassDeco when placed).</summary>
+	public const int DecoGrass = 500;
+
+	/// <summary>True when <paramref name="id"/> is a deco item id (grass, walls, doors, windows).</summary>
+	public static bool IsDecoId(int id) => id >= DecoFirst && id <= DecoLast;
+
 	/// <summary>True when <paramref name="id"/> is a placeable material (a solid voxel you can hold and place).</summary>
-	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id) && !IsMachineId(id) && !IsWeaponId(id) && !IsAmmoId(id);
+	public static bool IsPlaceableMaterialId(int id) => id > 0 && !IsToolId(id) && !IsMachineId(id) && !IsWeaponId(id) && !IsAmmoId(id) && !IsDecoId(id);
 }
 
 /// <summary>

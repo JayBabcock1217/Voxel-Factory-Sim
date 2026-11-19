@@ -1024,6 +1024,28 @@ public partial class VoxelTool : Node3D
 				_world, held.MaterialId, place, _currentRotation);
 			placed = machine != null;
 		}
+		else if (VoxelMaterialIds.IsDecoId(held.MaterialId))
+		{
+			// DecoVoxel: spawn a DecoVoxel node at the target cell (grass, walls,
+			// doors, windows). The spawner enforces the OCCUPANCY CHECK (one
+			// DecoVoxel per cell, no placing into a solid voxel) and bounds.
+			// The DecoVoxel is NOT in the terrain mesh (its cell stays air in
+			// ChunkData) — it's a separate scene-tree node with its own visual.
+			// The DecoRegistry resolves the held deco item id to the DecoType
+			// (a registered DecoDefinition's type wins; otherwise the id's
+			// built-in mapping). A null type (unregistered id) means nothing
+			// is placed.
+			if (FactorySim.Deco.DecoRegistry.TypeForItemId(held.MaterialId) is FactorySim.Deco.DecoType decoType)
+			{
+				var deco = FactorySim.Deco.DecoSpawner.SpawnDeco(
+					_world, decoType, place, dropItemId: held.MaterialId);
+				placed = deco != null;
+			}
+			else
+			{
+				placed = false;
+			}
+		}
 		else
 		{
 			// Material: place a voxel. A light-source item (LightLevel > 0)

@@ -33,8 +33,13 @@ public static class TerrainGenerator
 	// Public API - both sync and async variants
 	// ---------------------------------------------------------------------
 
-	/// <summary>Masters the terrain generation. Runs synchronously.</summary>
-	public static void Generate(ChunkData chunk, int wx0, int wz0, GenConfig cfg, Dictionary<Vector2I, VoxelChunk> chunks = null)
+	/// <summary>
+	/// Masters the terrain generation. Runs synchronously. Returns the surviving
+	/// grass (DecoVoxel) spawn positions collected in stage 3.5 and NOT cleared
+	/// by the foliage stage — the caller spawns them (the caller owns the scene
+	/// tree, so the spawn happens there).
+	/// </summary>
+	public static List<Vector3I> Generate(ChunkData chunk, int wx0, int wz0, GenConfig cfg, Dictionary<Vector2I, VoxelChunk> chunks = null)
 	{
 		int sx = chunk.SizeX;
 		int sz = chunk.SizeZ;
@@ -72,8 +77,20 @@ public static class TerrainGenerator
 			}
 		}
 
-		// Stage 4: foliage (trees, cacti) — after structures.
-		PlaceFoliageAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks).Wait();
+		// Stage 3.5: collect grass positions (DecoVoxels) on exposed surfaces.
+		// Must run BEFORE foliage so that trees/cacti can replace the grass
+		// they grow through. The positions are collected here (on the gen
+		// thread) but NOT spawned — the spawn happens on the main thread in
+		// VoxelWorld after the foliage stage has cleared the ones that were
+		// replaced.
+		var grassPositions = CollectGrassPositions(chunk, wx0, wz0, cfg, heights, sx, sz);
+
+		// Stage 4: foliage (trees, cacti) — after structures. Foliage CLEARS
+		// any grass positions it grows through (the tree/cactus replaces the
+		// grass at its base column).
+		PlaceFoliageAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks, grassPositions).Wait();
+
+		return grassPositions;
 	}
 
 	/// <summary>
@@ -96,7 +113,12 @@ public static class TerrainGenerator
 	/// When true, logs the elapsed milliseconds of each stage to the console
 	/// (for measuring generation-speed changes). Off by default.
 	/// </param>
-	public static async Task GenerateAsync(ChunkData chunk, int wx0, int wz0, GenConfig cfg, Dictionary<Vector2I, VoxelChunk> chunks = null, bool timeStages = false)
+	/// <returns>
+	/// The surviving grass (DecoVoxel) spawn positions — collected in stage
+	/// 3.5 and NOT cleared by the foliage stage. The caller (which owns the
+	/// scene tree) spawns them.
+	/// </returns>
+	public static async Task<List<Vector3I>> GenerateAsync(ChunkData chunk, int wx0, int wz0, GenConfig cfg, Dictionary<Vector2I, VoxelChunk> chunks = null, bool timeStages = false)
 	{
 		int sx = chunk.SizeX;
 		int sz = chunk.SizeZ;
@@ -143,16 +165,29 @@ public static class TerrainGenerator
 		}
 		if (timeStages) { GD.Print($"[GenTiming]   structures {sw.ElapsedMilliseconds} ms"); sw.Restart(); }
 
+		// Stage 3.5: collect grass positions (DecoVoxels) on exposed surfaces.
+		// Must run BEFORE foliage so that trees/cacti can replace the grass
+		// they grow through. The positions are collected here (on the gen
+		// thread) but NOT spawned — the spawn happens on the main thread in
+		// VoxelWorld after the foliage stage has cleared the ones that were
+		// replaced.
+		var grassPositions = CollectGrassPositions(chunk, wx0, wz0, cfg, heights, sx, sz);
+
 		// Stage 4: foliage (trees, cacti). Must run after caves and structures
 		// so trees don't grow inside rock boulders or ore veins, and so the
 		// solid-base check sees the post-cave surface (no floating trees).
 		// Canopy overhangs spill into loaded neighbour chunks; the world re-meshes
 		// the 8 neighbours when this chunk completes, so those leaves appear.
-		await PlaceFoliageAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks);
+		// Foliage CLEARS any grass positions it grows through (the tree/cactus
+		// replaces the grass at its base column).
+		await PlaceFoliageAsync(chunk, wx0, wz0, cfg, heights, sx, sz, chunks, grassPositions);
 		if (timeStages)
 		{
 			GD.Print($"[GenTiming]   foliage   {sw.ElapsedMilliseconds} ms");
 		}
+		// Return the surviving grass positions so the caller (which owns the
+		// scene tree) can spawn them in OnGenerationComplete.
+		return grassPositions;
 	}
 
 	// ---------------------------------------------------------------------
@@ -594,9 +629,164 @@ public static class TerrainGenerator
 		};
 	}
 
+	/// <summary>
+	/// Collects the grass positions (DecoVoxel spawn points) for this chunk.
+	/// Scans every column TOP-DOWN over the FINAL voxel data (after heightmap,
+	/// caves, and structures) and picks the TOPMOST exposed GRASS voxel: a
+	/// <see cref="VoxelMaterialIds.Grass"/> voxel with air directly above. The
+	/// grass position is the air cell above it.
+	///
+	/// Only GRASS material (id 1) qualifies — not dirt, stone, or any other
+	/// solid. This keeps the grass deco on the natural grass surface and off
+	/// exposed dirt/stone (e.g. freshly broken blocks, sand patches, cave
+	/// floors). The top-down scan also guarantees at most ONE position per
+	/// column (a solid voxel with solid above it is buried and skipped).
+	///
+	/// NOISE DENSITY GATE: each qualifying column rolls a per-column
+	/// probability of <c>GrassDensity × noise</c> where <c>noise</c> is the
+	/// 2D grass-density Perlin (<see cref="GenConfig.GrassNoise"/>) remapped
+	/// to [0,1]. High-noise regions become thick meadows (near-full
+	/// coverage); low-noise regions are sparse or bare. The roll is a pure
+	/// hash of (wx, wz, seed), so the SAME column always yields the SAME
+	/// result no matter which chunk generates it (seam-safe).
+	///
+	/// FLAT-SURFACE GATE (GrassFlatSurfaceOnly, default on): the grass voxel's
+	/// four HORIZONTAL neighbours must all be solid (not air). This is what
+	/// keeps grass off SLOPES and overhangs — on a stepped diagonal surface a
+	/// grass voxel has air on at least one horizontal side, so it is skipped
+	/// and grass only grows on flat, horizontal top faces. The checks read
+	/// only the own chunk (neighbour columns within the 16×16 data); a column
+	/// on the chunk's edge is skipped when its off-chunk neighbour can't be
+	/// verified (avoids planting grass that would float over an unloaded
+	/// chunk).
+	///
+	/// The <paramref name="heights"/> array is the stage-1 Perlin surface and
+	/// does NOT reflect cave carving or structure stamping — using it would
+	/// plant grass on cave ceilings and on every buried level.
+	///
+	/// This runs BEFORE the foliage stage, so the foliage can clear the
+	/// positions it grows through (the tree/cactus replaces the grass at its
+	/// base column). The surviving positions are returned from
+	/// <see cref="Generate"/> / <see cref="GenerateAsync"/> and spawned on the
+	/// main thread in <c>VoxelWorld.OnGenerationComplete</c>.
+	/// </summary>
+	private static List<Vector3I> CollectGrassPositions(
+		ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz)
+	{
+		var positions = new List<Vector3I>();
+		int sy = chunk.SizeY;
+		byte grassId = (byte)VoxelMaterialIds.Grass;
+		float grassDensity = System.Math.Clamp(cfg.GrassDensity, 0f, 1f);
+		if (grassDensity <= 0f)
+		{
+			return positions; // no grass at all
+		}
+		for (int x = 0; x < sx; x++)
+		{
+			for (int z = 0; z < sz; z++)
+			{
+				int wx = wx0 + x;
+				int wz = wz0 + z;
+				// Top-down: the first (highest) exposed GRASS voxel wins. A
+				// solid voxel with a solid voxel above it is buried (cave
+				// ceiling, dirt under a raised surface, ...) and is skipped,
+				// so at most ONE grass position is produced per column.
+				for (int y = sy - 1; y >= 0; y--)
+				{
+					if (chunk.Get(x, y, z) == 0)
+					{
+						continue; // air: keep scanning down
+					}
+					// Must be a GRASS voxel (not dirt/stone/etc.) AND exposed
+					// (air directly above).
+					if (chunk.Get(x, y, z) == grassId && y + 1 < sy && chunk.Get(x, y + 1, z) == 0)
+					{
+						// FLAT-SURFACE GATE: on a slope/overhang at least one
+						// horizontal neighbour is air, so skip it. Grass only
+						// grows on flat, fully-solid top faces. (Off-chunk
+						// neighbours on the chunk edge are treated as not-solid,
+						// so a border column is skipped rather than risk
+						// floating over an unloaded chunk.)
+						if (cfg.GrassFlatSurfaceOnly &&
+							!IsFullySolidSurface(chunk, x, y, z, sx, sz))
+						{
+							break; // topmost solid found: done with this column
+						}
+						// NOISE DENSITY GATE: the per-column probability is
+						// GrassDensity × noise (noise in [0,1]). High-noise
+						// regions are thick meadows; low-noise regions are
+						// sparse or bare. The roll is a deterministic hash of
+						// (wx, wz, seed) — seam-safe (identical regardless of
+						// which chunk generates the column).
+						float noise = (cfg.GrassNoise.GetNoise2D(wx, wz) + 1f) * 0.5f; // [-1,1] → [0,1]
+						float chance = grassDensity * noise;
+						if (GrassColumnRoll(wx, wz, cfg.Seed) < chance)
+						{
+							positions.Add(new Vector3I(wx, y + 1, wz));
+						}
+					}
+					break; // topmost solid found: done with this column
+				}
+			}
+		}
+		return positions;
+	}
+
+	/// <summary>
+	/// True when the voxel at (x, y, z) sits on a FLAT, fully-solid surface that
+	/// is SAFE for grass: its EIGHT horizontal neighbours — the four at the same
+	/// level (±X, ±Z) AND the four one BELOW (±X, ±Z at y-1) — are all solid
+	/// (not air).
+	///
+	/// Why eight and not four: the terrain's MarchingCubes isosurface is SMOOTH
+	/// with beveled edges inset into the solid. On a slope, a grass voxel's four
+	/// same-level neighbours can all be solid, yet the bevel still pokes through
+	/// the grass's air cell (the "grass inside the 45° mesh" bug). Requiring the
+	/// four BELOW-neighbours to also be solid means the surface is flat enough
+	/// that the isosurface stays at or below the grass cell's floor, so it never
+	/// pokes through the grass. On a slope, at least one below-neighbour is air
+	/// (the surface steps down), so the test fails and no grass spawns.
+	///
+	/// A neighbour that is off the chunk's 16×16 data (a column on the chunk
+	/// edge) is treated as NOT solid, so a border column is skipped rather than
+	/// risk planting grass that would float over an unloaded/unknown chunk.
+	/// </summary>
+	private static bool IsFullySolidSurface(ChunkData chunk, int x, int y, int z, int sx, int sz)
+	{
+		// Four same-level horizontal neighbours.
+		if (x == 0 || chunk.Get(x - 1, y, z) == 0) return false;   // -X
+		if (x >= sx - 1 || chunk.Get(x + 1, y, z) == 0) return false; // +X
+		if (z == 0 || chunk.Get(x, y, z - 1) == 0) return false;   // -Z
+		if (z >= sz - 1 || chunk.Get(x, y, z + 1) == 0) return false; // +Z
+		// Four below-neighbours (y-1). The grass voxel is the SURFACE (air
+		// directly above), so y >= 1 is always true here; guard anyway.
+		if (y <= 0) return false;
+		if (x == 0 || chunk.Get(x - 1, y - 1, z) == 0) return false;   // -X below
+		if (x >= sx - 1 || chunk.Get(x + 1, y - 1, z) == 0) return false; // +X below
+		if (z == 0 || chunk.Get(x, y - 1, z - 1) == 0) return false;   // -Z below
+		if (z >= sz - 1 || chunk.Get(x, y - 1, z + 1) == 0) return false; // +Z below
+		return true;
+	}
+
+	/// <summary>
+	/// A deterministic per-column hash in [0,1) used as the roll for the grass
+	/// density gate. Pure function of (wx, wz, seed) — the SAME column always
+	/// yields the SAME value no matter which chunk generates it (seam-safe),
+	/// and the distribution is uniform enough to read as "random" per column.
+	/// Uses a 32-bit integer hash (no floating-point edge cases).
+	/// </summary>
+	private static float GrassColumnRoll(int wx, int wz, int seed)
+	{
+		uint h = (uint)(wx * 374761393 + wz * 668265263 + seed * 2246822519);
+		h = (h ^ (h >> 13)) * 1274126177u;
+		h ^= h >> 16;
+		return (h % 1000000u) / 1000000f;
+	}
+
 	private static async Task PlaceFoliageAsync(
 		ChunkData chunk, int wx0, int wz0, GenConfig cfg, short[] heights, int sx, int sz,
-		Dictionary<Vector2I, VoxelChunk> chunks)
+		Dictionary<Vector2I, VoxelChunk> chunks,
+		List<Vector3I> grassPositions = null)
 	{
 		// Each chunk handles ONLY the columns inside its own data (no margin).
 		// For every column, each COLUMN structure (tree, cactus, ...) is rolled
@@ -613,6 +803,10 @@ public static class TerrainGenerator
 		{
 			int structCount = structures.Count;
 			Action<int, int, int, byte> put = MakePut(chunk, wx0, wz0, sx, sz, chunks);
+			// When a tree/cactus is placed on a column, clear any grass position
+			// at that column (the foliage replaces the grass). The grass list is
+			// shared across the parallel slices, so use a thread-safe removal.
+			var grassToClear = new System.Collections.Concurrent.ConcurrentDictionary<Vector3I, byte>();
 			await Task.Run(() =>
 			{
 				ParallelSlices(cols, (cStart, cEnd, _) =>
@@ -630,11 +824,43 @@ public static class TerrainGenerator
 							if (def.PlaceAtColumn(wx, wz, dom[c], cfg))
 							{
 								def.Place(wx, wz, h, chunk, sx, chunks, cfg, put);
+								// Foliage replaces grass: mark the grass position
+								// at this column's surface for removal. The
+								// surface is the TOPMOST exposed solid voxel in
+								// the column AFTER the foliage was stamped (the
+								// trunk itself is now the exposed top, so the
+								// grass cell is the air just above the trunk) —
+								// recomputing it here matches what
+								// CollectGrassPositions would have picked for
+								// this column, which the raw Perlin height does
+								// not (caves, raised surfaces).
+								if (grassPositions != null)
+								{
+									int sy = chunk.SizeY;
+									int topY = h; // fallback: the Perlin surface
+									for (int gy = sy - 1; gy >= 0; gy--)
+									{
+										if (chunk.Get(x, gy, z) == 0)
+										{
+											continue;
+										}
+										topY = gy;
+										break;
+									}
+									grassToClear[new Vector3I(wx, topY + 1, wz)] = 1;
+								}
 							}
 						}
 					}
 				});
 			});
+			// Remove the cleared grass positions from the list (the foliage
+			// replaced them). This runs AFTER the parallel slices complete, so
+			// there's no race.
+			if (grassPositions != null && grassToClear.Count > 0)
+			{
+				grassPositions.RemoveAll(p => grassToClear.ContainsKey(p));
+			}
 		}
 
 		// Apply any overhang voxels that earlier chunks queued for THIS chunk

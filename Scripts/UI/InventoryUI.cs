@@ -1501,15 +1501,17 @@ public partial class InventoryUI : CanvasLayer
 		// -> Light, everything else (placeable materials) -> Blocks. Future
 		// items land in a bucket automatically.
 		_devItems.Clear();
-		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig));
+		_devItems.AddRange(FactorySim.Items.ItemRegistry.AllItems(_world?.MaterialConfig, _world?.MachineConfig, _world?.DecoConfig));
 		var blocks = new List<FactorySim.Items.ItemEntry>();
 		var tools = new List<FactorySim.Items.ItemEntry>();
 		var machines = new List<FactorySim.Items.ItemEntry>();
+		var decos = new List<FactorySim.Items.ItemEntry>();
 		var light = new List<FactorySim.Items.ItemEntry>();
 		foreach (var item in _devItems)
 		{
 			if (item.IsTool || item.IsWeapon || item.IsAmmo) tools.Add(item);
 			else if (item.IsMachine) machines.Add(item);
+			else if (item.IsDeco) decos.Add(item);
 			else if (item.LightLevel > 0) light.Add(item);
 			else blocks.Add(item);
 		}
@@ -1533,6 +1535,7 @@ public partial class InventoryUI : CanvasLayer
 		_devTabs.AddChild(MakeDevTabPage("Blocks", blocks, pageSize));
 		_devTabs.AddChild(MakeDevTabPage("Tools", tools, pageSize));
 		_devTabs.AddChild(MakeDevTabPage("Machines", machines, pageSize));
+		_devTabs.AddChild(MakeDevTabPage("Decos", decos, pageSize));
 		_devTabs.AddChild(MakeDevTabPage("Light", light, pageSize));
 		_devPanel.AddChild(_devTabs);
 

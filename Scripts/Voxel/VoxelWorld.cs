@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using FactorySim.Items;
 using FactorySim.Weapons;
+using FactorySim.Deco;
 
 namespace FactorySim.Voxel;
 
@@ -254,6 +255,49 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	[Export(PropertyHint.Range, "0,1,0.01")]
 	public float FoliageDensity { get; set; } = 1.0f;
+
+	[ExportGroup("Grass (DecoVoxel density noise)")]
+	/// <summary>
+	/// 2D Perlin noise frequency for the grass-density field. Lower = larger
+	/// meadows (dense grass over wide areas); higher = patchier grass.
+	/// </summary>
+	[Export(PropertyHint.Range, "0.001,0.1,0.001")]
+	public float GrassNoiseFrequency { get; set; } = 0.015f;
+
+	/// <summary>Fractal octaves of the grass-density noise.</summary>
+	[Export(PropertyHint.Range, "1,8,1")]
+	public int GrassOctaves { get; set; } = 2;
+
+	/// <summary>Fractal gain of the grass-density noise (lower = smoother transitions).</summary>
+	[Export(PropertyHint.Range, "0,1,0.01")]
+	public float GrassPersistence { get; set; } = 0.5f;
+
+	/// <summary>Fractal lacunarity of the grass-density noise.</summary>
+	[Export(PropertyHint.Range, "1,4,0.05")]
+	public float GrassLacunarity { get; set; } = 2.0f;
+
+	/// <summary>
+	/// Global multiplier (0..1) on the per-column grass probability. The
+	/// per-column chance is <c>GrassDensity × noise</c> where noise is the
+	/// grass-density Perlin remapped to [0,1] — so the density VARIES across
+	/// the terrain: high-noise regions are thick meadows, low-noise regions
+	/// are sparse or bare. 1.0 = up to full coverage in the densest patches;
+	/// 0.0 = no grass at all.
+	/// </summary>
+	[Export(PropertyHint.Range, "0,1,0.01")]
+	public float GrassDensity { get; set; } = 0.7f;
+
+	/// <summary>
+	/// When true (the default), grass only spawns on a FLAT, fully-solid
+	/// surface: the grass voxel's eight horizontal neighbours (four same-level
+	/// ±X/±Z and four below ±X/±Z) must all be solid (not air). This keeps
+	/// grass off SLOPES and overhangs AND stops the smooth MarchingCubes
+	/// isosurface (which bevels its edges into the solid) from poking through
+	/// the grass cell — so grass never floats or sits inside the 45° mesh. Set
+	/// false to allow grass on any exposed grass voxel (the old behavior).
+	/// </summary>
+	[Export]
+	public bool GrassFlatSurfaceOnly { get; set; } = true;
 
 	[ExportGroup("Structures: Ores")]
 	/// <summary>
@@ -546,6 +590,21 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	[Export]
 	public FactorySim.Machines.MachineDefConfig MachineConfig { get; private set; }
+
+	[ExportGroup("Decos (non-terrain voxels)")]
+	/// <summary>
+	/// The registry of deco definitions for this world — the non-terrain voxel
+	/// design system's data (grass, walls, doors, windows, and any future
+	/// decorative/structural object). Assign a
+	/// <see cref="FactorySim.Deco.DecoDefConfig"/> resource here (create one,
+	/// add a <see cref="FactorySim.Deco.DecoDefinition"/> per deco, each
+	/// pointing at its material / mesh). When a deco is spawned (auto-spawned
+	/// grass, or a player-placed deco item), the world looks up its definition
+	/// here and applies the editor-assigned appearance. Leave unset (null) to
+	/// use each deco's built-in default look (e.g. grass's green crossed planes).
+	/// </summary>
+	[Export]
+	public FactorySim.Deco.DecoDefConfig DecoConfig { get; private set; }
 
 	/// <summary>
 	/// The radius (in world-voxel units) over which a power source machine feeds
@@ -944,6 +1003,15 @@ public partial class VoxelWorld : Node3D
 	// sees every edit registered this frame from any node). Reset to false
 	// inside ProcessInstantEdit when it runs.
 	private bool _instantDeferred;
+	// The grass (DecoVoxel) spawn positions captured by the generation
+	// continuations. CallDeferred cannot carry a List<Vector3I> as a Variant,
+	// so the continuation stashes the list here (thread-safe table — written
+	// by the continuation thread, read on the main thread) and
+	// OnGenerationComplete pulls it out by chunk coord. One entry per
+	// in-flight chunk at most (a new generation overwrites the entry if the
+	// chunk was freed and re-queued in the meantime); consumed (removed) when
+	// the paired OnGenerationComplete runs.
+	private readonly System.Collections.Concurrent.ConcurrentDictionary<Vector2I, System.Collections.Generic.List<Vector3I>> _pendingGrass = new();
 	// Set by BreakVoxel: the break already handled its own light + geometry
 	// (PropagateSkyIncrease + RemeshSectionsForLightChange), so the deferred
 	// ProcessInstantEdit should skip the redundant geometry-dirty remesh
@@ -951,6 +1019,105 @@ public partial class VoxelWorld : Node3D
 	// Jolt SetFaces, the source of the "little hitching"). Consumed (reset
 	// to false) inside ProcessInstantEdit when it runs.
 	private bool _instantSkipNext;
+	// The DecoVoxel system: non-terrain voxels (grass, walls, doors, windows,
+	// machines) that are NOT built into the marching-cubes mesh. The cell in
+	// ChunkData stays air; the DecoVoxel is a separate scene-tree node. The
+	// dictionary maps the world voxel (Vector3I) to the DecoVoxel node, so the
+	// light flood fill can check occupancy (BlocksLight) and the spawner can
+	// check for existing DecoVoxels.
+	private readonly System.Collections.Generic.Dictionary<Vector3I, FactorySim.Deco.DecoVoxel> _decoVoxels = new();
+	// The shared "DecoVoxels" container node (created on demand, like "Machines").
+	// All DecoVoxel nodes are parented here so they can be found/cleared from
+	// one place.
+	private Node3D _decoRoot;
+
+	/// <summary>
+	/// Gets the DecoVoxel at the given world voxel, or null if there isn't one.
+	/// Used by the light flood fill (WorldSolidForLight) to check whether the
+	/// cell is occupied by a light-blocking DecoVoxel (a wall, a machine) vs.
+	/// a light-passing one (grass) vs. empty (air).
+	/// </summary>
+	public FactorySim.Deco.DecoVoxel GetDecoVoxelAt(Vector3I pos)
+		=> _decoVoxels.TryGetValue(pos, out var d) ? d : null;
+
+	/// <summary>
+	/// True when the world voxel <paramref name="pos"/> is occupied by a
+	/// light-BLOCKING DecoVoxel (a wall, a machine, etc.). The light flood
+	/// fill uses this to treat the cell as solid (opaque) — the same rule the
+	/// mesher uses to decide what's solid. Grass (BlocksLight = false) does
+	/// NOT count as solid: light passes through it.
+	/// </summary>
+	public bool IsDecoSolidForLight(Vector3I pos)
+	{
+		if (_decoVoxels.TryGetValue(pos, out var d))
+		{
+			return d.BlocksLight;
+		}
+		return false;
+	}
+
+	/// <summary>
+	/// Registers a DecoVoxel at its world voxel. Called by DecoSpawner after
+	/// the node is created and initialized. The DecoVoxel is added to the
+	// "DecoVoxels" container and indexed in _decoVoxels.
+	/// </summary>
+	public void RegisterDecoVoxel(FactorySim.Deco.DecoVoxel deco)
+	{
+		if (deco == null)
+		{
+			return;
+		}
+		_decoVoxels[deco.VoxelPos] = deco;
+		EnsureDecoRoot().AddChild(deco);
+	}
+
+	/// <summary>
+	/// Unregisters a DecoVoxel: removes it from _decoVoxels and frees the node.
+	/// Called when the player breaks the DecoVoxel or when the world slot is
+	/// cleared. No chunk rebuild is needed (the cell was always air).
+	/// </summary>
+	public void UnregisterDecoVoxel(Vector3I pos)
+	{
+		if (_decoVoxels.TryGetValue(pos, out var deco))
+		{
+			_decoVoxels.Remove(pos);
+			deco.Despawn();
+		}
+	}
+
+	/// <summary>
+	/// Clears ALL DecoVoxels (frees every node, empties the dictionary). Called
+	/// when a world slot is loaded (the same way ClearAllMachinesImmediate works
+	/// for machines).
+	/// </summary>
+	public void ClearAllDecoVoxels()
+	{
+		foreach (var deco in _decoVoxels.Values)
+		{
+			deco.Despawn();
+		}
+		_decoVoxels.Clear();
+	}
+
+	/// <summary>
+	/// Finds (or creates) the shared "DecoVoxels" container under the scene
+	/// root (the same pattern as "Machines" and "Drops").
+	/// </summary>
+	private Node3D EnsureDecoRoot()
+	{
+		if (_decoRoot == null || !_decoRoot.IsInsideTree())
+		{
+			var tree = GetTree();
+			_decoRoot = tree.Root.GetNodeOrNull<Node3D>("DecoVoxels");
+			if (_decoRoot == null)
+			{
+				_decoRoot = new Node3D { Name = "DecoVoxels" };
+				tree.Root.AddChild(_decoRoot);
+			}
+		}
+		return _decoRoot;
+	}
+
 	// The chunk-LOCAL voxel coords of the most recent edit (set alongside
 	// _instantRebuildChunk by SetVoxel). Used by the sub-cell path (Option B)
 	// to compute which sub-cell(s) the edit dirtied (the sub-cell containing the
@@ -1347,6 +1514,9 @@ public partial class VoxelWorld : Node3D
 		// Publish the machine registry to the static MachineRegistry (and any
 		// change to the config re-publishes). Null = machines disabled.
 		FactorySim.Machines.MachineRegistry.SetConfig(MachineConfig);
+		// Publish the deco registry to the static DecoRegistry (and any change
+		// to the config re-publishes). Null = decos use their built-in defaults.
+		FactorySim.Deco.DecoRegistry.SetConfig(DecoConfig);
 		// Forward the tunable power radius to the range-based power network.
 		FactorySim.Machines.PowerNetwork.SetRadius(PowerRadius);
 		if (BiomeConfig != null)
@@ -1418,6 +1588,18 @@ public partial class VoxelWorld : Node3D
 	{
 		MachineConfig = value;
 		FactorySim.Machines.MachineRegistry.SetConfig(value);
+	}
+
+	/// <summary>
+	/// Sets (or clears) the deco registry and re-publishes it to the static
+	/// <see cref="FactorySim.Deco.DecoRegistry"/>. The inspector calls this when
+	/// the export is reassigned; <c>null</c> makes decos use their built-in
+	/// default look.
+	/// </summary>
+	public void SetDecoConfig(FactorySim.Deco.DecoDefConfig value)
+	{
+		DecoConfig = value;
+		FactorySim.Deco.DecoRegistry.SetConfig(value);
 	}
 
 	/// <summary>
@@ -5165,6 +5347,12 @@ public partial class VoxelWorld : Node3D
 				CallDeferred(nameof(OnGenerationFaulted), new Variant[] { coord });
 				return;
 			}
+			// Read the surviving grass positions (the gen thread finished writing
+			// them before this continuation ran — no race) and hand them to the
+			// main thread via the thread-safe pending table: CallDeferred cannot
+			// carry a List<Vector3I> as a Variant, so OnGenerationComplete looks
+			// this chunk's entry up by coord.
+			_pendingGrass[coord] = t.Result;
 			// Marshal back to the main thread: the scene-tree and <c>_chunks</c>
 			// state below must be touched on the engine thread. `CallDeferred`
 			// runs the named instance method on the next process frame with
@@ -5278,6 +5466,22 @@ public partial class VoxelWorld : Node3D
 	/// any saved edits that belong to it (world persistence), and re-meshes its
 	/// neighbours so they close the MC seam with real data.
 	/// </summary>
+	/// <summary>
+	/// Removes and returns the grass (DecoVoxel) spawn positions captured for
+	/// chunk <paramref name="coord"/> by its generation continuation (see
+	/// <see cref="StartGeneration"/>), or null when the chunk has no pending
+	/// entry (e.g. the sync generation path, which has no positions, or a
+	/// freed/re-queued chunk whose deferred completion was cancelled).
+	/// </summary>
+	private System.Collections.Generic.List<Vector3I> TakePendingGrassPositions(Vector2I coord)
+	{
+		if (_pendingGrass.TryRemove(coord, out var positions))
+		{
+			return positions;
+		}
+		return null;
+	}
+
 	private void OnGenerationComplete(Vector2I coord, VoxelChunk chunk)
 	{
 		// This runs on the main thread via CallDeferred, so it can fire AFTER
@@ -5353,14 +5557,115 @@ public partial class VoxelWorld : Node3D
 		// No-op once the player has spawned.
 		BoostSpawnNeighbourhoodPriority();
 
+		// GRASS AUTO-SPAWN: spawn the GrassDeco nodes for the positions that
+		// survived generation. The positions were collected during generation
+		// (stage 3.5, BEFORE the foliage stage) and the foliage stage already
+		// cleared the ones a tree/cactus replaced, so every position left here
+		// is a surface cell with no foliage in its column. The grass is a
+		// DecoVoxel (NOT in the terrain mesh) — its cell stays air, so it
+		// appears as crossed planes on the surface without affecting the
+		// marching-cubes mesh.
+		SpawnGrassForChunk(coord, current, TakePendingGrassPositions(coord));
+
 		// Map: push this chunk's 2D height+material data to the shared map store
 		// so the minimap / map window can display it. Done LAST, after all the
-		// data modifications above (saved edits, canopy overhangs, hives) so the
-		// pushed data reflects the chunk's final voxel state. The map only
-		// displays what the world hands it — it never scans the world. This is a
-		// one-time cost per chunk (16×16 columns, each a top-down scan), not a
-		// per-frame cost — this is what keeps the map from tanking the framerate.
+		// data modifications above (saved edits, canopy overhangs, hives, grass)
+		// so the pushed data reflects the chunk's final voxel state. The map
+		// only displays what the world hands it — it never scans the world. This
+		// is a one-time cost per chunk (16×16 columns, each a top-down scan), not
+		// a per-frame cost — this is what keeps the map from tanking the framerate.
 		PushChunkToMap(current);
+	}
+
+	/// <summary>
+	/// Spawns the GrassDeco nodes for the grass positions that survived
+	/// generation for this chunk (see <see cref="TerrainGenerator.CollectGrassPositions"/>
+	/// and the foliage stage's replacement of them). Each position is the air
+	/// cell above a surface voxel with no foliage in its column.
+	///
+	/// A position is skipped when:
+	///   - the cell below is no longer a GRASS voxel (saved edits, hive
+	///     voxels, or canopy overhangs re-drained after the positions were
+	///     collected changed the surface), or
+	///   - the grass voxel is on a SLOPE (a horizontal neighbour is air) and
+	///     <see cref="GrassFlatSurfaceOnly"/> is on, or
+	///   - a GrassDeco already occupies the cell (avoids double-spawning).
+	///
+	/// The positions are WORLD coords (the generator converted them), so no
+	/// coordinate math is needed here.
+	/// </summary>
+	private void SpawnGrassForChunk(Vector2I coord, VoxelChunk chunk,
+		System.Collections.Generic.List<Vector3I> grassPositions)
+	{
+		if (!chunk.DataReady || grassPositions == null || grassPositions.Count == 0)
+		{
+			return;
+		}
+		int cs = ChunkSizeXZ;
+		int wx0 = coord.X * cs;
+		int wz0 = coord.Y * cs;
+		for (int i = 0; i < grassPositions.Count; i++)
+		{
+			var pos = grassPositions[i];
+			// The cell below must still be a GRASS voxel (not air, not dirt/
+			// stone, not any other solid). The surface may have changed since
+			// the positions were collected (saved edits, hives, overhangs) —
+			// if the grass block is gone or replaced, skip the position.
+			if (pos.Y <= 0)
+			{
+				continue;
+			}
+			if (GetVoxel(pos.X, pos.Y - 1, pos.Z) != VoxelMaterialIds.Grass)
+			{
+				continue;
+			}
+			// The cell itself must still be air (nothing else claimed it) and
+			// must not already hold a GrassDeco.
+			if (GetVoxel(pos.X, pos.Y, pos.Z) != VoxelMaterialIds.Air)
+			{
+				continue;
+			}
+			if (GetDecoVoxelAt(pos) != null)
+			{
+				continue;
+			}
+			// CHUNK-EDGE GUARD: a position collected at this chunk's border can
+			// be invalidated by a NEIGHBOUR's terrain (a neighbouring overhang
+			// canopy, a hive, or a structure that lands on the shared border).
+			// GetVoxel reads an unloaded / still-generating neighbour as AIR,
+			// which would let us spawn grass on top of a neighbour's solid
+			// voxel. Skip any position that crosses the border — the neighbour
+			// chunk will spawn its own grass for that column when it completes
+			// (its own top-down scan sees the full border), so nothing is lost.
+			int lx = pos.X - wx0;
+			int lz = pos.Z - wz0;
+			if (lx < 0 || lx >= cs || lz < 0 || lz >= cs)
+			{
+				continue;
+			}
+			// FLAT-SURFACE GUARD: when GrassFlatSurfaceOnly is on, the grass
+			// voxel's EIGHT horizontal neighbours (four same-level ±X/±Z and
+			// four below ±X/±Z) must all be solid (not air), so grass doesn't
+			// float on a slope or get poked through by the smooth MarchingCubes
+			// isosurface (which bevels its edges into the solid). GetVoxel reads
+			// an unloaded neighbour as Air, so a position bordering an unloaded
+			// chunk is safely skipped (the neighbour chunk spawns its own grass
+			// when it completes).
+			int gy = pos.Y - 1; // the grass voxel (below the grass cell)
+			if (GrassFlatSurfaceOnly &&
+				(GetVoxel(pos.X - 1, gy, pos.Z) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X + 1, gy, pos.Z) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X, gy, pos.Z - 1) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X, gy, pos.Z + 1) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X - 1, gy - 1, pos.Z) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X + 1, gy - 1, pos.Z) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X, gy - 1, pos.Z - 1) == VoxelMaterialIds.Air ||
+				 GetVoxel(pos.X, gy - 1, pos.Z + 1) == VoxelMaterialIds.Air))
+			{
+				continue;
+			}
+			DecoSpawner.SpawnDeco(this, DecoType.Grass, pos, dropItemId: VoxelMaterialIds.DecoGrass);
+		}
 	}
 
 	/// <summary>
@@ -6798,6 +7103,21 @@ public partial class VoxelWorld : Node3D
 			FractalLacunarity = BiomeLacunarity,
 		};
 
+		// Grass-density noise: a separate 2D Perlin field (own seed offset so it
+		// is distinct from height/cave/forest/biome) that modulates the per-
+		// column grass probability. The same (wx, wz) always yields the same
+		// value, so grass patches are identical no matter which chunk generates
+		// them (seam-safe, like the other noise fields).
+		var grassNoise = new FastNoiseLite
+		{
+			Seed = Seed + 303,
+			NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin,
+			Frequency = GrassNoiseFrequency,
+			FractalOctaves = GrassOctaves,
+			FractalGain = GrassPersistence,
+			FractalLacunarity = GrassLacunarity,
+		};
+
 		var config = new GenConfig
 		{
 			Seed = Seed,
@@ -6814,6 +7134,9 @@ public partial class VoxelWorld : Node3D
 			CaveNoise = caveNoise,
 			ForestNoise = forestNoise,
 			FoliageDensity = FoliageDensity,
+			GrassNoise = grassNoise,
+			GrassDensity = GrassDensity,
+			GrassFlatSurfaceOnly = GrassFlatSurfaceOnly,
 			MaterialConfig = MaterialConfig,
 			BiomeConfig = BiomeConfig,
 			BiomeNoise = biomeNoise,

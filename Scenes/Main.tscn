@@ -9,6 +9,7 @@
 [ext_resource type="Script" uid="uid://kue2smumh6k5" path="res://Scripts/UI/InventoryUI.cs" id="5_inventoryui"]
 [ext_resource type="PackedScene" uid="uid://dkfwg51v3fres" path="res://Scenes/Hive.tscn" id="6_346fj"]
 [ext_resource type="Script" uid="uid://b6yvt3qixbivc" path="res://Scripts/UI/FpsCounter.cs" id="6_fpscounter"]
+[ext_resource type="Resource" uid="uid://clqaa3exxqf36" path="res://Materials/DecoConfig.tres" id="6_hwpts"]
 [ext_resource type="Script" uid="uid://dthtm23wmaj37" path="res://Scripts/UI/PauseMenu.cs" id="7_pausemenu"]
 [ext_resource type="Script" uid="uid://bbv1r43h3vyi3" path="res://Scripts/Voxel/WorldSave.cs" id="8_worldsave"]
 [ext_resource type="Script" uid="uid://deaijk5gbbwkh" path="res://Scripts/UI/TargetInfoUI.cs" id="9_targetinfo"]
@@ -71,6 +72,7 @@ LightFalloff = 15.0
 LodRenderDistanceChunks = 128
 MaterialConfig = ExtResource("3_materialconfig")
 MachineConfig = ExtResource("3_bmxlf")
+DecoConfig = ExtResource("6_hwpts")
 EnableRegenerateShortcut = false
 DebugLight = true
 HiveRadius = 6

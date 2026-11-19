@@ -29,6 +29,10 @@ public readonly struct ItemEntry
 	public bool IsAmmo { get; }
 	/// <summary>The ammo kind, when this entry is an ammo item (null otherwise).</summary>
 	public AmmoType? AmmoKind { get; }
+	/// <summary>True when this entry is a deco item (carries a <see cref="FactorySim.Deco.DecoType"/>).</summary>
+	public bool IsDeco { get; }
+	/// <summary>The deco kind, when this entry is a deco item (null otherwise).</summary>
+	public FactorySim.Deco.DecoType? DecoKind { get; }
 	/// <summary>
 	/// The block light level (0-15) this item emits when placed as a voxel
 	/// (0 = not a light source, the default). Set on the <see cref="ItemStack"/>
@@ -42,7 +46,8 @@ public readonly struct ItemEntry
 	public ItemEntry(int materialId, bool isTool, ToolType? toolType, string name, Color iconColor,
 		bool isMachine = false, MachineType? machineKind = null, byte lightLevel = 0,
 		bool isWeapon = false, WeaponType? weaponKind = null,
-		bool isAmmo = false, AmmoType? ammoKind = null)
+		bool isAmmo = false, AmmoType? ammoKind = null,
+		bool isDeco = false, FactorySim.Deco.DecoType? decoKind = null)
 	{
 		MaterialId = materialId;
 		IsTool = isTool;
@@ -56,6 +61,8 @@ public readonly struct ItemEntry
 		WeaponKind = weaponKind;
 		IsAmmo = isAmmo;
 		AmmoKind = ammoKind;
+		IsDeco = isDeco;
+		DecoKind = decoKind;
 	}
 
 	public override bool Equals(object obj) => obj is ItemEntry other && Equals(other);
@@ -157,6 +164,38 @@ public static class ItemRegistry
 	}
 
 	/// <summary>
+	/// Every deco entry (one per registered <see cref="FactorySim.Deco.DecoDefinition"/>),
+	/// in item-id order. When a <paramref name="config"/> is provided, its
+	/// definitions supply the display name and item id; a config with no
+	/// definitions yields no entries (decos are definition-driven, unlike the
+	/// starter machine types which always list). This keeps the dev panel from
+	/// offering deco items the world hasn't registered.
+	/// </summary>
+	public static IReadOnlyList<ItemEntry> AllDecos(FactorySim.Deco.DecoDefConfig config = null)
+	{
+		var list = new List<ItemEntry>();
+		if (config == null)
+		{
+			return list;
+		}
+		foreach (var def in config.GetAll())
+		{
+			if (def == null)
+			{
+				continue;
+			}
+			string name = string.IsNullOrEmpty(def.Name) ? def.Type.ToString() : def.Name;
+			// Green for grass (the default); a neutral grey for any other deco.
+			Color color = def.Type == FactorySim.Deco.DecoType.Grass
+				? new Color(0.35f, 0.70f, 0.30f)
+				: new Color(0.6f, 0.6f, 0.6f);
+			list.Add(new ItemEntry(def.EffectiveItemId, false, null, name, color,
+				isDeco: true, decoKind: def.Type));
+		}
+		return list;
+	}
+
+	/// <summary>
 	/// Every placeable material, in id order, read from the given
 	/// <paramref name="config"/>. A material with no def (or an unknown id) is
 	/// skipped — only configured, nameable materials are offered.
@@ -228,18 +267,21 @@ public static class ItemRegistry
 
 	/// <summary>
 	/// The full ordered item list: all materials first (id order), then all
-	/// tools, then all machines, then all light sources. This is what the dev
-	/// panel renders as its scrollable list. <paramref name="machineConfig"/>
-	/// (optional) lets machine entries use a registered definition's name when
-	/// available.
+	/// tools, then all machines, then all decos, then all light sources. This
+	/// is what the dev panel renders as its scrollable list. <paramref
+	/// name="machineConfig"/> (optional) lets machine entries use a registered
+	/// definition's name when available; <paramref name="decoConfig"/> (optional)
+	/// does the same for decos.
 	/// </summary>
 	public static List<ItemEntry> AllItems(VoxelMaterialConfig config,
-		FactorySim.Machines.MachineDefConfig machineConfig = null)
+		FactorySim.Machines.MachineDefConfig machineConfig = null,
+		FactorySim.Deco.DecoDefConfig decoConfig = null)
 	{
 		var list = new List<ItemEntry>();
 		list.AddRange(AllMaterials(config));
 		list.AddRange(AllTools);
 		list.AddRange(AllMachines(machineConfig));
+		list.AddRange(AllDecos(decoConfig));
 		list.AddRange(AllWeapons);
 		list.AddRange(AllAmmo);
 		list.AddRange(AllLightSources);

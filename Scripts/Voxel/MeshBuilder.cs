@@ -1437,7 +1437,8 @@ public static class MeshBuilder
 		int maxLight,
 		out byte[] blockLit,
 		out byte[] wideSolid,
-		out byte[] wideBlock)
+		out byte[] wideBlock,
+		System.Func<int, int, int, bool> decoSolidQuery = null)
 	{
 		// Clamp the range exactly as SkyLight.Compute does (normalized level, >= 1).
 		int range = maxLight;
@@ -1451,7 +1452,7 @@ public static class MeshBuilder
 		}
 		// Center chunk + one full light range per side + 1-voxel pad per side.
 		int px = 2 * cs + 2 * range + 2, py = sy + 2, pz = 2 * cs + 2 * range + 2;
-		BuildWideVolumes(chunk, wx0, wz0, cs, sy, neighborQuery, out byte[] solid, out byte[] block, px, py, pz);
+		BuildWideVolumes(chunk, wx0, wz0, cs, sy, neighborQuery, out byte[] solid, out byte[] block, px, py, pz, decoSolidQuery);
 		float[] field = SkyLight.Compute(solid, px, py, pz, block, maxLight, out blockLit);
 		wideSolid = solid;
 		wideBlock = block;
@@ -1479,7 +1480,8 @@ public static class MeshBuilder
 		out byte[] block,
 		int px,
 		int py,
-		int pz)
+		int pz,
+		System.Func<int, int, int, bool> decoSolidQuery = null)
 	{
 		int half = px / 2 - 1; // = cs + range: world offset of lattice ix 0
 		solid = new byte[px * py * pz];
@@ -1517,7 +1519,20 @@ public static class MeshBuilder
 						continue;
 					}
 					int li = lx + cs * (wy + sy * lz);
-					solid[idx] = (byte)(c.Data[li] != 0 ? 1 : 0);
+					bool terrainSolid = c.Data[li] != 0;
+					// DECO SOLID: a light-blocking DecoVoxel (wall, machine) in
+					// this cell makes the cell solid for the light flood fill,
+					// even though the terrain Data[] is air. A light-passing
+					// DecoVoxel (grass) does NOT count as solid. This is the
+					// "as the mesh is generating, consider these as air" rule —
+					// the flood fill and the mesher both treat DecoVoxels as
+					// non-terrain.
+					bool isSolid = terrainSolid;
+					if (!isSolid && decoSolidQuery != null)
+					{
+						isSolid = decoSolidQuery(wx, wy, wz);
+					}
+					solid[idx] = (byte)(isSolid ? 1 : 0);
 					block[idx] = c.BlockLight[li];
 				}
 			}

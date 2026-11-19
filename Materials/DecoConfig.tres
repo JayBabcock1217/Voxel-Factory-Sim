@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="DecoDefConfig" format=3 uid="uid://clqaa3exxqf36"]
+
+[ext_resource type="Texture2D" uid="uid://cw8kdnp5xlscf" path="res://Textures/Grass 16x16.png" id="1_a4svd"]
+[ext_resource type="Script" uid="uid://dnnwlic3ccwcf" path="res://Scripts/Deco/DecoDefinition.cs" id="1_ybwyk"]
+[ext_resource type="Script" uid="uid://ckwqogwno0y4a" path="res://Scripts/Deco/DecoDefConfig.cs" id="2_a4svd"]
+
+[sub_resource type="Resource" id="Resource_wvg7p"]
+script = ExtResource("1_ybwyk")
+AlbedoTexture = ExtResource("1_a4svd")
+metadata/_custom_type_script = "uid://dnnwlic3ccwcf"
+
+[resource]
+script = ExtResource("2_a4svd")
+Decos = [SubResource("Resource_wvg7p")]
+metadata/_custom_type_script = "uid://ckwqogwno0y4a"

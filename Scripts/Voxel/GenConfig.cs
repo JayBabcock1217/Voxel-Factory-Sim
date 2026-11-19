@@ -47,6 +47,35 @@ public sealed class GenConfig
 	/// </summary>
 	public float FoliageDensity;
 
+	// Grass (DecoVoxel) density noise
+	/// <summary>
+	/// 2D Perlin noise for the grass-density field. Each exposed grass voxel
+	/// column rolls a per-column probability of <c>GrassDensity × noise</c>
+	/// (noise remapped to [0,1]), so grass density varies smoothly across the
+	/// terrain: thick meadows in high-noise regions, sparse/bare patches in
+	/// low-noise regions.
+	/// </summary>
+	public FastNoiseLite GrassNoise;
+
+	/// <summary>
+	/// Global multiplier (0..1) on the per-column grass probability (see
+	/// <see cref="GrassNoise"/>). 1.0 = up to full coverage in the densest
+	/// patches; 0.0 = no grass at all.
+	/// </summary>
+	public float GrassDensity;
+
+	/// <summary>
+	/// When true (the default), grass only spawns on a FLAT, fully-solid
+	/// surface: the grass voxel's eight horizontal neighbours (four same-level
+	/// ±X/±Z and four below ±X/±Z) must all be solid (not air). This keeps
+	/// grass off SLOPES and overhangs AND stops the smooth MarchingCubes
+	/// isosurface (which bevels its edges into the solid) from poking through
+	/// the grass cell. When false, grass spawns on any exposed grass voxel (the
+	/// old behavior). See
+	/// <see cref="TerrainGenerator.IsFullySolidSurface"/>.
+	/// </summary>
+	public bool GrassFlatSurfaceOnly;
+
 	/// <summary>
 	/// The world's structure registry: every piece of foliage / structure that
 	/// grows in the world (trees, cacti, rocks, the hive), all as
