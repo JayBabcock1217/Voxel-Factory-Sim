@@ -1,36 +1,56 @@
 # MEMORY.md — Factory Sim (persistent memory)
 
-## Torch light after save load (Nov 2026) — FIXED, committed c89d0f3
+## Torch light after save load (Nov 2026) — FIXED, committed c89d0f3 + field-commit fix
 
-**Symptom:** load a save that has torches → the torch's chunk renders fully
-black (torch geometry is there, no glow). Placing a torch LIVE works fine.
+**Symptom:** load a save that has torches → the torch's ENTIRE chunk renders
+fully black (torch geometry is there, no glow; even sky-lit areas are black).
+Placing a torch LIVE works fine.
 
-**Root cause (a stale wide light field, NOT a save bug):**
-- The save IS correct — the `.world` file stores both the torch's geometry
-  (`Edits` mat=23) AND its light level (`BlockLights`, v4+, e.g. level=14).
-  Verified by parsing the raw file.
-- On load, `ApplyLoadedChunk` correctly writes the level into the chunk data
-  (`chunk.Data.SetBlockLight`). BUT the chunk's cached **wide light field**
-  (`_cachedLightField`) was already baked from *pre-torch* data (the sub-cell
-  mesh may already be built + `InstantSatisfied`).
-- The per-frame budget loop only rebuilds a chunk when
-  `NeedsMesh && DataReady && (!InstantSatisfied || SectionLightDirty)`.
-  `ApplyLoadedChunk` set `NeedsMesh` but NOT `SectionLightDirty`, so an
-  `InstantSatisfied` torch chunk was **skipped** — the wide field never
-  re-baked, `wideRaw` stayed 0 → black. (An audit proved it: `dataLight=14`
-  but `wideRaw=0`.)
+**It is NOT a save bug.** The `.world` file stores both the torch's geometry
+(`Edits` mat=23) AND its light level (`BlockLights`, v4+, e.g. level=14).
+Verified by parsing the raw file. On load, `ApplyLoadedChunk` correctly writes
+the level into the chunk data (`chunk.Data.SetBlockLight`), and the full
+rebuild's flood fill (`SkyLight.Compute` via `BuildLightFieldWide`) computes
+the CORRECT field — sky light + the torch's glow (a build-thread diagnostic
+proved it: air above the torch = 0.867 ≈ level 13/15). So the DATA is right.
 
-**Fix:** in `ApplyLoadedChunk`, when block lights are applied, call
-`chunk.MarkSectionLightDirty()` (and the same for the torch's neighbour
-chunks, for the cross-border glow). That forces the budget loop to run the
-full rebuild, which re-bakes the wide field from the post-torch data +
-re-registers the section fields — exactly what a live torch placement does.
+**Two-part root cause (both on the load/render side):**
 
-**Diagnostic that found it:** a temporary `[TorchDiag]` audit read, per saved
-torch, `dataLight` (chunk data) vs `wideRaw` (cached wide field, via a
-temporary `VoxelChunk.CachedLightFieldReady`). `dataLight=14 / wideRaw=0` was
-the smoking gun. All `[TorchDiag]` code + `CachedLightFieldReady` have been
-REMOVED (the fix is the real `MarkSectionLightDirty`).
+1. **Budget loop skipped the rebuild.** The loop only rebuilds a chunk when
+   `NeedsMesh && DataReady && (!InstantSatisfied || SectionLightDirty)`.
+   `ApplyLoadedChunk` set `NeedsMesh` but NOT `SectionLightDirty`, so an
+   `InstantSatisfied` torch chunk was skipped and its wide field never
+   re-baked. **Fix (c89d0f3):** in `ApplyLoadedChunk`, when block lights are
+   applied, call `chunk.MarkSectionLightDirty()` (and the torch's neighbour
+   chunks, for the cross-border glow). That makes the budget run the full
+   rebuild.
+
+2. **The real black-chunk bug — stale field sampled during sub-cell re-mesh.**
+   In sub-cell mode (`SubCellMeshing=true`), when a build completes with
+   `sectionLightWasDirty=true`, `ApplyBuildResult` calls
+   `RebuildAllSubCellsFromSectionEngine`, which re-meshes every sub-cell
+   sampling the **section engine** (`MakeSectionLightSampler`). That sampler
+   falls back to `_cachedLightField` for **unregistered** sections. On the
+   FIRST build of a torch chunk (loading from a save), the sections are NOT
+   yet registered AND `_cachedLightField` was still the OLD (stale/null) field
+   — the build's freshly-baked `_pendingLight` (the CORRECT field) was only
+   committed to `_cachedLightField` AFTER the sub-cell wiring. So the re-mesh
+   sampled a dark/stale field → every vertex got light=0 → the WHOLE chunk
+   black. **Fix:** in `ApplyBuildResult`, commit `_pendingLight` →
+   `_cachedLightField` (and the wide solid/block volumes) BEFORE the sub-cell
+   wiring (right after `sectionLightWasDirty` is captured), not after. The
+   commit is unconditional and idempotent, so moving it earlier is safe for the
+   non-dirty path too. The convergence pass (RegisterSectionsWithEngine +
+   ReSeed) still runs after and brings the engine in line.
+
+**Diagnostics that found it (all REMOVED):** a series of temporary `[TorchDiag]`
+logs. The decisive ones: (a) a build-thread log after `BuildLightFieldWide`
+showing the computed field HAD the glow (air above torch = 0.867) — proving
+the flood fill was correct; (b) a per-vertex log in `ResolveSubCellVertex`
+showing the mesh vertices got `wideLight=1.000` for sky areas — proving the
+worker's `_pendingSubCells` were correct, so the black came from the
+section-engine re-mesh path (the fallback to the stale `_cachedLightField`).
+Also a standalone C# repro proved `SkyLight.Compute` itself is correct.
 
 **Gotchas hit while diagnosing (so it's not re-diagnosed):**
 - The gameplay `WorldSave` node's `ActiveSlotId` is NOT set when
@@ -42,6 +62,10 @@ REMOVED (the fix is the real `MarkSectionLightDirty`).
   `Snapshot.BlockLights` after load can see 0. Re-read from disk if you need
   the authoritative list.
 - `EditRecord.MaterialId` (not `.Material`) is the field name.
+- The wide field is NORMALIZED (0..1, 1.0 = maxLight). The torch's OWN (solid)
+  cell is correctly 0 in the field — the glow is in the surrounding AIR. An
+  audit that reads the field at the torch's solid cell will always read 0 and
+  mislead; read the air voxel above/beside the torch instead.
 
 ## Player falls through terrain on save load (Nov 2026) — FIXED
 

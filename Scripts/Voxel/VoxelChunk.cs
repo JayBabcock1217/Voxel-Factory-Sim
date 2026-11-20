@@ -2268,6 +2268,32 @@ public partial class VoxelChunk : Node3D
 		// chunk edge" bug). Instead we re-mesh every sub-cell through the
 		// (now-converged) section engine below.
 		bool sectionLightWasDirty = _sectionLightDirty;
+
+		// COMMIT THE FRESH FIELD BEFORE WIRING SUB-CELLS. When sectionLightWasDirty
+		// is true, the sub-cell wiring below calls RebuildAllSubCellsFromSectionEngine,
+		// which re-meshes every sub-cell sampling the section engine (falling back to
+		// _cachedLightField for unregistered sections). On the FIRST build of a chunk
+		// (e.g. a torch chunk loading from a save), the sections are NOT yet registered
+		// and _cachedLightField is null/STALE (it holds the pre-torch field, or nothing).
+		// If we commit _pendingLight (the build's freshly-baked, CORRECT field — sky +
+		// block light) only AFTER the sub-cell wiring, the re-mesh samples a dark/stale
+		// field and paints the WHOLE chunk black (the "torch chunk renders black on
+		// load" bug). Committing first means the fallback reads the correct field, and
+		// the convergence pass below (RegisterSectionsWithEngine + ReSeed) then brings
+		// the engine in line with it. The commit is unconditional and idempotent, so
+		// moving it earlier is safe for the non-dirty path too.
+		if (_pendingLight != null)
+		{
+			_cachedLightField = _pendingLight;
+			_cachedBlockLit = _pendingBlockLit;
+			_cachedWideSolid = _pendingWideSolid;
+			_cachedWideBlock = _pendingWideBlock;
+			_pendingLight = null;
+			_pendingBlockLit = null;
+			_pendingWideSolid = null;
+			_pendingWideBlock = null;
+		}
+
 		bool appliedMesh;
 
 		// Option B (sub-cell mode): wire up the prebuilt sub-cell results. The
@@ -2387,17 +2413,12 @@ public partial class VoxelChunk : Node3D
 		// glow into _cachedLightField) and then ReSeedLightFromWideField
 		// re-seeds the section engine from the CORRECTED field. So the
 		// engine and field agree regardless of which field was committed.
-		if (_pendingLight != null)
-		{
-			_cachedLightField = _pendingLight;
-			_cachedBlockLit = _pendingBlockLit;
-			_cachedWideSolid = _pendingWideSolid;
-			_cachedWideBlock = _pendingWideBlock;
-		}
-		_pendingLight = null;
-		_pendingBlockLit = null;
-		_pendingWideSolid = null;
-		_pendingWideBlock = null;
+		//
+		// NOTE: the field commit (_pendingLight -> _cachedLightField) now
+		// happens EARLIER in this method, before the sub-cell wiring, so that
+		// RebuildAllSubCellsFromSectionEngine (the sectionLightWasDirty path)
+		// samples the fresh, correct field rather than a stale/null one. _pendingLight
+		// is already null here, so nothing to commit.
 
 		// CONVERGENCE PASS (the one place the section engine and the wide
 		// field agree). This chunk's wide field was JUST re-baked by this build
