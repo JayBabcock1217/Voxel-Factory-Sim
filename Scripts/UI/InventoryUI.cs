@@ -560,7 +560,7 @@ public partial class InventoryUI : CanvasLayer
 		// explicit CustomMinimumSize, so the container sizes it correctly.
 		const float pad = 12f;          // panel padding (StyleBoxFlat content margin)
 		const float gap = 16f;          // HBoxContainer separation between sections
-		const float devW = 320f;        // dev pane width (widened: room for item names + tabs)
+		const float devW = 360f;        // dev pane width (widened: room for item names + the 5 tab buttons)
 		const float craftW = 400f;      // craft pane width (widened to match)
 		float gridW = Math.Max(
 			Inventory.StorageCols, Inventory.HotbarSize) * SlotSize
@@ -1473,7 +1473,10 @@ public partial class InventoryUI : CanvasLayer
 	/// </summary>
 	private void BuildDevPanel()
 	{
-		const float devW = 320f;   // must match BuildUi's devW (the dev pane Panel's width)
+		// Must match BuildUi's devW (the dev pane Panel's width). Widened from
+		// 320 to 360 so the 5 tab buttons (Blocks/Tools/Machines/Decos/Light)
+		// don't squeeze to a tiny ~50px each (the "Light" tab was easy to miss).
+		const float devW = 360f;   // must match BuildUi's devW (the dev pane Panel's width)
 		float gridH = (Inventory.StorageRows + 1) * SlotSize + Inventory.StorageRows * SlotGap;
 		float paneH = gridH + 12f;   // match the craft pane height (see BuildCrafting)
 
@@ -1522,7 +1525,9 @@ public partial class InventoryUI : CanvasLayer
 		// minus the bar height).
 		float tabsTopY = 6f + titleH + 4f;
 		Vector2 tabsSize = new Vector2(innerW, paneH - tabsTopY - innerPad);
-		float tabBarH = 28f; // approx tab-bar height (the page is smaller than the container)
+		// Taller tab bar than Godot's default (~24px) so the 5 category buttons
+		// are easy to read and click. The page below is the container minus this.
+		const float tabBarH = 40f;
 		_devTabs = new TabContainer
 		{
 			Name = "DevTabs",
@@ -1531,6 +1536,31 @@ public partial class InventoryUI : CanvasLayer
 			Size = tabsSize,
 			TabsPosition = TabContainer.TabPosition.Top,
 		};
+		// Bigger, more legible tab buttons: larger font + a filled background on
+		// the selected tab. TabContainer's tab bar reads these theme overrides.
+		_devTabs.AddThemeFontSizeOverride("font_size", 15);
+		var tabStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.22f, 0.22f, 0.24f, 1f),
+			ContentMarginLeft = 8,
+			ContentMarginRight = 8,
+			ContentMarginTop = 4,
+			ContentMarginBottom = 4,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+		};
+		_devTabs.AddThemeStyleboxOverride("tab_unselected", tabStyle);
+		var tabSelectedStyle = new StyleBoxFlat
+		{
+			BgColor = new Color(0.34f, 0.36f, 0.42f, 1f),
+			ContentMarginLeft = 8,
+			ContentMarginRight = 8,
+			ContentMarginTop = 4,
+			ContentMarginBottom = 4,
+			CornerRadiusTopLeft = 6,
+			CornerRadiusTopRight = 6,
+		};
+		_devTabs.AddThemeStyleboxOverride("tab_selected", tabSelectedStyle);
 		Vector2 pageSize = new Vector2(tabsSize.X, System.Math.Max(20f, tabsSize.Y - tabBarH));
 		_devTabs.AddChild(MakeDevTabPage("Blocks", blocks, pageSize));
 		_devTabs.AddChild(MakeDevTabPage("Tools", tools, pageSize));
