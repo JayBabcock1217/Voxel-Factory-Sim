@@ -2988,6 +2988,29 @@ public partial class VoxelWorld : Node3D
 		{
 			ApplyBlockLight(blockLights);
 			anything = true;
+			// THE TORCH-LIGHT FIX: applying a saved block-light source changes
+			// this chunk's light, but the chunk's cached WIDE light field was
+			// baked from pre-torch data (the mesh may already be built and
+			// InstantSatisfied). The budget loop skips InstantSatisfied chunks
+			// UNLESS their section light is dirty, so without this the wide
+			// field never re-bakes and the torch's glow is missing (the chunk
+			// renders black). Marking it dirty forces the full rebuild, which
+			// re-bakes the wide field from the post-torch data + re-registers
+			// the section fields — exactly what a live torch placement does.
+			chunk.MarkSectionLightDirty();
+			foreach (var (v, level) in blockLights)
+			{
+				// A torch's glow reaches LightRadius voxels, so its NEIGHBOURS'
+				// wide fields also need re-baking (the cross-border glow). Mark
+				// them dirty too (their ApplyLoadedChunk may not carry this
+				// torch's light, but the wide field reads the neighbour's live
+				// data, so a dirty flag is all they need).
+				var nc = ChunkCoordOf(v.X, v.Z);
+				if (nc != chunk.Coord && _chunks.TryGetValue(nc, out VoxelChunk n))
+				{
+					n.MarkSectionLightDirty();
+				}
+			}
 		}
 
 		if (!anything)
