@@ -1,6 +1,49 @@
 # MEMORY.md — Factory Sim (persistent memory)
 
-## CURRENT STATE (Nov 2026) — player falls through terrain on save load
+## Torch light after save load (Nov 2026) — FIXED, committed c89d0f3
+
+**Symptom:** load a save that has torches → the torch's chunk renders fully
+black (torch geometry is there, no glow). Placing a torch LIVE works fine.
+
+**Root cause (a stale wide light field, NOT a save bug):**
+- The save IS correct — the `.world` file stores both the torch's geometry
+  (`Edits` mat=23) AND its light level (`BlockLights`, v4+, e.g. level=14).
+  Verified by parsing the raw file.
+- On load, `ApplyLoadedChunk` correctly writes the level into the chunk data
+  (`chunk.Data.SetBlockLight`). BUT the chunk's cached **wide light field**
+  (`_cachedLightField`) was already baked from *pre-torch* data (the sub-cell
+  mesh may already be built + `InstantSatisfied`).
+- The per-frame budget loop only rebuilds a chunk when
+  `NeedsMesh && DataReady && (!InstantSatisfied || SectionLightDirty)`.
+  `ApplyLoadedChunk` set `NeedsMesh` but NOT `SectionLightDirty`, so an
+  `InstantSatisfied` torch chunk was **skipped** — the wide field never
+  re-baked, `wideRaw` stayed 0 → black. (An audit proved it: `dataLight=14`
+  but `wideRaw=0`.)
+
+**Fix:** in `ApplyLoadedChunk`, when block lights are applied, call
+`chunk.MarkSectionLightDirty()` (and the same for the torch's neighbour
+chunks, for the cross-border glow). That forces the budget loop to run the
+full rebuild, which re-bakes the wide field from the post-torch data +
+re-registers the section fields — exactly what a live torch placement does.
+
+**Diagnostic that found it:** a temporary `[TorchDiag]` audit read, per saved
+torch, `dataLight` (chunk data) vs `wideRaw` (cached wide field, via a
+temporary `VoxelChunk.CachedLightFieldReady`). `dataLight=14 / wideRaw=0` was
+the smoking gun. All `[TorchDiag]` code + `CachedLightFieldReady` have been
+REMOVED (the fix is the real `MarkSectionLightDirty`).
+
+**Gotchas hit while diagnosing (so it's not re-diagnosed):**
+- The gameplay `WorldSave` node's `ActiveSlotId` is NOT set when
+  `VoxelWorld._Ready` runs (node ordering) — a disk re-read there sees
+  `slot=null`. The reliable load hook is `ApplyLoadedChunk` (uses
+  `GetSaveService()` which re-resolves the node in `_Process`).
+- `WorldSave.Snapshot` and `PendingEdits` are the SAME object and get DRAINED
+  as chunks load (`ConsumePending*` removes entries) — reading
+  `Snapshot.BlockLights` after load can see 0. Re-read from disk if you need
+  the authoritative list.
+- `EditRecord.MaterialId` (not `.Material`) is the field name.
+
+## Player falls through terrain on save load (Nov 2026) — FIXED
 
 **FIXED (3-part)** (uncommitted): the "load a save, player falls through the
 terrain" bug had three contributing defects:
