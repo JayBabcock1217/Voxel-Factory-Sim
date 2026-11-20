@@ -552,8 +552,14 @@ public static class TerrainGenerator
 	/// </summary>
 	private static readonly System.Collections.Concurrent.ConcurrentDictionary<Vector2I, object> _overhangDrainLocks = new();
 
-	/// <summary>Gets (or creates) the serial drain lock for <paramref name="coord"/>.</summary>
-	private static object OverhangDrainLock(Vector2I coord)
+	/// <summary>
+	/// Gets (or creates) the serial drain lock for <paramref name="coord"/>.
+	/// Public because <c>VoxelWorld.OnGenerationComplete</c> holds it for the
+	/// whole finalize window (re-drain + the <c>DataReady</c> flip) — see
+	/// <see cref="ReDrainOverhangsUntilStableUnlocked"/> for the ordering
+	/// contract a concurrent <c>MakePut</c> direct write relies on.
+	/// </summary>
+	public static object OverhangDrainLock(Vector2I coord)
 	{
 		// GetOrAdd — NOT the indexer: the ConcurrentDictionary indexer (get_Item)
 		// throws KeyNotFoundException on a missing key instead of creating it.
@@ -620,13 +626,47 @@ public static class TerrainGenerator
 					});
 				return;
 			}
-			ChunkData o = ch.Data;
-			int lx = vx - coord.X * cs;
-			int lz = vz - coord.Y * cs;
-			if (lx < 0 || lx >= cs || lz < 0 || lz >= cs) return;
-			if (o.Get(lx, vy, lz) == 0)
-				o.Set(lx, vy, lz, mat);
+			// Data-ready: write directly into the owning chunk, under the
+			// per-chunk overhang lock. The lock serialises this write with the
+			// main thread's finalize window for the same chunk (drain + the
+			// DataReady flip, see VoxelWorld.OnGenerationComplete): we either
+			// see DataReady already flipped and write after the drain's final
+			// pass (the voxel is live, the caller re-meshes), or we queue
+			// before the flip and the re-drain applies us. Without the lock,
+			// a direct write into a cell the drain's final pass had just read
+			// as solid (and skipped) was silently lost — a half tree across
+			// the chunk border (see OverhangVoxel's air-only contract: the
+			// write is idempotent, so the lock's only job is ordering).
+			ApplyOverhangDirect(coord, ch.Data, vx, vy, vz, mat);
 		};
+	}
+
+	/// <summary>
+	/// Writes a single overhang voxel directly into <paramref name="data"/>
+	/// (air-only, idempotent — the same contract <see cref="DrainInto"/> uses)
+	/// under the per-chunk overhang lock. The lock exists for ORDERING against
+	/// the main thread's finalize window in <c>VoxelWorld.OnGenerationComplete</c>
+	/// (re-drain-until-stable + the <c>DataReady</c> flip, all under this same
+	/// lock): a gen-thread direct write must be either fully before the drain
+	/// (then it queued, because DataReady was still false) or fully after the
+	/// flip (then the voxel is live and the caller's re-mesh picks it up). The
+	/// write itself is a plain air-only Set — no lock is needed for
+	/// correctness of the data, only for the ordering guarantee above.
+	/// </summary>
+	private static void ApplyOverhangDirect(
+		Vector2I coord, ChunkData data, int vx, int vy, int vz, byte mat)
+	{
+		if (vy < 0 || vy >= data.SizeY) return;
+		int lx = vx - coord.X * data.SizeX;
+		int lz = vz - coord.Y * data.SizeZ;
+		if (lx < 0 || lx >= data.SizeX || lz < 0 || lz >= data.SizeZ) return;
+		lock (OverhangDrainLock(coord))
+		{
+			if (data.Get(lx, vy, lz) == 0)
+			{
+				data.Set(lx, vy, lz, mat);
+			}
+		}
 	}
 
 	/// <summary>
@@ -979,29 +1019,47 @@ public static class TerrainGenerator
 	/// </summary>
 	public static bool ReDrainOverhangsUntilStable(Vector2I coord, ChunkData chunk)
 	{
-		object lockObj = OverhangDrainLock(coord);
-		lock (lockObj)
+		// Public wrapper: the whole drain (and its queue removal) runs under
+		// the per-chunk overhang lock, so a concurrent MakePut direct write
+		// can't interleave with it (MakePut takes the same lock when the
+		// owning chunk is data-ready — see its direct-write path below).
+		lock (OverhangDrainLock(coord))
 		{
-			bool any = false;
-			while (true)
-			{
-				if (!DrainInto(coord, chunk))
-				{
-					break; // nothing queued (or nothing that lands in air) -> stable
-				}
-				any = true;
-				// A pass applied >=1 voxel. Drain again: if a concurrent append
-				// landed since the last read, it will now be applied; if not, the
-				// next pass reads an empty bag and breaks.
-			}
-			// Stable: clear the queue entry. Safe because we hold the lock — no
-			// gen-thread drain-and-restore or main-thread drain can interleave and
-			// drop a voxel. (A gen-thread PutVoxel append that misses this window
-			// re-creates the entry and is caught by a later rebuild, per the
-			// method summary.)
-			_pendingOverhangs.TryRemove(coord, out _);
-			return any;
+			return ReDrainOverhangsUntilStableUnlocked(coord, chunk);
 		}
+	}
+
+	/// <summary>
+	/// The actual re-drain loop of <see cref="ReDrainOverhangsUntilStable"/>:
+	/// re-drains the queued overhangs into <paramref name="chunk"/> until a pass
+	/// applies nothing, then removes the queue entry. The caller MUST already
+	/// hold <see cref="OverhangDrainLock(coord)"/> (the public wrapper does; the
+	/// main-thread finalize path in <c>VoxelWorld.OnGenerationComplete</c> holds
+	/// the same lock for the WHOLE finalize window — drain + <c>DataReady</c>
+	/// flip — which is what keeps a concurrent gen-thread <c>MakePut</c> from
+	/// racing the final pass: it either queues before the drain starts — caught
+	/// by this re-drain — or takes the lock after the flip and writes directly
+	/// — caught by the caller's final drain pass).
+	/// </summary>
+	public static bool ReDrainOverhangsUntilStableUnlocked(Vector2I coord, ChunkData chunk)
+	{
+		bool any = false;
+		while (true)
+		{
+			if (!DrainInto(coord, chunk))
+			{
+				break; // nothing queued (or nothing that lands in air) -> stable
+			}
+			any = true;
+			// A pass applied >=1 voxel. Drain again: if a concurrent append
+			// landed since the last read, it will now be applied; if not, the
+			// next pass reads an empty bag and breaks.
+		}
+		// Stable: clear the queue entry. Safe because the caller holds the
+		// lock — no gen-thread drain-and-restore or main-thread drain can
+		// interleave and drop a voxel.
+		_pendingOverhangs.TryRemove(coord, out _);
+		return any;
 	}
 
 	/// <summary>
@@ -1071,6 +1129,51 @@ public static class TerrainGenerator
 			// the main thread, which is holding this lock right now.
 			_pendingHiveOverhangs.TryRemove(coord, out _);
 			return any;
+		}
+	}
+
+	/// <summary>
+	/// Drops all queued CANOPY-overhang voxels for <paramref name="coord"/>
+	/// WITHOUT applying them. Used when a chunk's generation FAULTS (see
+	/// <c>VoxelWorld.OnGenerationFaulted</c>): the chunk's data is empty, and
+	/// its normal drain never runs (OnGenerationComplete is skipped), so the
+	/// queue entry would otherwise linger and accumulate across the chunk's
+	/// fault → re-generate → fault cycles (a flapping chunk at the load-ring
+	/// edge would leak memory and bloat the authoritative re-drain). The
+	/// re-generation path re-queues any still-undrained neighbour overhangs, so
+	/// nothing is lost in the normal case: the neighbours that queued for the
+	/// faulting chunk are still generating, and their foliage stages will queue
+	/// again for the fresh run of this chunk.
+	///
+	/// Main-thread only (it is called from OnGenerationFaulted, which runs via
+	/// CallDeferred). Holds the per-chunk drain lock so the drop can't
+	/// interleave with a gen-thread drain-and-restore or the main-thread
+	/// re-drain of the same chunk.
+	/// </summary>
+	public static void DiscardPendingOverhangs(Vector2I coord)
+	{
+		object lockObj = OverhangDrainLock(coord);
+		lock (lockObj)
+		{
+			_pendingOverhangs.TryRemove(coord, out _);
+		}
+	}
+
+	/// <summary>
+	/// Drops all queued HIVE-overhang voxels for <paramref name="coord"/>
+	/// WITHOUT applying them. Same contract and rationale as
+	/// <see cref="DiscardPendingOverhangs"/> (a faulting chunk's queue entry
+	/// would otherwise linger past its re-generation).
+	///
+	/// Main-thread only. Holds the per-chunk drain lock so the drop can't
+	/// interleave with <see cref="ReDrainHiveOverhangs"/> of the same chunk.
+	/// </summary>
+	public static void DiscardPendingHiveOverhangs(Vector2I coord)
+	{
+		object lockObj = OverhangDrainLock(coord);
+		lock (lockObj)
+		{
+			_pendingHiveOverhangs.TryRemove(coord, out _);
 		}
 	}
 

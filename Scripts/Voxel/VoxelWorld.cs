@@ -591,6 +591,15 @@ public partial class VoxelWorld : Node3D
 	[Export]
 	public FactorySim.Machines.MachineDefConfig MachineConfig { get; private set; }
 
+	/// <summary>
+	/// The radius (in world-voxel units) over which a power source machine feeds
+	/// nearby consumer machines. Tunable here; forwarded to
+	/// <see cref="FactorySim.Machines.PowerNetwork"/> in <see cref="_Ready"/>.
+	/// A value under 0.5 falls back to the network's default (8).
+	/// </summary>
+	[Export(PropertyHint.Range, "0,64,0.5")]
+	public float PowerRadius { get; set; } = FactorySim.Machines.PowerNetwork.DefaultRadius;
+
 	[ExportGroup("Decos (non-terrain voxels)")]
 	/// <summary>
 	/// The registry of deco definitions for this world — the non-terrain voxel
@@ -605,15 +614,6 @@ public partial class VoxelWorld : Node3D
 	/// </summary>
 	[Export]
 	public FactorySim.Deco.DecoDefConfig DecoConfig { get; private set; }
-
-	/// <summary>
-	/// The radius (in world-voxel units) over which a power source machine feeds
-	/// nearby consumer machines. Tunable here; forwarded to
-	/// <see cref="FactorySim.Machines.PowerNetwork"/> in <see cref="_Ready"/>.
-	/// A value under 0.5 falls back to the network's default (8).
-	/// </summary>
-	[Export(PropertyHint.Range, "0,64,0.5")]
-	public float PowerRadius { get; set; } = FactorySim.Machines.PowerNetwork.DefaultRadius;
 
 	[ExportGroup("Debug")]
 	/// <summary>Pressing this key regenerates all loaded chunks with the current parameters.</summary>
@@ -2092,14 +2092,23 @@ public partial class VoxelWorld : Node3D
 					// Wait until the shape is actually attached (retry next frame).
 					//
 					// CRITICAL: check at the EXACT SEED position — the terrain
-					// surface + capsule half-height + settle lift, the same place
-					// SpawnPlayerOnTerrain seats the player. NOT the stale saved
-					// Y (_spawnRestorePos) or the scene Y (playerNode.GlobalPosition):
-					// those can sit far from the actual surface (a fresh world's
-					// scene Y=0 is below BaseHeight; a save's Y may be stale), so
-					// checking them tested a voxel with no live body and the gate
-					// waited forever even though the bar reached 100%.
-					var collisionCheckPos = SpawnSeedPosition(playerNode.GlobalPosition);
+					// surface + capsule half-height + settle lift. For a save
+					// load the seed is computed at the SAVED XZ (_spawnRestorePos,
+					// set when the anchor froze), NOT the scene position
+					// (playerNode.GlobalPosition, usually the origin): the player
+					// is RESTORED at the saved XZ, so the gate must verify the
+					// ground THERE. Checking the scene position verified the wrong
+					// spot (the origin), so a save whose restored column had no
+					// live collision body passed the gate and the player's first
+					// physics step tunneled through the floor (the "falls through
+					// the terrain on save load" bug). The seed Y still comes from
+					// the terrain scan (ResolveSurfaceY), never the stale saved Y —
+					// the saved Y can sit far from the actual surface, and testing
+					// it would check a voxel with no live body.
+					var spawnPosForGate = _spawnRestorePos != Vector3.Zero
+						? new Vector3(_spawnRestorePos.X, playerNode.GlobalPosition.Y, _spawnRestorePos.Z)
+						: playerNode.GlobalPosition;
+					var collisionCheckPos = SpawnSeedPosition(spawnPosForGate);
 					if (HasLiveCollisionAt(collisionCheckPos))
 					{
 						if (SpawnOrRestorePlayer(playerNode))
@@ -3879,14 +3888,13 @@ public partial class VoxelWorld : Node3D
 
 		// SEAT the player on the terrain at the SAME position the spawn gate
 		// verified (see SpawnSeedPosition): the terrain surface + capsule
-		// half-height + a tiny settle lift. The capsule starts a hair above the
-		// ground, never inside the solid and never dropped from above — so the
-		// first physics step can't tunnel the capsule through the floor (the
-		// old SpawnOffset + 0.25 drop let the first step sink the capsule into
-		// a block, and a concave shape can't push a body out from inside). The
-		// gate already verified the collision body is live at this exact
-		// position and the 0.5s settle delay has registered it, so the first
-		// step lands cleanly.
+		// half-height − the settle lift, so the capsule bottom is embedded a
+		// hair INTO the ground (overlap, not a gap above it). Starting in
+		// contact is what keeps the first physics step from being a fall —
+		// and a first-step fall is what tunnels a discrete capsule through a
+		// concave MC mesh. The gate already verified the collision body is live
+		// at this exact position and the 0.5s settle delay has registered it, so
+		// the first step settles cleanly.
 		player.GlobalPosition = SpawnSeedPosition(pos);
 		player.GlobalRotation = Vector3.Zero; // face a clean direction on fresh spawn
 		GD.Print($"[VoxelWorld] Spawned player at {player.GlobalPosition}.");
@@ -3934,18 +3942,19 @@ public partial class VoxelWorld : Node3D
 	private const float SpawnCapsuleHalfHeight = 0.9f;
 
 	/// <summary>
-	/// A tiny lift above the terrain surface the player is SEATED at when the
-	/// spawn gate opens. The player's capsule top is placed at
-	/// <c>surfaceTop + SpawnSettleLift</c>, so the capsule starts a hair ABOVE
-	/// the ground (not inside the solid, not far above it). Starting right at
-	/// the surface is what makes the spawn tunnel-proof: the first physics step
-	/// only has to move a fraction of a unit before the capsule registers the
-	/// floor, so it can never sink into the solid (a concave shape can't push
-	/// out a body that starts INSIDE it — that is the "falls through the
-	/// terrain" failure). The old drop-from-above (surface + SpawnOffset + 0.25,
-	/// ~7 voxels up) let the first step tunnel; even a small 0.1 drop could
-	/// land the capsule bottom inside a block if the surface is sloped. Seating
-	/// the capsule at the surface removes the drop entirely.
+	/// The tiny OVERLAP the player's capsule is SEATED with on the terrain
+	/// surface (see <see cref="SpawnSeedPosition"/>). The capsule BOTTOM is
+	/// placed at <c>surfaceTop − SpawnSettleLift</c> — i.e. embedded a hair INTO
+	/// the ground, not floating above it. The overlap is what makes the spawn
+	/// tunnel-proof: the capsule starts IN CONTACT with the ground, so the first
+	/// physics step is a no-op settle, not a fall. A first-step fall is the
+	/// danger — Godot's MoveAndSlide is DISCRETE, and a fall over a concave MC
+	/// mesh lets the capsule pass through the thin surface into the solid below,
+	/// where a concave shape can't push it back out (the "falls through the
+	/// terrain on load" bug: position frozen, velocity at terminal fall). The
+	/// old code used surfaceTop + SpawnOffset + 0.25 (a ~7-voxel drop) and even
+	/// the "seated" version floated the capsule 0.02 ABOVE the surface — both
+	/// were first-step falls.
 	/// </summary>
 	private const float SpawnSettleLift = 0.02f;
 
@@ -3953,9 +3962,17 @@ public partial class VoxelWorld : Node3D
 	/// The exact world position the player's BODY ORIGIN is placed at when the
 	/// spawn gate opens, for the live player's XZ: the terrain surface (scanning
 	/// the loaded chunk top-down, so caves lower it and rocks/trees raise it)
-	/// plus the capsule half-height, plus <see cref="SpawnSettleLift"/>. This
-	/// SEATS the player's capsule on the ground (capsule top = surfaceTop +
-	/// lift, capsule bottom just below the surface top — i.e. standing on it).
+	/// plus the capsule half-height, MINUS <see cref="SpawnSettleLift"/>. This
+	/// SEATS the player's capsule on the ground with its bottom embedded
+	/// <c>SpawnSettleLift</c> INTO the surface top (capsule bottom =
+	/// surfaceTop − lift) — i.e. standing on it, with a hair of overlap. The
+	/// overlap is what makes the spawn tunnel-proof: the capsule starts
+	/// touching the ground, so the first physics step is a no-op settle rather
+	/// than a fall. A fall is the danger — Godot's MoveAndSlide is DISCRETE,
+	/// and a first-step fall over a concave MC mesh lets the capsule pass
+	/// through the thin surface into the solid below, where it can never be
+	/// pushed out (the "falls through the terrain on load" bug: the capsule
+	/// froze inside the mesh, velocity at terminal fall, position stuck).
 	/// It is the SAME formula <see cref="SpawnPlayerOnTerrain"/> and the spawn
 	/// gate's live-collision check use, so the gate and the actual spawn always
 	/// agree on WHERE the player lands.
@@ -3972,7 +3989,9 @@ public partial class VoxelWorld : Node3D
 		int vz = Mathf.FloorToInt(playerPos.Z / VoxelSize);
 		int surfaceY = ResolveSurfaceY(vx, vz);
 		float surfaceTop = (surfaceY + 1) * VoxelSize;
-		float seedY = surfaceTop + SpawnCapsuleHalfHeight + SpawnSettleLift;
+		// MINUS the settle lift: the capsule bottom sinks SpawnSettleLift into
+		// the surface top (overlap, not a gap above it — see summary).
+		float seedY = surfaceTop + SpawnCapsuleHalfHeight - SpawnSettleLift;
 		return new Vector3(playerPos.X, seedY, playerPos.Z);
 	}
 
@@ -3993,8 +4012,10 @@ public partial class VoxelWorld : Node3D
 		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
 		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
 		int surfaceY = ResolveSurfaceY(vx, vz);
-		// The Y the capsule-top-sitting-on-the-ground would have.
-		float seatedY = (surfaceY + 1) * VoxelSize + SpawnCapsuleHalfHeight + SpawnSettleLift;
+		// The Y of the SEATED capsule: bottom embedded SpawnSettleLift into the
+		// surface top (overlap, so the first physics step settles rather than
+		// falls — see SpawnSeedPosition).
+		float seatedY = (surfaceY + 1) * VoxelSize + SpawnCapsuleHalfHeight - SpawnSettleLift;
 		// Only lift if the restored origin is BELOW the seated line (i.e. it
 		// overlaps or buries into the surface). Never push a player UP if they
 		// are already above the ground (saved mid-air or on a tall structure).
@@ -4003,6 +4024,49 @@ public partial class VoxelWorld : Node3D
 			player.GlobalPosition = new Vector3(pos.X, seatedY, pos.Z);
 			GD.Print($"[VoxelWorld] Reseeded restored player onto surface (surface voxel y={surfaceY}).");
 		}
+	}
+
+	/// <summary>
+	/// The fall-through guard for a save-RESTORED player (see
+	/// <see cref="SpawnOrRestorePlayer"/>): when the terrain under the restored
+	/// position is NOT solid — the saved Y sat above the surface (saved
+	/// mid-air, on a since-broken structure, or on a column whose surface the
+	/// gate's scan resolves differently) and the first physics step would
+	/// tunnel the capsule through the floor (no CCD: gravity gives a few
+	/// voxels of travel in one step) — reseat the capsule on the column's real
+	/// surface. The capsule is then a hair above solid ground (the
+	/// <see cref="SpawnSeedPosition"/> seating), so the first step lands
+	/// cleanly instead of falling through.
+	///
+	/// The probe is a few voxels under the capsule bottom (the ground the first
+	/// step would hit) at the restored XZ. When it is solid, the player is
+	/// already on the ground (the normal save case) and nothing happens — the
+	/// saved transform is preserved exactly. When it is air, the column's
+	/// surface is re-resolved and the capsule is seated on it (same XZ, same
+	/// yaw).
+	/// </summary>
+	private void ReseedIfNoGroundUnder(Node3D player)
+	{
+		Vector3 pos = player.GlobalPosition;
+		int vx = Mathf.FloorToInt(pos.X / VoxelSize);
+		int vz = Mathf.FloorToInt(pos.Z / VoxelSize);
+		// The capsule bottom is 0.9 below the origin (the capsule center). Probe
+		// 2 voxels under that — the ground the first physics step would hit.
+		int probeY = Mathf.FloorToInt((pos.Y - SpawnCapsuleHalfHeight - 2f) / VoxelSize);
+		if (probeY >= 0 && GetVoxel(vx, probeY, vz) != VoxelMaterialIds.Air)
+		{
+			return; // ground is under the player — the saved spot is fine.
+		}
+		int surfaceY = ResolveSurfaceY(vx, vz);
+		if (surfaceY < 0)
+		{
+			return; // no solid at all in this column (void) — nothing to seat on.
+		}
+		// Seated capsule: bottom embedded SpawnSettleLift into the surface top
+		// (overlap, not a gap — see SpawnSeedPosition).
+		float seatedY = (surfaceY + 1) * VoxelSize + SpawnCapsuleHalfHeight - SpawnSettleLift;
+		player.GlobalPosition = new Vector3(pos.X, seatedY, pos.Z);
+		GD.Print($"[VoxelWorld] No ground under the restored player at {pos}; reseeded onto the surface (voxel y={surfaceY}).");
 	}
 
 	/// <summary>
@@ -4620,6 +4684,25 @@ public partial class VoxelWorld : Node3D
 				// capsule inside a block and it would tunnel through the floor
 				// (the "falls through the terrain" failure on save load).
 				ReseedPlayerOntoSurface(player);
+
+				// FALL-THROUGH GUARD: the gate verified a live collision body at
+				// the SAVED column's seed position, but the save's Y can sit
+				// ABOVE the terrain surface (saved mid-air, on a since-broken
+				// structure, or on a column whose surface the gate's scan
+				// resolves differently). With no CCD, the first physics step
+				// moves the capsule a few voxels (gravity 20 × 1/60s); if the
+				// ground under the restored position is missing or lower than
+				// expected, the capsule passes straight through the floor into
+				// the solid below — and a concave mesh can't push a body out
+				// from inside. So verify the terrain is ACTUALLY solid at the
+				// restored spot (a few voxels under the capsule bottom, the
+				// ground the first step would hit). When it isn't, reseat the
+				// capsule on the column's real surface (the same place
+				// SpawnPlayerOnTerrain seats a fresh player) so the first step
+				// has solid ground to land on. A no-op when the saved position
+				// already has ground under it (the normal case — they saved
+				// standing on the ground and it's still there).
+				ReseedIfNoGroundUnder(player);
 			}
 			if (!restored)
 			{
@@ -5380,6 +5463,24 @@ public partial class VoxelWorld : Node3D
 		{
 			FreeChunk(chunk);
 		}
+		// A faulting generation (e.g. an OOM inside the heightmap/caves/foliage
+		// stages) leaves this chunk's voxel data EMPTY. The overhang queues can
+		// still hold voxels that a concurrent neighbour's foliage stage queued
+		// for it while it was (still) generating — the normal drain happens in
+		// OnGenerationComplete, which a faulted chunk never reaches. Left alone
+		// those entries are applied when the chunk re-generates (it stamps its
+		// own terrain first, so the applied voxels are correct) — but until then
+		// they accumulate: a flapping chunk at the load-ring edge faults and
+		// re-generates repeatedly, and every cycle appends a fresh batch while
+		// the old one is still queued, leaking memory and bloating the
+		// authoritative re-drain. Dropping the chunk's queued overhangs keeps
+		// the queues bounded to in-flight chunks: the neighbours that queued for
+		// the (faulting) chunk are still generating too, so when this chunk
+		// re-generates, any of their overhangs not yet drained will simply be
+		// re-queued for the fresh run — the same "queue for when that chunk gets
+		// generated" contract as the normal path.
+		TerrainGenerator.DiscardPendingOverhangs(coord);
+		TerrainGenerator.DiscardPendingHiveOverhangs(coord);
 	}
 
 	/// <summary>
@@ -5506,34 +5607,70 @@ public partial class VoxelWorld : Node3D
 			// Chunk was freed while generation was in flight.
 			return;
 		}
-		current.DataReady = true;
 
 		// World persistence: re-apply this chunk's saved edits + health NOW,
-		// while its data is ready and before the budget loop meshes it. This
-		// stamps the chunk + 1-ring with a fresh edit priority so the edited
-		// area rebuilds first. A no-op when there is no pending snapshot
-		// (a fresh world with no save).
+		// before its data is marked ready and before the budget loop meshes it.
+		// This stamps the chunk + 1-ring with a fresh edit priority so the edited
+		// area rebuilds first. A no-op when there is no pending snapshot (a fresh
+		// world with no save). Runs OUTSIDE the overhang lock below: it writes
+		// voxels through SetVoxel (which can re-stamp NeedsMesh on this same
+		// chunk), and the lock must stay a short critical section.
 		ApplyLoadedChunk(current);
 
-		// A neighbour's foliage stage may have queued canopy-overhang voxels for
-		// THIS chunk (it was still generating when they ran). Apply any that are
-		// left — re-draining until stable under the per-chunk lock so a voxel
-		// queued a hair later by a concurrent neighbour is NOT lost (the old
-		// single destructive drain dropped those, rendering a half tree). If
-		// anything landed, the chunk needs a mesh rebuild.
-		if (TerrainGenerator.ReDrainOverhangsUntilStable(coord, current.Data))
+		// FINALIZE WINDOW: hold the chunk's overhang drain lock for the whole
+		// window — re-drain the canopy overhangs, flip DataReady, re-drain the
+		// hive overhangs. The lock's contract (see
+		// TerrainGenerator.ReDrainOverhangsUntilStableUnlocked): a concurrent
+		// gen-thread MakePut that targets THIS chunk either sees DataReady still
+		// false and QUEUES (caught by the re-drain below) or waits on this lock
+		// and writes directly only after the flip (caught by the final drain
+		// pass below). Without the window, the DataReady flip used to happen
+		// BEFORE the drains: a direct MakePut write into a cell the drain's
+		// final pass had just read as solid (and skipped) was silently lost —
+		// the half-tree-across-a-chunk-border bug.
+		bool canopyLanded;
+		bool hiveLanded;
+		lock (TerrainGenerator.OverhangDrainLock(coord))
+		{
+			// A neighbour's foliage stage may have queued canopy-overhang voxels
+			// for THIS chunk (it was still generating when they ran). Apply any
+			// that are left — re-draining until stable (under the lock we hold
+			// here) so a voxel queued a hair later by a concurrent neighbour is
+			// NOT lost (the old single destructive drain dropped those,
+			// rendering a half tree).
+			canopyLanded = TerrainGenerator.ReDrainOverhangsUntilStableUnlocked(coord, current.Data);
+
+			// DataReady goes true INSIDE the window: from this instant, a
+			// concurrent MakePut for this chunk writes directly (under the same
+			// lock — so it lands after this drain) instead of queueing. The
+			// final drain pass below re-checks the queue for voxels queued
+			// between the two passes.
+			current.DataReady = true;
+
+			// HIVE border-overhangs (same mechanism as the canopy overhangs
+			// above): a hive placed in a neighbour may have queued sphere voxels
+			// for THIS chunk (it was still generating when the hive was
+			// placed). Apply any that are left now that the data is ready. The
+			// drain removes the queue entry, so a later regeneration of this
+			// chunk does not re-apply a stale hive.
+			hiveLanded = TerrainGenerator.ReDrainHiveOverhangs(coord, current.Data);
+
+			// FINAL PASS: a MakePut for this chunk that read DataReady=false a
+			// moment ago (before the flip above) but took the lock after this
+			// drain's last read QUEUED its voxel (the queue branch does not
+			// touch the lock). Apply anything queued in that sliver now —
+			// this is the pass that makes the window airtight.
+			if (TerrainGenerator.ReDrainOverhangsUntilStableUnlocked(coord, current.Data))
+			{
+				canopyLanded = true;
+			}
+		}
+		if (canopyLanded)
 		{
 			current.NeedsMesh = true;
 			current.EditPriority = ++_editPriorityCounter;
 		}
-
-		// HIVE border-overhangs (same mechanism as the canopy overhangs above):
-		// a hive placed in a neighbour may have queued sphere voxels for THIS
-		// chunk (it was still generating when the hive was placed). Apply any
-		// that are left now that the data is ready, and re-mesh this chunk if
-		// anything landed. The drain removes the queue entry, so a later
-		// regeneration of this chunk does not re-apply a stale hive.
-		if (TerrainGenerator.ReDrainHiveOverhangs(coord, current.Data))
+		if (hiveLanded)
 		{
 			current.NeedsMesh = true;
 			current.EditPriority = ++_editPriorityCounter;
@@ -5583,13 +5720,25 @@ public partial class VoxelWorld : Node3D
 	/// and the foliage stage's replacement of them). Each position is the air
 	/// cell above a surface voxel with no foliage in its column.
 	///
-	/// A position is skipped when:
+	/// The positions were collected on the GEN THREAD during generation; by the
+	/// time this runs (main thread, after DataReady + saved edits + overhangs +
+	/// hives are applied) the surface can have CHANGED. The guards below
+	/// re-validate against the FINAL state. A position is skipped when:
 	///   - the cell below is no longer a GRASS voxel (saved edits, hive
 	///     voxels, or canopy overhangs re-drained after the positions were
 	///     collected changed the surface), or
-	///   - the grass voxel is on a SLOPE (a horizontal neighbour is air) and
-	///     <see cref="GrassFlatSurfaceOnly"/> is on, or
-	///   - a GrassDeco already occupies the cell (avoids double-spawning).
+	///   - the cell itself is no longer air / already holds a DecoVoxel, or
+	///   - the grass voxel is on a SLOPE (a horizontal neighbour is not solid)
+	///     and <see cref="GrassFlatSurfaceOnly"/> is on.
+	///
+	/// The flat-surface guard deliberately reads through
+	/// <see cref="VoxelSolidForMesh"/> (the MESHER's own solid query) instead
+	/// of raw <see cref="GetVoxel"/>: an unloaded or still-generating neighbour
+	/// counts as SOLID there (the open-edge rule — no wall is emitted at the
+	/// render boundary), which matches what the MESH actually shows. The old
+	/// GetVoxel-based check read those cells as AIR and let grass spawn on the
+	/// beveled isosurface at the edge of the loaded area (grass sticking out
+	/// of the terrain / floating over the open edge).
 	///
 	/// The positions are WORLD coords (the generator converted them), so no
 	/// coordinate math is needed here.
@@ -5601,17 +5750,16 @@ public partial class VoxelWorld : Node3D
 		{
 			return;
 		}
-		int cs = ChunkSizeXZ;
-		int wx0 = coord.X * cs;
-		int wz0 = coord.Y * cs;
 		for (int i = 0; i < grassPositions.Count; i++)
 		{
 			var pos = grassPositions[i];
-			// The cell below must still be a GRASS voxel (not air, not dirt/
-			// stone, not any other solid). The surface may have changed since
-			// the positions were collected (saved edits, hives, overhangs) —
-			// if the grass block is gone or replaced, skip the position.
-			if (pos.Y <= 0)
+			// RE-VALIDATION (the positions were collected on the gen thread
+			// during generation; the surface can have changed since — saved
+			// edits, hives, overhangs, or a neighbouring chunk finishing): the
+			// cell below must still be a GRASS voxel (the surface) and the cell
+			// itself must still be air (the grass grows up from the surface).
+			// If either is no longer true, skip — the position is stale.
+			if (pos.Y <= 0 || pos.Y >= ChunkHeight)
 			{
 				continue;
 			}
@@ -5629,38 +5777,35 @@ public partial class VoxelWorld : Node3D
 			{
 				continue;
 			}
-			// CHUNK-EDGE GUARD: a position collected at this chunk's border can
-			// be invalidated by a NEIGHBOUR's terrain (a neighbouring overhang
-			// canopy, a hive, or a structure that lands on the shared border).
-			// GetVoxel reads an unloaded / still-generating neighbour as AIR,
-			// which would let us spawn grass on top of a neighbour's solid
-			// voxel. Skip any position that crosses the border — the neighbour
-			// chunk will spawn its own grass for that column when it completes
-			// (its own top-down scan sees the full border), so nothing is lost.
-			int lx = pos.X - wx0;
-			int lz = pos.Z - wz0;
-			if (lx < 0 || lx >= cs || lz < 0 || lz >= cs)
-			{
-				continue;
-			}
 			// FLAT-SURFACE GUARD: when GrassFlatSurfaceOnly is on, the grass
 			// voxel's EIGHT horizontal neighbours (four same-level ±X/±Z and
-			// four below ±X/±Z) must all be solid (not air), so grass doesn't
-			// float on a slope or get poked through by the smooth MarchingCubes
-			// isosurface (which bevels its edges into the solid). GetVoxel reads
-			// an unloaded neighbour as Air, so a position bordering an unloaded
-			// chunk is safely skipped (the neighbour chunk spawns its own grass
-			// when it completes).
+			// four below ±X/±Z) must all be SOLID, so grass doesn't float on a
+			// slope or get poked through by the smooth MarchingCubes isosurface
+			// (which bevels its edges into the solid).
+			//
+			// The reads go through VoxelSolidForMesh — the MESHER's own query —
+			// NOT GetVoxel: an unloaded or still-generating neighbour counts as
+			// SOLID there (the open-edge rule — the mesh leaves the outer edge
+			// open with no wall), which is exactly what the player SEES. The
+			// old GetVoxel check read those cells as AIR, so a position at the
+			// edge of the loaded area passed the "all solid" test against
+			// phantom air and grass was planted on the beveled slope (the
+			// "grass on non-flat voxels" bug). A position bordering an unloaded
+			// chunk now passes the guard and spawns; when the neighbour later
+			// finishes with a lower surface, the grass floats visibly — but
+			// that matches the mesh (the open edge shows the same slope), and
+			// the grass despawns with the chunk on unload anyway (it is not
+			// persisted in the save).
 			int gy = pos.Y - 1; // the grass voxel (below the grass cell)
 			if (GrassFlatSurfaceOnly &&
-				(GetVoxel(pos.X - 1, gy, pos.Z) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X + 1, gy, pos.Z) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X, gy, pos.Z - 1) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X, gy, pos.Z + 1) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X - 1, gy - 1, pos.Z) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X + 1, gy - 1, pos.Z) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X, gy - 1, pos.Z - 1) == VoxelMaterialIds.Air ||
-				 GetVoxel(pos.X, gy - 1, pos.Z + 1) == VoxelMaterialIds.Air))
+				(!VoxelSolidForMesh(pos.X - 1, gy, pos.Z) ||
+				 !VoxelSolidForMesh(pos.X + 1, gy, pos.Z) ||
+				 !VoxelSolidForMesh(pos.X, gy, pos.Z - 1) ||
+				 !VoxelSolidForMesh(pos.X, gy, pos.Z + 1) ||
+				 !VoxelSolidForMesh(pos.X - 1, gy - 1, pos.Z) ||
+				 !VoxelSolidForMesh(pos.X + 1, gy - 1, pos.Z) ||
+				 !VoxelSolidForMesh(pos.X, gy - 1, pos.Z - 1) ||
+				 !VoxelSolidForMesh(pos.X, gy - 1, pos.Z + 1)))
 			{
 				continue;
 			}

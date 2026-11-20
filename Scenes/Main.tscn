@@ -74,7 +74,6 @@ MaterialConfig = ExtResource("3_materialconfig")
 MachineConfig = ExtResource("3_bmxlf")
 DecoConfig = ExtResource("6_hwpts")
 EnableRegenerateShortcut = false
-DebugLight = true
 HiveRadius = 6
 HiveSpawnExclusionChunks = 12
 HiveScene = ExtResource("6_346fj")
@@ -89,7 +88,6 @@ NightSeconds = 3600.0
 
 [node name="PlayerCharacter" parent="Player" unique_id=1965905934 instance=ExtResource("1_player")]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
-wall_min_slide_angle = 0.87266463
 floor_max_angle = 1.3089969
 WalkSpeed = 4.0
 SprintSpeed = 12.0

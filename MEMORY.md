@@ -1,5 +1,145 @@
 # MEMORY.md — Factory Sim (persistent memory)
 
+## CURRENT STATE (Nov 2026) — player falls through terrain on save load
+
+**FIXED (3-part)** (uncommitted): the "load a save, player falls through the
+terrain" bug had three contributing defects:
+1. GATE CHECKED THE WRONG SPOT: the spawn gate's live-collision check ran
+   `HasLiveCollisionAt(SpawnSeedPosition(playerNode.GlobalPosition))` — the SCENE
+   position (usually the origin), not the SAVED position the player is actually
+   restored at. A save whose restored column had no live collision body passed
+   the gate anyway. Fix: the gate now seeds from `_spawnRestorePos` (the saved
+   XZ, set when the anchor froze; the seed Y still comes from the terrain scan,
+   never the stale saved Y).
+2. NO GROUND-UNDER CHECK ON RESTORE: `ReseedPlayerOntoSurface` only lifts the
+   player UP when buried — it never verifies the ground is actually solid at the
+   restored spot. With the saved Y above the surface (saved mid-air, on a
+   since-broken structure, or a column whose surface the gate's scan resolves
+   differently), the first physics step (no CCD: gravity 20 × 1/60s ≈ 0.33+
+   voxels of travel) tunnels the capsule through the floor into the solid below,
+   and a concave mesh can't push a body out from inside. Fix: new
+   `ReseedIfNoGroundUnder` — probes ~2 voxels under the capsule bottom at the
+   restored XZ; when it's air, seats the capsule on the column's real surface
+   (same XZ/yaw). No-op when the saved spot already has ground (the normal case).
+3. SEATING FORMULA PUT THE CAPSULE ABOVE THE GROUND (the real cause, confirmed
+   by [PlayerDiag] STALL logs: position frozen at the spawn point, velocity at
+   terminal -40, onFloor=False — the capsule was trapped INSIDE the concave MC
+   mesh). `SpawnSeedPosition` / `ReseedPlayerOntoSurface` /
+   `ReseedIfNoGroundUnder` all seated the capsule at
+   `surfaceTop + SpawnCapsuleHalfHeight + SpawnSettleLift`, i.e. the capsule
+   BOTTOM 0.02 ABOVE the surface top. The first physics step was therefore a
+   FALL, and Godot's MoveAndSlide is DISCRETE (no CCD — Godot 4's motion_mode is
+   only GROUNDED/FLOATING; I wrongly set FLOATING(1) once thinking it was CCD,
+   which broke the controls and was reverted). A first-step fall over a concave
+   MC mesh tunnels the capsule into the solid, where it can't be pushed out.
+   Fix: the seating is now `surfaceTop + SpawnCapsuleHalfHeight - SpawnSettleLift`
+   in ALL THREE places — the capsule bottom is embedded 0.02 INTO the surface
+   (overlap, not a gap), so the first step is a settle, not a fall.
+4. THE REAL ROOT CAUSE (confirmed by the voxel-column diag): the actual game
+   runs the player as an INSTANCE of Scenes/Player.tscn inside Scenes/Main.tscn
+   ("PlayerCharacter" under "Player"), and that instance carried LOCAL OVERRIDES
+   that I kept missing (I was editing the standalone Player.tscn, not the
+   instance): `floor_max_angle = 1.309` (75° — default is 45°), `wall_min_slide_angle
+   = 0.873`, and `motion_mode = 1` (FLOATING). The 75° floor angle made a
+   beveled/sloped surface at the spawn point classify as a degenerate wall/floor
+   hybrid, so the (slightly embedded) capsule WEDGED: `onWall=True, onFloor=False`,
+   and a concave MC mesh can't push an embedded body out → it jittered and fell
+   forever, horizontal input killed. Fix: removed `motion_mode = 1` (FLOATING — the real wedge cause) and
+   `wall_min_slide_angle = 0.873` from Main.tscn (kept WalkSpeed/SprintSpeed/
+   Acceleration). KEPT `floor_max_angle = 1.3089969` (75°) — INTENTIONAL:
+   the user wants the player to walk up steep terrain steps; it is safe now
+   that motion_mode is GROUNDED (0) and the capsule is seated with a slight
+   overlap (no deep embedding to wedge on). NOTE: the Zombie instance in Main.tscn
+   keeps floor_max_angle=1.5707 (90°, intentional — it climbs walls).
+LESSON: when a node is instanced, the .tscn it's an instance OF is NOT the source
+of truth — the INSTANCE's local overrides in the PARENT scene win. Always check
+the parent scene's instance overrides before concluding a property is "default."
+Ordering note: `RestorePlayerFromSave` → `ReseedPlayerOntoSurface` (lift if
+buried) → `ReseedIfNoGroundUnder` (seat if floating over void/broken ground).
+The `[PlayerDiag]` STALL diagnostic in `Player.cs` and the
+`VoxelWorld.DiagSeedPosition` helper were REMOVED once the fix was verified
+in-editor (the player moves normally now).
+
+## CURRENT STATE (Nov 2026) — grass deco on non-flat voxels
+
+**FIXED — grass spawning on slopes / the loaded-area edge** (uncommitted): the
+`SpawnGrassForChunk` flat-surface guard read neighbours via `GetVoxel`, which
+returns AIR for an UNLOADED or STILL-GENERATING chunk — but the mesher
+(`VoxelSolidForMesh`) treats those cells as SOLID (open-edge rule, no wall at
+the render boundary). So at the edge of the loaded area the guard saw phantom
+air where the MESH actually shows a solid beveled slope, passed the "all eight
+solid" test, and planted grass on the non-flat isosurface (grass sticking out
+of / floating over the terrain). Fix: the guard now reads through
+`VoxelSolidForMesh` (the mesher's own query), so the guard and the visible mesh
+always agree. The position re-validation (below = grass block, self = air)
+stays on raw `GetVoxel` (it must see the real material, and the own chunk is
+data-ready there). The old CHUNK-EDGE GUARD (skip border positions) was REMOVED:
+it was redundant — the own-chunk re-validation already covers it — and with
+the solid query it would only have suppressed valid grass at the edge. Note:
+grass is NOT persisted in the save (WorldSave has no deco section), so floating
+grass at a chunk edge despawns with the chunk on unload; a neighbour that later
+finishes with a lower surface leaves the grass floating until then (matches the
+open-edge mesh; acceptable).
+
+## CURRENT STATE (Nov 2026) — foliage overhang across chunk borders
+
+**FIXED — overhang queue leak on faulting generations** (uncommitted, on top of
+`bc1feca`): the canopy/hive border-overhang queues (`TerrainGenerator.
+_pendingOverhangs` / `_pendingHiveOverhangs`, both `static`) were only ever
+drained by `OnGenerationComplete` — a chunk whose generation FAULTS
+(`OnGenerationFaulted`: e.g. OOM inside a stage) never reaches that drain, so its
+queued overhangs linger. A chunk flapping at the load-ring edge
+(fault → re-generate → fault) re-accumulates a fresh batch every cycle while the
+old one is still queued → unbounded growth (memory leak + a bloated authoritative
+`ReDrainOverhangsUntilStable` that makes the main thread stall during the
+generation-complete burst — the stall slows neighbour generation, which is exactly
+the timing window where overhangs get dropped). Fix: `OnGenerationFaulted` now
+calls new `TerrainGenerator.DiscardPendingOverhangs(coord)` /
+`DiscardPendingHiveOverhangs(coord)` (drop-without-apply, under the per-chunk
+drain lock). Nothing is lost: the neighbours that queued for the faulting chunk
+are still generating, so their foliage stages re-queue for the fresh run (the
+re-generation's own `DrainOverhangsForOwnStage` + `OnGenerationComplete` drain
+catches them).
+
+The overhang pipeline itself (audited, looks race-tight): gen threads write
+border voxels via `MakePut` (write if `DataReady`, else queue); the chunk's own
+foliage stage runs a non-destructive drain-and-restore (`DrainOverhangsForOwnStage`);
+the authoritative destructive drain (`ReDrainOverhangsUntilStable`, re-drain until
+a pass applies nothing, under the per-chunk lock) runs on the MAIN thread in
+`OnGenerationComplete` — and that is the ONLY place a queue entry is removed (plus
+the new fault path). `MakePut` writes are air-only (canopy), so a re-applied voxel
+into now-solid terrain is a no-op. Hives have a parallel queue drained by
+`ReDrainHiveOverhangs` (single destructive pass; appender is main-thread only).
+
+**FIXED — direct-write race on the finalize window** (uncommitted, second half-tree
+fix): the `DataReady` flip in `OnGenerationComplete` used to happen BEFORE
+`ReDrainOverhangsUntilStable`. A concurrent neighbour's gen-thread `MakePut` that
+saw `DataReady=true` wrote DIRECTLY into the chunk (the old direct write took no
+lock), and if it landed in a cell the drain's final pass had just read as solid
+(and skipped), the voxel was silently lost — the half tree. Fix (both parts):
+1. `MakePut`'s direct write now goes through
+   `TerrainGenerator.ApplyOverhangDirect`, which takes the per-chunk
+   `OverhangDrainLock` (now public) around the air-only Set. The write is
+   idempotent (air-only), so the lock is pure ORDERING: a direct write is either
+   fully before the finalize window (then it queued, since DataReady was still
+   false) or fully after it.
+2. `OnGenerationComplete` now holds that lock for the WHOLE finalize window:
+   re-drain-until-stable → `DataReady = true` flip → hive drain → a FINAL
+   re-drain pass (catches a MakePut that read DataReady=false just before the
+   flip but queued after the first drain's last read — the queue branch takes no
+   lock, so the sliver is real). `ApplyLoadedChunk` runs BEFORE the window (it
+   goes through SetVoxel and can re-stamp NeedsMesh; keep the lock short).
+   The drain loop was split into `ReDrainOverhangsUntilStable` (public, takes
+   the lock) + `ReDrainOverhangsUntilStableUnlocked` (caller holds it).
+Residual (acceptable, not the reported bug): `Rebuild()` snapshots neighbours at
+build START — an overhang written into a NEIGHBOUR after that snapshot but before
+the build reads it leaves the seam mesh stale until the next rebuild (the data is
+correct; `MarkNeighboursForRebuild` at finalize usually re-stamps the neighbour
+before its build launches, and any missed re-stamp is self-healing on the next
+rebuild). Also still worth checking at runtime: whether
+`[VoxelWorld] Terrain generation failed for chunk ...` errors actually fire (the
+fault-leak fix above only matters when faults occur — OOM on 256³ chunks).
+
 ## CURRENT STATE (Nov 2026) — torch lighting
 Branch `feat/fast-voxel-edits`. Committed + pushed:
 - `a46c53d` — torch lights its own chunk: full-field `RecomputeLightAtSource`
